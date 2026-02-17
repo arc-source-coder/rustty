@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/app",
+    "crates/ghostty-vt",
+    "crates/pty",
+    "crates/renderer",
+    "crates/terminal",
+    "crates/ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+gpui = { git = "file:///D:/projects/rust/ghostty-gpui/vendor/zed/" }
+gpui_platform = { git = "file:///D:/projects/rust/ghostty-gpui/vendor/zed/" }

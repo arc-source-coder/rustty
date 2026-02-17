@@ -1,0 +1,19 @@
+# Architecture Docs Index
+
+This directory contains implementation-facing architecture documentation for the Windows GPUI + Ghostty terminal project.
+
+- `01-system-overview.md`: system boundaries, crates, ownership, data flow, Ghostty integration strategy
+- `02-data-model.md`: core Rust models, messages, and state ownership
+- `03-rendering.md`: rendering pipeline, dirty updates, caching strategy
+- `04-pty-threading.md`: PTY abstraction, threading, backpressure, lifecycle
+- `05-roadmap.md`: staged delivery plan, acceptance criteria, alternatives
+- `06-ghostty-shim.md`: Ghostty API landscape, Zig shim design, RenderState, key encoding, mode flags
+- `07-future-design.md`: split panes, search, DnD, images, config reload, multi-window — how Ghostty does each, what we've prepared now
+- `08-ghostty-alignment-decisions.md`: persisted design decisions from Ghostty source verification (viewport, coordinates, dirty model, FFI lifetime, termio strategy)
+
+Design goals across all docs:
+
+- simplest design that remains performant under real terminal workloads
+- explicit ownership boundaries
+- minimal hidden coupling
+- easy onboarding and maintenance

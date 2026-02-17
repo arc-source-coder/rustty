@@ -1,0 +1,4 @@
+[package]
+name = "ghostty_vt"
+version.workspace = true
+edition.workspace = true
