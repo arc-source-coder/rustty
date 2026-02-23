@@ -12,7 +12,7 @@ Ghostty exposes three integration surfaces. Only one is suitable for us.
 
 ### `vt.h` (libghostty-vt)
 
-Location: `vendor/ghostty/include/ghostty/vt.h`
+Location: `crates/ghostty-vt/zig/ghostty/include/ghostty/vt.h`
 
 Provides parsers only:
 
@@ -29,7 +29,7 @@ We **do** use the key encoding from this API — it is stable and well-tested.
 
 ### `ghostty.h` (Embedding API)
 
-Location: `vendor/ghostty/include/ghostty.h`
+Location: `crates/ghostty-vt/zig/ghostty/include/ghostty.h`
 
 Full app runtime designed for macOS embedding:
 
@@ -45,7 +45,7 @@ using internals directly.
 
 ### Internal Zig Modules (What We Use)
 
-Location: `vendor/ghostty/src/terminal/`
+Location: `crates/ghostty-vt/zig/ghostty/src/terminal/`
 
 Provides the full terminal emulator as composable Zig modules:
 
@@ -64,7 +64,7 @@ isolates this from the rest of the codebase.
 
 ## RenderState (New in Ghostty 1.3.x)
 
-Location: `vendor/ghostty/src/terminal/render.zig`
+Location: `crates/ghostty-vt/zig/ghostty/src/terminal/render.zig`
 
 This is the single biggest advantage over the gpui-ghostty reference.
 `RenderState` was added specifically for extracting renderable data from
@@ -165,7 +165,7 @@ then sees selection ranges in the row data after the next `update()`.
 
 ## Key Encoding and Kitty Keyboard Protocol
 
-Location: `vendor/ghostty/src/input/key_encode.zig`
+Location: `crates/ghostty-vt/zig/ghostty/src/input/key_encode.zig`
 
 ### The Problem
 
@@ -448,7 +448,7 @@ The `renderer` crate:
 | Area           | gpui-ghostty (1.2.x)                           | Our approach (1.3.x)                                   |
 | -------------- | ---------------------------------------------- | ------------------------------------------------------ |
 | Render data    | Manual pin iteration + byte serialization      | `RenderState.update()` — Ghostty does the work         |
-| Handler        | Custom 21-method Handler                       | Thin wrapper delegating to ReadonlyHandler (see below)  |
+| Handler        | Custom 21-method Handler                       | Thin wrapper delegating to ReadonlyHandler (see below) |
 | Key encoding   | Named keys only, ignores terminal mode         | `Options.fromTerminal()` — full protocol-aware         |
 | Mode flags     | Byte scanning PTY output                       | Direct read from `terminal.modes` / `terminal.flags`   |
 | Selection      | Not handled in shim                            | Set on `Screen.selection`, RenderState picks it up     |
@@ -464,7 +464,7 @@ for future reference when deciding on our handler strategy.
 
 ### ReadonlyHandler
 
-Location: `vendor/ghostty/src/terminal/stream_readonly.zig`
+Location: `crates/ghostty-vt/zig/ghostty/src/terminal/stream_readonly.zig`
 
 `ReadonlyHandler` is a `Stream` handler that processes **all state-mutating
 actions** against a `Terminal` instance. It handles ~60+ action types:
@@ -495,7 +495,7 @@ Intended consumers: replay tooling, CI log viewers, PaaS builder output.
 
 ### StreamHandler (What Ghostty's Apps Actually Use)
 
-Location: `vendor/ghostty/src/termio/stream_handler.zig`
+Location: `crates/ghostty-vt/zig/ghostty/src/termio/stream_handler.zig`
 
 `StreamHandler` is the full handler used by Ghostty's macOS and GTK apps.
 It handles everything `ReadonlyHandler` does, plus:

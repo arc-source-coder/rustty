@@ -25,7 +25,7 @@ Key references:
 - `docs/architecture/06-ghostty-shim.md` (full shim design, ABI surface, handler architecture)
 - `docs/architecture/01-system-overview.md` § Ghostty Integration Strategy
 - `opensrc/repos/Xuanwo/gpui-ghostty` (reference shim for 1.2.x — adapt, don't copy)
-- `vendor/ghostty/src/terminal/` (internal APIs we import)
+- `crates/ghostty-vt/zig/ghostty/src/terminal/` (internal APIs we import)
 
 ### Plan 02: Shim Render State + Query Exports (`shim-002`)
 
@@ -42,7 +42,7 @@ Key references:
 
 - `docs/architecture/06-ghostty-shim.md` § RenderState, § Shim C ABI Surface
 - `docs/architecture/03-rendering.md` § Dirty and Cache Model
-- `vendor/ghostty/src/terminal/render.zig` (RenderState implementation)
+- `crates/ghostty-vt/zig/ghostty/src/terminal/render.zig` (RenderState implementation)
 
 ### Plan 03: FFI Bindings + Safe Rust Wrapper (`ffi-001`)
 

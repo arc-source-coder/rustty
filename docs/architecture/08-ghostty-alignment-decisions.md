@@ -1,7 +1,7 @@
 # Ghostty Alignment Decisions (2026-02-17)
 
 This document captures architecture decisions made after cross-checking
-Ghostty internals in `vendor/ghostty`.
+Ghostty internals in `crates/ghostty-vt/zig/ghostty`.
 
 ## Decision 1: Viewport Source of Truth
 
