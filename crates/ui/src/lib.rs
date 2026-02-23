@@ -1,4 +1,2 @@
-fn stub() {
-    // Simple scaffold
-    println!("Hello World");
-}
+pub mod components;
+pub mod title_bar;

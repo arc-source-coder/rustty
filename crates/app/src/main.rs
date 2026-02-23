@@ -1,57 +1,60 @@
 use gpui::{
-    App, Bounds, Context, SharedString, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-    rgb, size,
+    App, Bounds, Context, Entity, Render, Window, WindowBounds, WindowOptions, div, prelude::*, px,
+    size,
 };
 use gpui_platform::application;
 
-struct HelloWorld {
-    text: SharedString,
+use ui::{components::theme::Theme, title_bar::TitleBar};
+
+struct AppView {
+    titlebar: Entity<TitleBar>,
 }
 
-impl Render for HelloWorld {
+impl Render for AppView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
-            .gap_3()
-            .bg(rgb(0x575522))
-            .size(px(500.0))
-            .justify_center()
-            .items_center()
-            .shadow_lg()
-            .border_1()
-            .border_color(rgb(0x0000ff))
-            .text_xl()
-            .text_color(rgb(0xffffff))
-            .child(format!("Hello, {}!", &self.text))
+            .size_full()
+            .bg(gpui::black())
+            .child(self.titlebar.clone().into_any_element())
             .child(
                 div()
-                    .flex()
-                    .gap_2()
-                    .child(div().size_8().bg(gpui::red()))
-                    .child(div().size_8().bg(gpui::green()))
-                    .child(div().size_8().bg(gpui::blue()))
-                    .child(div().size_8().bg(gpui::yellow()))
-                    .child(div().size_8().bg(gpui::black()))
-                    .child(div().size_8().bg(gpui::white())),
+                    .flex_1()
+                    .bg(gpui::black())
+                    .text_color(gpui::white())
+                    .text_lg()
+                    .child("Terminal content coming soon..."),
             )
     }
 }
 
 fn main() {
     application().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(500.), px(500.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_, cx| {
-                cx.new(|_| HelloWorld {
-                    text: "World".into(),
-                })
-            },
-        )
+        let display_bounds = cx
+            .primary_display()
+            .map(|display| display.bounds())
+            .unwrap_or_else(|| Bounds::centered(None, size(px(1024.), px(720.)), cx));
+
+        let target_size = size(
+            display_bounds.size.width * 0.6,
+            display_bounds.size.height * 0.7,
+        );
+        let window_bounds =
+            WindowBounds::Windowed(Bounds::centered_at(display_bounds.center(), target_size));
+
+        let window_options = WindowOptions {
+            titlebar: Some(TitleBar::title_bar_options()),
+            window_bounds: Some(window_bounds),
+            ..Default::default()
+        };
+
+        cx.open_window(window_options, |window, cx| {
+            Theme::sync_system_appearance(window, cx);
+            cx.new(|cx| AppView {
+                titlebar: cx.new(|cx| TitleBar::new(cx)),
+            })
+        })
         .unwrap();
     });
 }
