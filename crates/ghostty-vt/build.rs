@@ -16,6 +16,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("zig/lib.zig").display()
     );
+    emit_rerun_for_zig_sources(&manifest_dir.join("zig"));
 
     let ghostty_dir = manifest_dir.join("zig/ghostty");
     if !ghostty_dir.exists() {
@@ -47,4 +48,26 @@ fn main() {
         prefix.join("lib").display()
     );
     println!("cargo:rustc-link-lib=static=ghostty_shim");
+}
+
+fn emit_rerun_for_zig_sources(root: &PathBuf) {
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            if path.extension().is_some_and(|ext| ext == "zig") {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
 }

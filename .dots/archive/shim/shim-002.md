@@ -1,8 +1,9 @@
 ---
 title: Shim render state + query exports (RenderState, dirty tracking, mode flags, scroll, selection)
-status: open
+status: closed
 priority: 1
 created-at: "2026-02-23T03:13:03Z"
+closed-at: "2026-02-24T11:05:52Z"
 blockers:
   - shim-001
 ---
