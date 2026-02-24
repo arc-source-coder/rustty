@@ -1,5 +1,9 @@
 # PTY and Threading Design
 
+> **Update:** `portable-pty` has been replaced with a custom PTY backend
+> ported from Alacritty (ConPTY on Windows, openpty on Unix). See
+> [the migration plan](../plans/2026-02-24-pty-001-alacritty-backend.md).
+
 ## Objective
 
 Keep IO robust and simple while protecting UI responsiveness.

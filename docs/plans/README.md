@@ -5,6 +5,8 @@ approach, API surfaces, key decisions, and acceptance criteria for a specific
 area. Plans are ordered by dependency — earlier plans must be completed (or at
 least designed) before later ones can begin.
 
+**Note:** Many of these plans don't exist yet
+
 Track progress with `dot list` / `dot show <id>`.
 
 ---
@@ -65,15 +67,22 @@ Key references:
 
 Scope: `crates/pty`
 
-Wrap `portable-pty` with typed `PtyCommand`/`PtyEvent` enums. Bounded channels
-(64 capacity). Spawn PowerShell, read/write/resize, process lifecycle. Shutdown
-ordering: signal stop → unblock read → drain → emit Exited → join threads.
-Resize coalescing (last-wins). Integration tests for spawn/read/write/resize/exit.
+Detailed implementation plan:
+
+- `docs/plans/2026-02-24-pty-001-alacritty-backend.md`
+
+Replace `portable-pty` with alacritty_terminal's PTY backend (ConPTY on Windows,
+openpty on Unix), `cfg`-gated for cross-platform. Wrap in `PtyHandle` with typed
+`PtyCommand`/`PtyEvent` channel protocol. Poll-driven worker thread. Bounded
+channels (64 capacity). Shutdown ordering with ConPTY deadlock avoidance.
+Integration tests for spawn/read/write/resize/exit.
 
 Key references:
 
-- `docs/architecture/04-pty-threading.md` (full PTY design)
+- `docs/plans/2026-02-24-pty-001-alacritty-backend.md` (decision + plan)
+- `docs/architecture/04-pty-threading.md` (threading design)
 - `docs/architecture/02-data-model.md` § PTY Channel Bounds, § PTY Model
+- `opensrc/packages/alacritty/alacritty/alacritty_terminal/src/tty/` (source)
 
 ---
 

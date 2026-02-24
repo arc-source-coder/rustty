@@ -1,5 +1,9 @@
 # System Overview
 
+> **Update:** `portable-pty` has been replaced with a custom PTY backend
+> ported from Alacritty (ConPTY on Windows, openpty on Unix). See
+> [the migration plan](../plans/2026-02-24-pty-001-alacritty-backend.md).
+
 ## Intent
 
 Build a Windows-first terminal emulator with:
