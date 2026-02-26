@@ -14,5 +14,5 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-gpui = { git = "file:///D:/projects/rust/ghostty-gpui/vendor/zed/" }
-gpui_platform = { git = "file:///D:/projects/rust/ghostty-gpui/vendor/zed/" }
+gpui = { git = "file:///D:/projects/rust/rustty/vendor/zed/" }
+gpui_platform = { git = "file:///D:/projects/rust/rustty/vendor/zed/" }

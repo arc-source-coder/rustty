@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
 
     const terminal_options: TerminalBuildOptions = .{
         .artifact = .lib,
-        .simd = false,
+        .simd = true,
         .oniguruma = false,
         .c_abi = false,
         .slow_runtime_safety = false,
@@ -65,12 +65,21 @@ pub fn build(b: *std.Build) void {
 
     const lib = b.addLibrary(.{
         .name = "ghostty_shim",
+        .linkage = .dynamic,
         .root_module = b.createModule(.{
             .root_source_file = b.path("lib.zig"),
             .target = target,
             .optimize = optimize,
+            // SIMD requires libc and libcpp
+            .link_libc = terminal_options.simd,
+            .link_libcpp = terminal_options.simd,
         }),
     });
+
+    // Add build_options (simd code expects this module name)
+    const build_opts = b.addOptions();
+    build_opts.addOption(bool, "simd", terminal_options.simd);
+    lib.root_module.addOptions("build_options", build_opts);
 
     terminal_options.add(b, lib.root_module);
     lib.bundle_compiler_rt = true;
@@ -95,6 +104,55 @@ pub fn build(b: *std.Build) void {
         .root_source_file = symbols_output,
     });
 
+    // --- SIMD dependencies ---
+    if (terminal_options.simd) {
+        // Add include path for simd headers
+        lib.root_module.addIncludePath(b.path("ghostty/src"));
+
+        // Disable AVX512 to work around Zig 0.13 bug:
+        // https://github.com/ziglang/zig/issues/20414
+        const HWY_AVX10_2: c_int = 1 << 3;
+        const HWY_AVX3_SPR: c_int = 1 << 4;
+        const HWY_AVX3_ZEN4: c_int = 1 << 6;
+        const HWY_AVX3_DL: c_int = 1 << 7;
+        const HWY_AVX3: c_int = 1 << 8;
+        const HWY_DISABLED_TARGETS: c_int = HWY_AVX10_2 | HWY_AVX3_SPR | HWY_AVX3_ZEN4 | HWY_AVX3_DL | HWY_AVX3;
+
+        // Add SIMD C++ source files with the disabled-targets flag
+        lib.root_module.addCSourceFiles(.{
+            .files = &.{
+                "ghostty/src/simd/base64.cpp",
+                "ghostty/src/simd/codepoint_width.cpp",
+                "ghostty/src/simd/index_of.cpp",
+                "ghostty/src/simd/vt.cpp",
+            },
+            .flags = if (target.result.cpu.arch == .x86_64) &.{
+                b.fmt("-DHWY_DISABLED_TARGETS={}", .{HWY_DISABLED_TARGETS}),
+            } else &.{},
+        });
+
+        if (b.lazyDependency("simdutf", .{
+            .target = target,
+            .optimize = optimize,
+        })) |dep| {
+            lib.root_module.linkLibrary(dep.artifact("simdutf"));
+        }
+
+        if (b.lazyDependency("highway", .{
+            .target = target,
+            .optimize = optimize,
+        })) |dep| {
+            lib.root_module.linkLibrary(dep.artifact("highway"));
+        }
+
+        if (b.lazyDependency("utfcpp", .{
+            .target = target,
+            .optimize = optimize,
+        })) |dep| {
+            lib.root_module.linkLibrary(dep.artifact("utfcpp"));
+        }
+    }
+
     b.installArtifact(lib);
 
     // --- Tests ---
@@ -105,6 +163,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("lib.zig"),
             .target = target,
             .optimize = optimize,
+            // SIMD requires libc and libcpp (same as main library)
+            .link_libc = terminal_options.simd,
+            .link_libcpp = terminal_options.simd,
         }),
     });
     test_step.dependOn(&b.addRunArtifact(lib_tests).step);
