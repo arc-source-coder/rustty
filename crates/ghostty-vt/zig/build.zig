@@ -109,10 +109,6 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(lib_tests).step);
 
-    const fmt_check = b.addFmt(.{ .paths = &.{
-        "lib.zig", "handle.zig", "modes.zig",
-        "render.zig", "scroll.zig",
-        "build.zig", "build.zig.zon"
-    } });
+    const fmt_check = b.addFmt(.{ .paths = &.{ "lib.zig", "handle.zig", "modes.zig", "render.zig", "scroll.zig", "build.zig", "build.zig.zon" } });
     test_step.dependOn(&fmt_check.step);
 }

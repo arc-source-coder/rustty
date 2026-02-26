@@ -15,7 +15,7 @@ zigdoc ghostty-vt.Terminal
 zigdoc vaxis.Window
 ```
 
-Once done with zig work, run `ziglint crates/ghostty-vt/zig/src/` and `zig fmt crates/ghostty-vt/zig/src`;
+Once done with zig work, run `ziglint crates/ghostty-vt/zig/*.zig` and `zig fmt crates/ghostty-vt/zig/*.zig`;
 
 ## Common Zig Patterns
 
