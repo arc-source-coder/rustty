@@ -1,7 +1,8 @@
 use core::ffi::c_void;
 
-pub type BellCallback = unsafe extern "C" fn(userdata: *mut c_void);
-pub type TitleCallback = unsafe extern "C" fn(userdata: *mut c_void, ptr: *const u8, len: usize);
+pub(crate) type BellCallback = unsafe extern "C" fn(userdata: *mut c_void);
+pub(crate) type TitleCallback =
+    unsafe extern "C" fn(userdata: *mut c_void, ptr: *const u8, len: usize);
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -65,3 +66,66 @@ pub struct FlatCell {
 // Verify ABI matches Zig side
 const _: () = assert!(std::mem::size_of::<FlatCell>() == 28);
 const _: () = assert!(std::mem::align_of::<FlatCell>() == 4);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirtyState {
+    Clean,
+    Partial,
+    Full,
+}
+
+impl DirtyState {
+    pub(crate) fn from_raw(value: u8) -> Self {
+        match value {
+            0 => DirtyState::Clean,
+            1 => DirtyState::Partial,
+            _ => DirtyState::Full,
+        }
+    }
+
+    pub fn is_dirty(self) -> bool {
+        self != DirtyState::Clean
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseMode {
+    None,
+    X10,
+    Normal,
+    Button,
+    Any,
+}
+
+impl MouseMode {
+    pub(crate) fn from_raw(value: u8) -> Self {
+        match value {
+            0 => MouseMode::None,
+            1 => MouseMode::X10,
+            2 => MouseMode::Normal,
+            3 => MouseMode::Button,
+            _ => MouseMode::Any,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseFormat {
+    X10,
+    Utf8,
+    Sgr,
+    Urxvt,
+    SgrPixels,
+}
+
+impl MouseFormat {
+    pub(crate) fn from_raw(value: u8) -> Self {
+        match value {
+            0 => MouseFormat::X10,
+            1 => MouseFormat::Utf8,
+            2 => MouseFormat::Sgr,
+            3 => MouseFormat::Urxvt,
+            _ => MouseFormat::SgrPixels,
+        }
+    }
+}
