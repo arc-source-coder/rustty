@@ -1,4 +1,5 @@
 use crate::*;
+use core::option::Option::None;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 #[test]
@@ -36,7 +37,13 @@ fn test_bell_callback() {
     BELL_COUNT.store(0, Ordering::SeqCst);
     let ptr = unsafe { ghostty_vt_terminal_new(80, 24) };
     unsafe {
-        ghostty_vt_terminal_set_callbacks(ptr, std::ptr::null_mut(), Some(bell_handler), None);
+        ghostty_vt_terminal_set_callbacks(
+            ptr,
+            std::ptr::null_mut(),
+            Some(bell_handler),
+            None,
+            None,
+        );
     }
     // BEL character (0x07)
     let bel = [0x07u8];

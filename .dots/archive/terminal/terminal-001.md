@@ -1,8 +1,9 @@
 ---
 title: Terminal session core (TerminalSession entity, drain loop, side effects, config models)
-status: open
+status: closed
 priority: 1
 created-at: "2026-02-23T03:13:48Z"
+closed-at: "2026-02-27T07:51:23Z"
 blockers:
   - ffi-001
   - pty-001

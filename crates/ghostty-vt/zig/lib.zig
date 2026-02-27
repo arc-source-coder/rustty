@@ -13,6 +13,7 @@ comptime {
 
 const BellCallback = handle_mod.BellCallback;
 const TitleCallback = handle_mod.TitleCallback;
+const ResponseCallback = handle_mod.ResponseCallback;
 const TerminalHandle = handle_mod.TerminalHandle;
 
 export fn ghostty_vt_terminal_new(cols: u16, rows: u16) callconv(.c) ?*anyopaque {
@@ -32,6 +33,7 @@ export fn ghostty_vt_terminal_set_callbacks(
     userdata: ?*anyopaque,
     bell: ?BellCallback,
     title: ?TitleCallback,
+    response: ?ResponseCallback,
 ) callconv(.c) void {
     if (ptr == null) return;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
@@ -39,6 +41,8 @@ export fn ghostty_vt_terminal_set_callbacks(
         .userdata = userdata,
         .bell = bell,
         .title = title,
+        .response = response,
+        .handle = handle,
     };
 }
 
@@ -62,4 +66,17 @@ export fn ghostty_vt_terminal_resize(
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     handle.terminal_inst.resize(handle.alloc, cols, rows) catch return 2;
     return 0;
+}
+
+/// Set cell pixel dimensions for size reports (CSI 14t, CSI 16t).
+/// Called by the renderer whenever font metrics change.
+export fn ghostty_vt_terminal_set_cell_size(
+    ptr: ?*anyopaque,
+    width_px: u16,
+    height_px: u16,
+) callconv(.c) void {
+    if (ptr == null) return;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
+    handle.cell_width_px = width_px;
+    handle.cell_height_px = height_px;
 }

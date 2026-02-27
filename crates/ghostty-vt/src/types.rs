@@ -3,6 +3,8 @@ use core::ffi::c_void;
 pub(crate) type BellCallback = unsafe extern "C" fn(userdata: *mut c_void);
 pub(crate) type TitleCallback =
     unsafe extern "C" fn(userdata: *mut c_void, ptr: *const u8, len: usize);
+pub(crate) type ResponseCallback =
+    unsafe extern "C" fn(userdata: *mut c_void, ptr: *const u8, len: usize);
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]

@@ -1,5 +1,5 @@
+use async_channel::{Receiver, Sender, TryRecvError};
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -27,14 +27,14 @@ const PTY_CHILD_EVENT_TOKEN: usize = 1;
 
 pub struct PtyHandle {
     pub event_rx: Receiver<PtyEvent>,
-    pub command_tx: SyncSender<PtyCommand>,
+    pub command_tx: Sender<PtyCommand>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl PtyHandle {
     pub fn spawn(options: Options, window_size: WindowSize) -> std::io::Result<Self> {
-        let (event_tx, event_rx) = mpsc::sync_channel(PTY_EVENT_CHANNEL_CAPACITY);
-        let (command_tx, command_rx) = mpsc::sync_channel(PTY_COMMAND_CHANNEL_CAPACITY);
+        let (event_tx, event_rx) = async_channel::bounded(PTY_EVENT_CHANNEL_CAPACITY);
+        let (command_tx, command_rx) = async_channel::bounded(PTY_COMMAND_CHANNEL_CAPACITY);
 
         // Spawn the platform PTY before moving to worker thread
         // so we can return spawn errors synchronously.
@@ -57,6 +57,9 @@ impl PtyHandle {
 
 impl Drop for PtyHandle {
     fn drop(&mut self) {
+        // Close the event receiver first — this unblocks the worker
+        // thread if it's stuck in send_blocking() because nobody is
+        // draining the channel. Without this, join() below can deadlock.
         let _ = self.command_tx.try_send(PtyCommand::Close);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -64,11 +67,11 @@ impl Drop for PtyHandle {
     }
 }
 
-fn worker_loop(mut pty: Pty, event_tx: SyncSender<PtyEvent>, command_rx: Receiver<PtyCommand>) {
+fn worker_loop(mut pty: Pty, event_tx: Sender<PtyEvent>, command_rx: Receiver<PtyCommand>) {
     let poller = match Poller::new() {
         Ok(p) => std::sync::Arc::new(p),
         Err(e) => {
-            event_tx.send(PtyEvent::Error(e)).ok();
+            event_tx.send_blocking(PtyEvent::Error(e)).ok();
             return;
         }
     };
@@ -87,7 +90,7 @@ fn worker_loop(mut pty: Pty, event_tx: SyncSender<PtyEvent>, command_rx: Receive
     unsafe {
         let interest = Event::all(PTY_READ_WRITE_TOKEN);
         if let Err(e) = poller.add_with_mode(pty.reader(), interest, PollMode::Level) {
-            event_tx.send(PtyEvent::Error(e)).ok();
+            event_tx.send_blocking(PtyEvent::Error(e)).ok();
             return;
         }
     }
@@ -115,7 +118,7 @@ fn worker_loop(mut pty: Pty, event_tx: SyncSender<PtyEvent>, command_rx: Receive
             if e.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            event_tx.send(PtyEvent::Error(e)).ok();
+            event_tx.send_blocking(PtyEvent::Error(e)).ok();
             break;
         }
 
@@ -161,7 +164,7 @@ fn worker_loop(mut pty: Pty, event_tx: SyncSender<PtyEvent>, command_rx: Receive
                             Ok(n) => n,
                             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
                             Err(e) => {
-                                event_tx.send(PtyEvent::Error(e)).ok();
+                                event_tx.send_blocking(PtyEvent::Error(e)).ok();
                                 return;
                             }
                         }
@@ -177,7 +180,7 @@ fn worker_loop(mut pty: Pty, event_tx: SyncSender<PtyEvent>, command_rx: Receive
                     // During shutdown, don't block on send.
                     event_tx.try_send(PtyEvent::Output(data)).ok();
                 } else {
-                    if event_tx.send(PtyEvent::Output(data)).is_err() {
+                    if event_tx.send_blocking(PtyEvent::Output(data)).is_err() {
                         // Receiver dropped — shut down.
                         return;
                     }
@@ -231,7 +234,7 @@ fn worker_loop(mut pty: Pty, event_tx: SyncSender<PtyEvent>, command_rx: Receive
                     .ok();
             } else {
                 event_tx
-                    .send(PtyEvent::Exited(match child_event {
+                    .send_blocking(PtyEvent::Exited(match child_event {
                         crate::ChildEvent::Exited(s) => s,
                     }))
                     .ok();
@@ -264,7 +267,7 @@ fn worker_loop(mut pty: Pty, event_tx: SyncSender<PtyEvent>, command_rx: Receive
                     closing = true;
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
+                Err(TryRecvError::Closed) => {
                     if !closing {
                         #[cfg(windows)]
                         {
@@ -344,6 +347,8 @@ fn worker_loop(mut pty: Pty, event_tx: SyncSender<PtyEvent>, command_rx: Receive
 
 #[cfg(test)]
 mod tests {
+    use async_channel::TryRecvError;
+    use core::option::Option::Some;
     use std::time::Duration;
 
     use crate::{Options, PtyCommand, PtyEvent, PtyHandle, Shell, WindowSize};
@@ -370,14 +375,27 @@ mod tests {
         }
     }
 
+    fn recv_timeout(rx: &async_channel::Receiver<PtyEvent>, timeout: Duration) -> Option<PtyEvent> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match rx.try_recv() {
+                Ok(event) => return Some(event),
+                Err(TryRecvError::Empty) => {
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(TryRecvError::Closed) => return None,
+            }
+        }
+    }
+
     #[test]
     fn spawn_receives_output() {
         let handle = PtyHandle::spawn(test_options(), test_window_size()).unwrap();
 
-        let event = handle
-            .event_rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap();
+        let event = recv_timeout(&handle.event_rx, Duration::from_secs(5)).unwrap();
         assert!(matches!(
             event,
             PtyEvent::Output(ref data) if !data.is_empty()
@@ -399,19 +417,22 @@ mod tests {
         #[cfg(unix)]
         let cmd = b"echo hello\n".to_vec();
 
-        handle.command_tx.send(PtyCommand::Write(cmd)).unwrap();
+        handle
+            .command_tx
+            .send_blocking(PtyCommand::Write(cmd))
+            .unwrap();
 
         let mut output = String::new();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            match handle.event_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(PtyEvent::Output(data)) => {
+            match recv_timeout(&handle.event_rx, Duration::from_millis(100)) {
+                Some(PtyEvent::Output(data)) => {
                     output.push_str(&String::from_utf8_lossy(&data));
                     if output.contains("hello") {
                         return; // pass
                     }
                 }
-                Ok(PtyEvent::Exited(_)) => break,
+                Some(PtyEvent::Exited(_)) => break,
                 _ => continue,
             }
         }
@@ -424,7 +445,7 @@ mod tests {
 
         handle
             .command_tx
-            .send(PtyCommand::Resize(WindowSize {
+            .send_blocking(PtyCommand::Resize(WindowSize {
                 num_lines: 40,
                 num_cols: 120,
                 cell_width: 8,
@@ -434,21 +455,21 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(100));
 
-        handle.command_tx.send(PtyCommand::Close).unwrap();
+        handle.command_tx.send_blocking(PtyCommand::Close).unwrap();
     }
 
     #[test]
     fn close_emits_exited() {
         let handle = PtyHandle::spawn(test_options(), test_window_size()).unwrap();
 
-        handle.command_tx.send(PtyCommand::Close).unwrap();
+        handle.command_tx.send_blocking(PtyCommand::Close).unwrap();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            match handle.event_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(PtyEvent::Exited(_)) => return,
-                Ok(_) => continue,
-                Err(_) => continue,
+            match recv_timeout(&handle.event_rx, Duration::from_millis(100)) {
+                Some(PtyEvent::Exited(_)) => return,
+                Some(_) => continue,
+                _ => continue,
             }
         }
         panic!("did not receive Exited event");

@@ -2,3 +2,9 @@
 name = "terminal"
 version.workspace = true
 edition.workspace = true
+
+[dependencies]
+async-channel.workspace = true
+gpui.workspace = true
+ghostty_vt = { path = "../ghostty-vt" }
+pty = { path = "../pty" }

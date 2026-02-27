@@ -30,3 +30,10 @@ export fn ghostty_vt_terminal_get_kitty_keyboard_flags(ptr: ?*anyopaque) callcon
     const casted_flags: u5 = @bitCast(flags);
     return @as(u8, casted_flags);
 }
+
+/// Returns 1 if synchronized output mode (DEC 2026) is active, 0 otherwise
+export fn ghostty_vt_terminal_is_synchronized_output(ptr: ?*anyopaque) callconv(.c) u8 {
+    if (ptr == null) return 0;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
+    return @intFromBool(handle.terminal_inst.modes.get(.synchronized_output));
+}

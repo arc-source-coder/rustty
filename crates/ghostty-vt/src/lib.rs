@@ -2,7 +2,7 @@ mod terminal;
 mod types;
 
 use core::ffi::{c_int, c_void};
-pub(crate) use types::{BellCallback, TitleCallback};
+pub(crate) use types::{BellCallback, ResponseCallback, TitleCallback};
 
 pub use terminal::{RenderFrame, SelectionText, Terminal, VtEvent};
 pub use types::{ColorRGB, ColorState, CursorState, DirtyState, FlatCell, MouseFormat, MouseMode};
@@ -16,6 +16,7 @@ unsafe extern "C" {
         userdata: *mut c_void,
         bell: Option<BellCallback>,
         title: Option<TitleCallback>,
+        response: Option<ResponseCallback>,
     );
 
     pub(crate) fn ghostty_vt_terminal_feed(
@@ -26,10 +27,17 @@ unsafe extern "C" {
 
     pub(crate) fn ghostty_vt_terminal_resize(terminal: *mut c_void, cols: u16, rows: u16) -> c_int;
 
+    pub(crate) fn ghostty_vt_terminal_set_cell_size(
+        terminal: *mut c_void,
+        width_px: u16,
+        height_px: u16,
+    );
+
     pub(crate) fn ghostty_vt_terminal_get_mouse_mode(terminal: *mut c_void) -> u8;
     pub(crate) fn ghostty_vt_terminal_get_mouse_format(terminal: *mut c_void) -> u8;
     pub(crate) fn ghostty_vt_terminal_is_bracketed_paste(terminal: *mut c_void) -> u8;
     pub(crate) fn ghostty_vt_terminal_get_kitty_keyboard_flags(terminal: *mut c_void) -> u8;
+    pub(crate) fn ghostty_vt_terminal_is_synchronized_output(terminal: *mut c_void) -> u8;
 
     pub(crate) fn ghostty_vt_terminal_scroll_viewport(terminal: *mut c_void, delta: i32);
     pub(crate) fn ghostty_vt_terminal_scroll_viewport_top(terminal: *mut c_void);
@@ -114,6 +122,7 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     mod core;
+    mod device_response;
     mod input;
     mod modes;
     mod render;

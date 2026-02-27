@@ -1,8 +1,9 @@
 ---
 title: Device responses (DA, DSR, DECRPM, kitty query, size report, ENQ)
-status: open
+status: closed
 priority: 2
 created-at: "2026-02-23T03:14:39Z"
+closed-at: "2026-02-27T07:51:25Z"
 blockers:
   - terminal-001
 ---

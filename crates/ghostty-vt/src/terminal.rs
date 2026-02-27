@@ -12,6 +12,7 @@ use crate::*;
 pub enum VtEvent {
     Bell,
     TitleChanged(String),
+    DeviceResponse(Vec<u8>),
 }
 
 // C callback trampolines — push to the Vec<VtEvent> via userdata pointer.
@@ -38,6 +39,17 @@ unsafe extern "C" fn title_trampoline(userdata: *mut c_void, ptr: *const u8, len
             String::from_utf8_lossy(bytes).into_owned()
         };
         events.push(VtEvent::TitleChanged(title));
+    });
+}
+
+unsafe extern "C" fn response_trampoline(userdata: *mut c_void, ptr: *const u8, len: usize) {
+    let _ = std::panic::catch_unwind(|| {
+        let events = unsafe { &mut *(userdata as *mut Vec<VtEvent>) };
+        if len == 0 || ptr.is_null() {
+            return;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+        events.push(VtEvent::DeviceResponse(bytes.to_vec()));
     });
 }
 
@@ -79,6 +91,7 @@ impl Terminal {
                 userdata,
                 Some(bell_trampoline as BellCallback),
                 Some(title_trampoline as TitleCallback),
+                Some(response_trampoline as ResponseCallback),
             );
         }
 
@@ -106,6 +119,14 @@ impl Terminal {
     pub fn resize(&mut self, cols: u16, rows: u16) {
         unsafe {
             ghostty_vt_terminal_resize(self.handle, cols, rows);
+        }
+    }
+
+    /// Set cell pixel dimensions. Called by the renderer whenever
+    /// font metrics change. Needed for size report responses (CSI 14t, 16t).
+    pub fn set_cell_size(&mut self, width_px: u16, height_px: u16) {
+        unsafe {
+            ghostty_vt_terminal_set_cell_size(self.handle, width_px, height_px);
         }
     }
 
@@ -170,6 +191,11 @@ impl Terminal {
     /// Kitty keyboard protocol flags (5-bit bitfield).
     pub fn kitty_keyboard_flags(&self) -> u8 {
         unsafe { ghostty_vt_terminal_get_kitty_keyboard_flags(self.handle) }
+    }
+
+    /// Whether synchronized output mode (DEC 2026) is active.
+    pub fn is_synchronized_output(&self) -> bool {
+        unsafe { ghostty_vt_terminal_is_synchronized_output(self.handle) != 0 }
     }
 
     // --- Viewport scroll (mutating, &mut self) ---

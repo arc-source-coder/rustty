@@ -3379,6 +3379,7 @@ dependencies = [
 name = "pty"
 version = "0.1.0"
 dependencies = [
+ "async-channel 2.5.0",
  "libc",
  "log",
  "miow",
@@ -4491,6 +4492,12 @@ dependencies = [
 [[package]]
 name = "terminal"
 version = "0.1.0"
+dependencies = [
+ "async-channel 2.5.0",
+ "ghostty_vt",
+ "gpui",
+ "pty",
+]
 
 [[package]]
 name = "thiserror"
