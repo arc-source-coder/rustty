@@ -1,6 +1,8 @@
 use std::cell::Cell;
-use std::marker::PhantomData;
-use std::rc::Rc;
+use std::{
+    fmt::{Debug, Formatter, Result},
+    ops::Deref,
+};
 
 use core::ffi::{c_int, c_void};
 
@@ -55,7 +57,8 @@ unsafe extern "C" fn response_trampoline(userdata: *mut c_void, ptr: *const u8, 
 
 /// Safe wrapper around the Ghostty VT terminal handle.
 ///
-/// Single-thread owned (`!Send + !Sync` via `PhantomData<Rc<()>>`).
+/// `Send` but not `Sync` — all access must go through an external
+/// `Mutex<Terminal>` when shared between threads.
 /// All mutating operations take `&mut self`; read operations take `&self`.
 /// Use `begin_frame()` to access render state — while the returned
 /// `RenderFrame` exists, no mutation can occur (enforced by borrow checker).
@@ -66,9 +69,15 @@ pub struct Terminal {
     /// The first frame's Drop clears dirty flags, silently corrupting
     /// the second frame's view. debug_assert catches this during dev.
     frame_active: Cell<bool>,
-    /// Makes Terminal !Send + !Sync.
-    _not_send_sync: PhantomData<Rc<()>>,
 }
+
+// Safety: Terminal wraps a Zig-allocated handle that is not thread-safe.
+// However, all access is protected by an external Mutex<Terminal>
+// Only one thread accesses the handle at a time.
+// The Box<Vec<VtEvent>> callback target is heap-stable across moves.
+// Cell<bool> is Send. The raw *mut c_void is not Send by default, but
+// the Mutex guarantees no concurrent access.
+unsafe impl Send for Terminal {}
 
 impl Terminal {
     /// Create a new terminal with the given dimensions.
@@ -99,7 +108,6 @@ impl Terminal {
             handle,
             events,
             frame_active: Cell::new(false),
-            _not_send_sync: PhantomData,
         })
     }
 
@@ -436,15 +444,15 @@ impl SelectionText {
     }
 }
 
-impl std::ops::Deref for SelectionText {
+impl Deref for SelectionText {
     type Target = str;
     fn deref(&self) -> &str {
         self.as_str()
     }
 }
 
-impl std::fmt::Debug for SelectionText {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for SelectionText {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         f.debug_tuple("SelectionText")
             .field(&self.as_str())
             .finish()

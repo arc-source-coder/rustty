@@ -1,8 +1,9 @@
 ---
-title: Terminal renderer (GPUI Element, row-run painting, dirty tracking, cursor, shaped-run cache)
-status: open
+title: Terminal renderer (GPUI Element, row-run painting, dirty tracking, cursor)
+status: closed
 priority: 1
 created-at: "2026-02-23T03:13:50Z"
+closed-at: "2026-03-01T06:16:38Z"
 blockers:
   - terminal-001
 ---
@@ -21,3 +22,5 @@ Full redraw triggers: font/DPI change, theme change, viewport geometry change, v
 Update(terminal-001): TerminalSession now exposes `terminal()` for `begin_frame()` access and `set_cell_size(w, h)` for pixel metrics. The renderer should call `session.set_cell_size()` when font metrics change, and `session.terminal().begin_frame()` to get a `RenderFrame<'_>` for render data.
 
 Refs: docs/architecture/03-rendering.md (full design), docs/architecture/02-data-model.md § Render Data Access, vendor/zed/crates/terminal_view (GPUI element reference), opensrc/repos/MitchForest/rust-terminal (alternate reference).
+
+Update(terminal-001): Refer docs/architecture/10-new-renderer-design.md for the latest design.

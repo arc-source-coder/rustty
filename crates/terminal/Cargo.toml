@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+log.workspace = true
 async-channel.workspace = true
 gpui.workspace = true
 ghostty_vt = { path = "../ghostty-vt" }

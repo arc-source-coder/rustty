@@ -15,6 +15,10 @@ impl SessionId {
     pub fn new() -> Self {
         Self(next_id())
     }
+
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,4 +52,24 @@ pub struct SessionMetadata {
     pub cwd: Option<PathBuf>,
     pub bell_count: u32,
     pub has_unread_output: bool,
+}
+
+/// Events sent from the IO thread to the UI thread via bounded channel.
+/// Mirrors Ghostty's surface_mailbox pattern (SPSC, capacity 64).
+#[derive(Debug)]
+pub enum IoEvent {
+    SideEffect(SideEffect),
+    Exited(Option<ExitStatus>),
+    Error(String),
+}
+
+/// Parameters for resizing the terminal inside a single lock scope.
+/// Used by `RenderSnapshot::capture()` to fold set_cell_size + resize +
+/// snapshot into one mutex acquisition (instead of 3 separate locks).
+#[derive(Debug, Clone, Copy)]
+pub struct ResizeRequest {
+    pub cols: u16,
+    pub rows: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
 }

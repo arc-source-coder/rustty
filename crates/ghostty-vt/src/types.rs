@@ -1,3 +1,4 @@
+use bytemuck::{Pod, Zeroable};
 use core::ffi::c_void;
 
 pub(crate) type BellCallback = unsafe extern "C" fn(userdata: *mut c_void);
@@ -20,7 +21,7 @@ pub struct CursorState {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
 pub struct ColorRGB {
     pub r: u8,
     pub g: u8,
@@ -39,24 +40,36 @@ pub struct ColorState {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FlatCell {
+    /// Primary codepoint (0 = empty cell)
     pub codepoint: u32,
+    /// Number of extra codepoints in the grapheme cluster (0 for simple chars)
     pub grapheme_len: u8,
+    /// Wide property: 0=narrow, 1=wide, 2=spacer_tail, 3=spacer_head
     pub wide: u8,
+
+    /// Foreground color type: 0=none/default, 1=palette, 2=rgb
     pub fg_color_type: u8,
     pub fg_r: u8,
     pub fg_g: u8,
     pub fg_b: u8,
     pub fg_palette: u8,
+
+    /// Background color type: 0=none/default, 1=palette, 2=rgb
+    /// Note: for bg_color_palette/bg_color_rgb content_tags, bg is set
+    /// from the cell content directly (not from style).
     pub bg_color_type: u8,
     pub bg_r: u8,
     pub bg_g: u8,
     pub bg_b: u8,
     pub bg_palette: u8,
+
+    /// Underline color type: 0=none, 1=palette, 2=rgb
     pub ul_color_type: u8,
     pub ul_r: u8,
     pub ul_g: u8,
     pub ul_b: u8,
     pub ul_palette: u8,
+
     /// Style flags bitfield (matches Ghostty Style.Flags packed u16):
     /// bit 0: bold, 1: italic, 2: faint, 3: blink, 4: inverse,
     /// 5: invisible, 6: strikethrough, 7: overline

@@ -64,7 +64,7 @@ key is **not how Ghostty works** and is dropped. The correct model:
 row dirty? ──no──> reuse existing cell buffer (no reshape)
            └─yes─> rebuild cell buffer from RenderState.Row.cells
                     for each style run in the row:
-                      run_hash = wyhash(codepoints, relative_clusters, font_index)
+                      run_hash = rapidhash(utf8_text, font_family, font_weight, font_style)
                       shaped_cells = shape_cache.get(run_hash) or shape_and_insert
 ```
 

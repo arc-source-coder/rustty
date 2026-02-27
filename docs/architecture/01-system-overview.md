@@ -4,6 +4,10 @@
 > ported from Alacritty (ConPTY on Windows, openpty on Unix). See
 > [the migration plan](../plans/2026-02-24-pty-001-alacritty-backend.md).
 
+> **Update:** The single-thread model (UI + IO on same thread) 
+> has been replaced with 3-thread model inspired by Ghostty (UI, IO, PTY) See
+> [the migration plan](../plans/2026-02-27-renderer-001-terminal-renderer.md).
+
 ## Intent
 
 Build a Windows-first terminal emulator with:

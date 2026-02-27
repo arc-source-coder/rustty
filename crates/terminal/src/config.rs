@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[derive(Debug, Clone)]
 pub struct SpawnConfig {
     pub initial_cols: u16,
@@ -28,7 +30,7 @@ impl Default for SpawnConfig {
 // For now, stored as a plain value on TerminalSession.
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
-    pub font_family: String,
+    pub font_family: Arc<str>,
     pub font_size: f32,
     pub cursor_blink: bool,
 }
@@ -36,7 +38,7 @@ pub struct RenderConfig {
 impl Default for RenderConfig {
     fn default() -> Self {
         Self {
-            font_family: "Cascadia Code".into(),
+            font_family: Arc::from("Cascadia Code"),
             font_size: 14.0,
             cursor_blink: true,
         }
