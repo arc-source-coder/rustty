@@ -4,11 +4,24 @@ mod types;
 use core::ffi::{c_int, c_void};
 pub(crate) use types::{BellCallback, ResponseCallback, TitleCallback};
 
-pub use terminal::{RenderFrame, SelectionText, Terminal, VtEvent};
+pub use terminal::key_from_w3c;
+pub use terminal::{
+    encode_key, encode_mouse, InputOpts, RenderFrame, SelectionText, Terminal,
+    VtEvent,
+};
 pub use types::{ColorRGB, ColorState, CursorState, DirtyState, FlatCell, MouseFormat, MouseMode};
 
 unsafe extern "C" {
-    pub(crate) fn ghostty_vt_terminal_new(cols: u16, rows: u16) -> *mut c_void;
+    pub(crate) fn ghostty_vt_terminal_new(
+        cols: u16,
+        rows: u16,
+        fg_r: u8,
+        fg_g: u8,
+        fg_b: u8,
+        bg_r: u8,
+        bg_g: u8,
+        bg_b: u8,
+    ) -> *mut c_void;
     pub(crate) fn ghostty_vt_terminal_free(terminal: *mut c_void);
 
     pub(crate) fn ghostty_vt_terminal_set_callbacks(
@@ -97,18 +110,30 @@ unsafe extern "C" {
     ) -> *const u8;
     pub(crate) fn ghostty_vt_bytes_free(bytes: *const u8, len: usize);
 
-    pub(crate) fn ghostty_vt_terminal_encode_key(
-        terminal: *mut c_void,
+
+
+    pub(crate) fn ghostty_vt_terminal_is_focus_event_mode(terminal: *mut c_void) -> u8;
+
+    /// Snapshot all input-relevant mode flags into a C struct.
+    /// Must be called under the terminal mutex; returns a plain-data copy.
+    pub(crate) fn ghostty_vt_terminal_get_input_opts(terminal: *mut c_void) -> InputOptsC;
+
+    /// Encode a key event using a pre-captured opts snapshot. No terminal handle needed.
+    pub(crate) fn ghostty_vt_encode_key(
+        opts: InputOptsC,
         key: c_int,
         mods: u16,
         action: u8,
         text_ptr: *const u8,
         text_len: usize,
+        unshifted_codepoint: u32,
         buf: *mut u8,
         buf_len: usize,
     ) -> usize;
-    pub fn ghostty_vt_terminal_encode_mouse(
-        terminal: *mut c_void,
+
+    /// Encode a mouse event using a pre-captured opts snapshot. No terminal handle needed.
+    pub(crate) fn ghostty_vt_encode_mouse(
+        opts: InputOptsC,
         button: u8,
         action: u8,
         mods: u8,
@@ -117,7 +142,30 @@ unsafe extern "C" {
         buf: *mut u8,
         buf_len: usize,
     ) -> usize;
+
+    pub fn ghostty_vt_key_from_w3c(code_ptr: *const u8, code_len: usize) -> c_int;
 }
+
+/// C ABI mirror of `InputOptsC` in input.zig.
+/// 10 u8 fields, no padding — layout is stable across Rust/Zig ABI boundary.
+/// Private: callers use the higher-level `InputOpts` type.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct InputOptsC {
+    pub cursor_key_application: u8,
+    pub keypad_key_application: u8,
+    pub ignore_keypad_with_numlock: u8,
+    pub alt_esc_prefix: u8,
+    pub modify_other_keys_state_2: u8,
+    pub kitty_flags: u8,
+    pub mouse_event: u8,
+    pub mouse_format: u8,
+    pub bracketed_paste: u8,
+    pub focus_event_mode: u8,
+}
+
+const _: () = assert!(std::mem::size_of::<InputOptsC>() == 10);
+const _: () = assert!(std::mem::align_of::<InputOptsC>() == 1);
 
 #[cfg(test)]
 mod tests {

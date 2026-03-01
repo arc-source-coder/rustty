@@ -5,6 +5,7 @@ priority: 2
 created-at: "2026-02-23T03:14:37Z"
 blockers:
   - app-001
+  - terminal-002
 ---
 
 Selection gestures in renderer:
@@ -12,10 +13,6 @@ Selection gestures in renderer:
 - click-drag to select range
 - double-click for word selection
 - triple-click for line selection. 
-- ctrl+a/cmd-a (mac) for selecting currently typed shell input
-- ctrl+x/cmd+x (mac) for cutting input (only in case of shell input)
-- ctrl+c/cmd-c (mac) for copying selection (on windows, when no selection Ctrl+C is signal)
-- ctrl+v/cmd+v (mac) for pasting from clipboard
  
 Renderer owns transient gesture state (drag anchor, current mouse position).
 On gesture complete/update:

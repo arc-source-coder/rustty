@@ -1,9 +1,11 @@
-use crate::Terminal;
-use crate::VtEvent;
+use crate::{ColorRGB, Terminal, VtEvent};
+
+const DEFAULT_FG: ColorRGB = ColorRGB { r: 0xDD, g: 0xDD, b: 0xDD };
+const DEFAULT_BG: ColorRGB = ColorRGB { r: 0x1E, g: 0x1E, b: 0x2E };
 
 #[test]
 fn da1_primary_response() {
-    let mut term = Terminal::new(80, 24).unwrap();
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     // Send DA1 query: ESC [ c
     term.feed(b"\x1B[c");
     let events = term.drain_events();
@@ -20,7 +22,7 @@ fn da1_primary_response() {
 
 #[test]
 fn da2_secondary_response() {
-    let mut term = Terminal::new(80, 24).unwrap();
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     // Send DA2 query: ESC [ > c
     term.feed(b"\x1B[>c");
     let events = term.drain_events();
@@ -37,7 +39,7 @@ fn da2_secondary_response() {
 
 #[test]
 fn dsr_cursor_position() {
-    let mut term = Terminal::new(80, 24).unwrap();
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     // Move cursor to row 5, col 10 (1-indexed: CSI 5;10 H)
     term.feed(b"\x1B[5;10H");
     // Clear events from cursor move
@@ -59,7 +61,7 @@ fn dsr_cursor_position() {
 
 #[test]
 fn dsr_operating_status() {
-    let mut term = Terminal::new(80, 24).unwrap();
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     // Query operating status: ESC [ 5 n
     term.feed(b"\x1B[5n");
     let events = term.drain_events();
@@ -76,7 +78,7 @@ fn dsr_operating_status() {
 
 #[test]
 fn kitty_keyboard_query() {
-    let mut term = Terminal::new(80, 24).unwrap();
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     // Query kitty keyboard: ESC [ ? u
     term.feed(b"\x1B[?u");
     let events = term.drain_events();
@@ -94,7 +96,7 @@ fn kitty_keyboard_query() {
 
 #[test]
 fn size_report_csi_18t() {
-    let mut term = Terminal::new(80, 24).unwrap();
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     // Query grid size: CSI 18 t
     term.feed(b"\x1B[18t");
     let events = term.drain_events();
@@ -111,7 +113,7 @@ fn size_report_csi_18t() {
 
 #[test]
 fn size_report_csi_14t_with_cell_size() {
-    let mut term = Terminal::new(80, 24).unwrap();
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     term.set_cell_size(8, 16);
     // Query text area pixel size: CSI 14 t
     term.feed(b"\x1B[14t");
@@ -130,7 +132,7 @@ fn size_report_csi_14t_with_cell_size() {
 
 #[test]
 fn size_report_csi_14t_without_cell_size() {
-    let mut term = Terminal::new(80, 24).unwrap();
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     // No cell size set — should produce no response.
     term.feed(b"\x1B[14t");
     let events = term.drain_events();
@@ -146,7 +148,7 @@ fn size_report_csi_14t_without_cell_size() {
 
 #[test]
 fn multiple_responses_in_single_feed() {
-    let mut term = Terminal::new(80, 24).unwrap();
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     // Send DA1 + DSR operating status in one feed
     term.feed(b"\x1B[c\x1B[5n");
     let events = term.drain_events();

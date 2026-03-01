@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::{cell::Cell, rc::Rc};
 
 use crate::color::{PaletteCache, color_rgb_to_hsla, palette_hash};
 use crate::cursor::{CursorLayout, build_cursor};
@@ -6,8 +7,8 @@ use crate::text_runs::{BgRect, PositionedTextRun, build_row_runs};
 use ghostty_vt::{DirtyState, Terminal};
 use gpui::{
     App, Bounds, DefiniteLength, Element, ElementId, Entity, GlobalElementId, Hitbox,
-    HitboxBehavior, InspectorElementId, IntoElement, LayoutId, Length, Pixels, SharedString, Size,
-    Style, TextAlign, TextRun, Window, fill, point, px, size,
+    HitboxBehavior, InspectorElementId, IntoElement, LayoutId, Length, Pixels, Point, SharedString,
+    Size, Style, TextAlign, TextRun, Window, fill, point, px, size,
 };
 use terminal::TerminalSession;
 
@@ -71,6 +72,9 @@ pub struct TerminalElement {
     session: Entity<TerminalSession>,
     terminal: Arc<Mutex<Terminal>>,
     element_id: ElementId,
+    /// Written during prepaint so `TerminalView` can subtract the element's
+    /// window-relative origin from raw mouse event positions.
+    origin_out: Rc<Cell<Option<Point<Pixels>>>>,
 }
 
 impl TerminalElement {
@@ -78,11 +82,13 @@ impl TerminalElement {
         session: Entity<TerminalSession>,
         terminal: Arc<Mutex<Terminal>>,
         element_id: ElementId,
+        origin_out: Rc<Cell<Option<Point<Pixels>>>>,
     ) -> Self {
         Self {
             session,
             terminal,
             element_id,
+            origin_out,
         }
     }
 
@@ -174,7 +180,11 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        let render_config = self.session.read(cx).render_config().clone();
+        self.origin_out.set(Some(bounds.origin));
+        let render_config = {
+            let entity = self.session.read(cx).render_config().clone();
+            entity.read(cx).clone()
+        };
 
         // Clone handles for the closure (avoids borrowing &self inside closure).
         let session = self.session.clone();
@@ -328,11 +338,11 @@ impl Element for TerminalElement {
             let cursor = build_cursor(
                 &snapshot.cursor,
                 &metrics,
-                bounds.origin,
                 cursor_color,
                 default_bg,
                 &snapshot,
                 &base_font,
+                window,
             );
 
             // Arc::clone is O(1) — state and layout share the same allocation.
@@ -434,8 +444,8 @@ impl Element for TerminalElement {
         }
 
         // Layer 5: Cursor overlay.
-        if let Some(ref cursor) = layout.cursor {
-            cursor.paint(window, cx, layout.grid.metrics.cell_width);
+        if let Some(mut cursor) = layout.cursor.take() {
+            cursor.paint(origin, window, cx);
         }
     }
 }

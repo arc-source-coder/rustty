@@ -26,8 +26,6 @@ impl Default for SpawnConfig {
     }
 }
 
-// TODO(app-001): Replace with Model<RenderConfig> for cross-session sharing.
-// For now, stored as a plain value on TerminalSession.
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
     pub font_family: Arc<str>,

@@ -1,36 +1,27 @@
-use gpui::{
-    App, Bounds, Context, Entity, Render, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-    size,
-};
-use gpui_platform::application;
+mod profile;
+mod profile_registry;
+mod shell_detection;
+mod types;
+mod workspace;
 
+use gpui::{App, AppContext, Bounds, Context, WindowBounds, WindowOptions, px, size};
+use gpui_platform::application;
+use terminal::RenderConfig;
 use ui::{components::theme::Theme, title_bar::TitleBar};
 
-struct AppView {
-    titlebar: Entity<TitleBar>,
-}
-
-impl Render for AppView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(gpui::black())
-            .child(self.titlebar.clone().into_any_element())
-            .child(
-                div()
-                    .flex_1()
-                    .bg(gpui::black())
-                    .text_color(gpui::white())
-                    .text_lg()
-                    .child("Terminal content coming soon..."),
-            )
-    }
-}
+use crate::profile_registry::ProfileRegistry;
+use crate::workspace::Workspace;
 
 fn main() {
     application().run(|cx: &mut App| {
+        // Detect available shells and build profile list.
+        let (profiles, default_id) = shell_detection::detect_profiles();
+        let profiles = cx.new(|_| ProfileRegistry::new(profiles, default_id));
+
+        // Shared render config (v0: defaults only, no config file).
+        let render_config = cx.new(|_| RenderConfig::default());
+
+        // Window sizing: 60% x 70% of primary display, centered.
         let display_bounds = cx
             .primary_display()
             .map(|display| display.bounds())
@@ -51,9 +42,7 @@ fn main() {
 
         cx.open_window(window_options, |window, cx| {
             Theme::sync_system_appearance(window, cx);
-            cx.new(|cx| AppView {
-                titlebar: cx.new(|cx| TitleBar::new(cx)),
-            })
+            cx.new(|cx| Workspace::new(profiles, render_config, window, cx))
         })
         .unwrap();
     });

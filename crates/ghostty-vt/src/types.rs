@@ -122,6 +122,16 @@ impl MouseMode {
             _ => MouseMode::Any,
         }
     }
+
+    pub(crate) fn to_raw(self) -> u8 {
+        match self {
+            MouseMode::None => 0,
+            MouseMode::X10 => 1,
+            MouseMode::Normal => 2,
+            MouseMode::Button => 3,
+            MouseMode::Any => 4,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +151,16 @@ impl MouseFormat {
             2 => MouseFormat::Sgr,
             3 => MouseFormat::Urxvt,
             _ => MouseFormat::SgrPixels,
+        }
+    }
+
+    pub(crate) fn to_raw(self) -> u8 {
+        match self {
+            MouseFormat::X10 => 0,
+            MouseFormat::Utf8 => 1,
+            MouseFormat::Sgr => 2,
+            MouseFormat::Urxvt => 3,
+            MouseFormat::SgrPixels => 4,
         }
     }
 }

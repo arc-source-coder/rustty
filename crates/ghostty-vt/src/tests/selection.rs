@@ -1,8 +1,11 @@
 use crate::*;
 
+const DEFAULT_FG: (u8, u8, u8) = (0xDD, 0xDD, 0xDD);
+const DEFAULT_BG: (u8, u8, u8) = (0x1E, 0x1E, 0x2E);
+
 #[test]
 fn test_selection_set_clear() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24) };
+    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
     let text = b"Hello, World!";
     unsafe { ghostty_vt_terminal_feed(ptr, text.as_ptr(), text.len()) };
 

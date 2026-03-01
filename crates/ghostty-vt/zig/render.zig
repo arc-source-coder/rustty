@@ -192,7 +192,8 @@ export fn ghostty_vt_terminal_render_row_cells(
 
     for (0..cols) |i| {
         const raw = raws[i];
-        const style: terminal.Style = styles[i];
+        // The style field is only valid if raw.style_id > 0
+        const style: terminal.Style = if (raw.style_id > 0) styles[i] else .{};
         const fg = flattenStyleColor(style.fg_color);
         var bg = flattenStyleColor(style.bg_color);
 

@@ -16,9 +16,23 @@ const TitleCallback = handle_mod.TitleCallback;
 const ResponseCallback = handle_mod.ResponseCallback;
 const TerminalHandle = handle_mod.TerminalHandle;
 
-export fn ghostty_vt_terminal_new(cols: u16, rows: u16) callconv(.c) ?*anyopaque {
+const terminal = @import("ghostty/src/terminal/main.zig");
+const color = terminal.color;
+
+export fn ghostty_vt_terminal_new(
+    cols: u16,
+    rows: u16,
+    fg_r: u8,
+    fg_g: u8,
+    fg_b: u8,
+    bg_r: u8,
+    bg_g: u8,
+    bg_b: u8,
+) callconv(.c) ?*anyopaque {
     const alloc = std.heap.smp_allocator;
-    const handle = TerminalHandle.init(alloc, cols, rows) catch return null;
+    const fg: color.RGB = .{ .r = fg_r, .g = fg_g, .b = fg_b };
+    const bg: color.RGB = .{ .r = bg_r, .g = bg_g, .b = bg_b };
+    const handle = TerminalHandle.init(alloc, cols, rows, fg, bg) catch return null;
     return @ptrCast(handle);
 }
 

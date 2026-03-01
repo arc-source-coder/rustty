@@ -80,10 +80,11 @@ pub struct Terminal {
 unsafe impl Send for Terminal {}
 
 impl Terminal {
-    /// Create a new terminal with the given dimensions.
+    /// Create a new terminal with the given dimensions and default colors.
     /// Returns `None` if allocation fails.
-    pub fn new(cols: u16, rows: u16) -> Option<Self> {
-        let handle = unsafe { ghostty_vt_terminal_new(cols, rows) };
+    pub fn new(cols: u16, rows: u16, fg: ColorRGB, bg: ColorRGB) -> Option<Self> {
+        let handle =
+            unsafe { ghostty_vt_terminal_new(cols, rows, fg.r, fg.g, fg.b, bg.r, bg.g, bg.b) };
         if handle.is_null() {
             return None;
         }
@@ -206,6 +207,33 @@ impl Terminal {
         unsafe { ghostty_vt_terminal_is_synchronized_output(self.handle) != 0 }
     }
 
+    /// Whether focus event mode (DEC 1004) is active.
+    pub fn is_focus_event_mode(&self) -> bool {
+        unsafe { ghostty_vt_terminal_is_focus_event_mode(self.handle) != 0 }
+    }
+
+    /// Snapshot all input-relevant mode flags into an [`InputOpts`].
+    ///
+    /// Must be called under the terminal mutex. The returned value is
+    /// plain data — no terminal reference is retained. Callers can drop
+    /// the lock immediately after this call and encode outside the lock
+    /// using [`encode_key`] / [`encode_mouse`].
+    pub fn input_opts(&self) -> InputOpts {
+        let raw = unsafe { ghostty_vt_terminal_get_input_opts(self.handle) };
+        InputOpts {
+            cursor_key_application: raw.cursor_key_application != 0,
+            keypad_key_application: raw.keypad_key_application != 0,
+            ignore_keypad_with_numlock: raw.ignore_keypad_with_numlock != 0,
+            alt_esc_prefix: raw.alt_esc_prefix != 0,
+            modify_other_keys_state_2: raw.modify_other_keys_state_2 != 0,
+            kitty_flags: raw.kitty_flags,
+            mouse_event: MouseMode::from_raw(raw.mouse_event),
+            mouse_format: MouseFormat::from_raw(raw.mouse_format),
+            bracketed_paste: raw.bracketed_paste != 0,
+            focus_event_mode: raw.focus_event_mode != 0,
+        }
+    }
+
     // --- Viewport scroll (mutating, &mut self) ---
 
     /// Scroll the viewport by delta rows.
@@ -263,43 +291,6 @@ impl Terminal {
             return None;
         }
         Some(SelectionText { ptr, len })
-    }
-
-    // --- Key encoding (&self — reads mode state, no mutation) ---
-
-    /// Encode a key event using the terminal's current mode state.
-    /// Writes VT bytes into `buf` and returns the number of bytes written.
-    /// Returns 0 if the key event produces no output.
-    ///
-    /// `key`: Ghostty Key enum integer value (see `ghostty/src/input/key.zig`).
-    /// `mods`: modifier bitfield (Ghostty Mods packed u16).
-    /// `action`: 0=release, 1=press, 2=repeat.
-    /// `text`: UTF-8 text from the key event (for kitty protocol); empty if none.
-    pub fn encode_key(
-        &self,
-        key: i32,
-        mods: u16,
-        action: u8,
-        text: &[u8],
-        buf: &mut [u8],
-    ) -> usize {
-        let text_ptr = if text.is_empty() {
-            std::ptr::null()
-        } else {
-            text.as_ptr()
-        };
-        unsafe {
-            ghostty_vt_terminal_encode_key(
-                self.handle,
-                key as c_int,
-                mods,
-                action,
-                text_ptr,
-                text.len(),
-                buf.as_mut_ptr(),
-                buf.len(),
-            )
-        }
     }
 }
 
@@ -463,4 +454,115 @@ impl Drop for SelectionText {
     fn drop(&mut self) {
         unsafe { ghostty_vt_bytes_free(self.ptr, self.len) }
     }
+}
+
+/// Snapshot of all terminal input mode flags.
+///
+/// Captured once under the terminal mutex via [`Terminal::input_opts()`].
+/// Encoding functions take this by value — all encoding work is lock-free.
+///
+/// This is a throwaway created fresh per input event, never stored.
+#[derive(Clone, Copy, Debug)]
+pub struct InputOpts {
+    // Key encoding — mirrors key_encode.Options fields
+    pub cursor_key_application: bool,
+    pub keypad_key_application: bool,
+    pub ignore_keypad_with_numlock: bool,
+    pub alt_esc_prefix: bool,
+    pub modify_other_keys_state_2: bool,
+    /// Kitty keyboard protocol flags (packed u5, widened to u8).
+    pub kitty_flags: u8,
+    // Mouse encoding
+    pub mouse_event: MouseMode,
+    pub mouse_format: MouseFormat,
+    // Other
+    pub bracketed_paste: bool,
+    pub focus_event_mode: bool,
+}
+
+impl InputOpts {
+    fn to_c(self) -> InputOptsC {
+        InputOptsC {
+            cursor_key_application: self.cursor_key_application as u8,
+            keypad_key_application: self.keypad_key_application as u8,
+            ignore_keypad_with_numlock: self.ignore_keypad_with_numlock as u8,
+            alt_esc_prefix: self.alt_esc_prefix as u8,
+            modify_other_keys_state_2: self.modify_other_keys_state_2 as u8,
+            kitty_flags: self.kitty_flags,
+            mouse_event: self.mouse_event.to_raw(),
+            mouse_format: self.mouse_format.to_raw(),
+            bracketed_paste: self.bracketed_paste as u8,
+            focus_event_mode: self.focus_event_mode as u8,
+        }
+    }
+}
+
+/// Encode a key event using a pre-captured [`InputOpts`] snapshot.
+/// No terminal handle or lock needed — pure computation.
+///
+/// Returns the number of bytes written into `buf`, or 0 if the event
+/// produces no terminal output.
+pub fn encode_key(
+    opts: InputOpts,
+    key: i32,
+    mods: u16,
+    action: u8,
+    text: &[u8],
+    unshifted_codepoint: u32,
+    buf: &mut [u8],
+) -> usize {
+    let text_ptr = if text.is_empty() { std::ptr::null() } else { text.as_ptr() };
+    unsafe {
+        ghostty_vt_encode_key(
+            opts.to_c(),
+            key as c_int,
+            mods,
+            action,
+            text_ptr,
+            text.len(),
+            unshifted_codepoint,
+            buf.as_mut_ptr(),
+            buf.len(),
+        )
+    }
+}
+
+/// Encode a mouse event using a pre-captured [`InputOpts`] snapshot.
+/// No terminal handle or lock needed — pure computation.
+///
+/// Returns the number of bytes written into `buf`, or 0 if mouse
+/// reporting is disabled or the event produces no output.
+pub fn encode_mouse(
+    opts: InputOpts,
+    button: u8,
+    action: u8,
+    mods: u8,
+    x: u16,
+    y: u16,
+    buf: &mut [u8],
+) -> usize {
+    unsafe {
+        ghostty_vt_encode_mouse(
+            opts.to_c(),
+            button,
+            action,
+            mods,
+            x,
+            y,
+            buf.as_mut_ptr(),
+            buf.len(),
+        )
+    }
+}
+
+/// Resolve a W3C key code string to a Ghostty Key enum value (c_int).
+/// Returns `None` if the code is unrecognized.
+///
+/// This is a pure function — it doesn't need a terminal instance.
+/// Thread-safe (no mutable state).
+///
+/// Example W3C codes: "KeyA", "Enter", "ArrowLeft", "F1", "Digit0"
+pub fn key_from_w3c(code: &str) -> Option<i32> {
+    let result = unsafe { ghostty_vt_key_from_w3c(code.as_ptr(), code.len()) };
+    if result < 0 { None } else { Some(result) }
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const terminal = @import("ghostty/src/terminal/main.zig");
+const color = terminal.color;
 const StyleFlags = @TypeOf((@as(terminal.Style, .{})).flags);
 
 // --- Callback function pointer types ---
@@ -271,13 +272,19 @@ pub const TerminalHandle = struct {
         }
     }
 
-    pub fn init(alloc: Allocator, cols: u16, rows: u16) !*TerminalHandle {
+    pub fn init(alloc: Allocator, cols: u16, rows: u16, fg: color.RGB, bg: color.RGB) !*TerminalHandle {
         const handle = try alloc.create(TerminalHandle);
         errdefer alloc.destroy(handle);
 
         const t = try terminal.Terminal.init(alloc, .{
             .cols = cols,
             .rows = rows,
+            .colors = .{
+                .background = color.DynamicRGB.init(bg),
+                .foreground = color.DynamicRGB.init(fg),
+                .cursor = .unset,
+                .palette = .default,
+            },
         });
         errdefer {
             var tmp = t;

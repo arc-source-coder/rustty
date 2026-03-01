@@ -1,8 +1,9 @@
 ---
 title: Input encoding (TerminalInput enum, GPUI event normalization, key/mouse/paste encoding)
-status: open
+status: closed
 priority: 2
 created-at: "2026-02-23T03:13:49Z"
+closed-at: "2026-03-05T08:24:13Z"
 blockers:
   - terminal-001
 ---

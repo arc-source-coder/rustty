@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use gpui::{AsyncApp, Context, Task, WeakEntity};
+use gpui::{AsyncApp, Context, Entity, Task, WeakEntity};
 
-use ghostty_vt::Terminal;
+use ghostty_vt::{ColorRGB, Terminal};
 use pty::{Options, PtyCommand, PtyHandle, Shell, WindowSize};
 
 use crate::config::{RenderConfig, SpawnConfig};
@@ -22,7 +22,7 @@ pub struct TerminalSession {
     terminal: Arc<Mutex<Terminal>>,
     size: GridSize,
     spawn_config: SpawnConfig,
-    render_config: RenderConfig,
+    render_config: Entity<RenderConfig>,
     pty: PtyHandle,
     metadata: SessionMetadata,
     process_state: ProcessState,
@@ -35,13 +35,23 @@ pub struct TerminalSession {
 impl TerminalSession {
     pub fn new(
         spawn_config: SpawnConfig,
-        render_config: RenderConfig,
+        render_config: Entity<RenderConfig>,
         cx: &mut Context<Self>,
     ) -> Self {
         let size = GridSize::new(spawn_config.initial_cols, spawn_config.initial_rows);
 
-        let terminal =
-            Terminal::new(size.cols, size.rows).expect("failed to allocate ghostty terminal");
+        let default_fg = ColorRGB {
+            r: 0xDD,
+            g: 0xDD,
+            b: 0xDD,
+        };
+        let default_bg = ColorRGB {
+            r: 0x1E,
+            g: 0x1E,
+            b: 0x2E,
+        };
+        let terminal = Terminal::new(size.cols, size.rows, default_fg, default_bg)
+            .expect("failed to allocate ghostty terminal");
         let terminal = Arc::new(Mutex::new(terminal));
 
         let mut env = HashMap::new();
@@ -241,8 +251,65 @@ impl TerminalSession {
         self.metadata.has_unread_output = false;
     }
 
+    /// Encode and send a key event to the PTY.
+    ///
+    /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
+    /// Encoding and the PTY write both happen outside the lock.
+    pub fn send_key_event(&self, keystroke: &gpui::Keystroke, is_held: bool) {
+        let opts = self.terminal.lock().expect("terminal mutex poisoned").input_opts();
+        if let Some(bytes) = crate::input::encode_key_event(opts, keystroke, is_held) {
+            self.write_to_pty(bytes);
+        }
+    }
+
+    /// Encode and send a paste to the PTY.
+    ///
+    /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
+    pub fn send_paste(&self, text: &str) {
+        let opts = self.terminal.lock().expect("terminal mutex poisoned").input_opts();
+        self.write_to_pty(crate::input::encode_paste(opts, text));
+    }
+
+    /// Encode and send a focus change to the PTY.
+    ///
+    /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
+    pub fn send_focus_change(&self, focused: bool) {
+        let opts = self.terminal.lock().expect("terminal mutex poisoned").input_opts();
+        if let Some(bytes) = crate::input::encode_focus_change(opts, focused) {
+            self.write_to_pty(bytes);
+        }
+    }
+
+    /// Encode and send a mouse event to the PTY.
+    ///
+    /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
+    /// Encoding and the PTY write both happen outside the lock.
+    ///
+    /// Returns `true` if the terminal consumed the event (mouse reporting
+    /// is active), `false` if the caller should handle it (e.g. scroll viewport).
+    pub fn send_mouse_event(
+        &self,
+        button: u8,
+        action: u8,
+        shift: bool,
+        alt: bool,
+        ctrl: bool,
+        x: u16,
+        y: u16,
+    ) -> bool {
+        let opts = self.terminal.lock().expect("terminal mutex poisoned").input_opts();
+        if let Some(bytes) =
+            crate::input::encode_mouse_event(opts, button, action, shift, alt, ctrl, x, y)
+        {
+            self.write_to_pty(bytes);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Access the render config.
-    pub fn render_config(&self) -> &RenderConfig {
+    pub fn render_config(&self) -> &Entity<RenderConfig> {
         &self.render_config
     }
 }

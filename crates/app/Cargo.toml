@@ -7,3 +7,5 @@ edition.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 ui = { path = "../ui" }
+renderer = { path = "../renderer" }
+terminal = { path = "../terminal" }
