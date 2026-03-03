@@ -2,15 +2,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
-#[cfg(unix)]
-mod unix;
-#[cfg(unix)]
-pub use self::unix::Pty;
-
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use self::windows::Pty;
+
+mod buffer_pool;
+pub use buffer_pool::{BufferPool, OutputBuffer};
 
 mod handle;
 pub use handle::PtyHandle;
@@ -63,19 +61,12 @@ pub enum PtyCommand {
 }
 
 pub enum PtyEvent {
-    Output(Vec<u8>),
+    Output(OutputBuffer),
     Exited(Option<ExitStatus>),
     Error(std::io::Error),
 }
 
 /// Create a new platform PTY.
 pub fn new(config: &Options, window_size: WindowSize) -> std::io::Result<Pty> {
-    #[cfg(windows)]
-    {
-        windows::new(config, window_size)
-    }
-    #[cfg(unix)]
-    {
-        unix::new(config, window_size)
-    }
+    windows::new(config, window_size)
 }

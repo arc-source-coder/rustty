@@ -2,104 +2,125 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{Error, ErrorKind, Result};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::IntoRawHandle;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread::JoinHandle;
 use std::{mem, ptr};
 
-use log::{info, warn};
-use windows_sys::Win32::Foundation::{HANDLE, S_OK};
-use windows_sys::Win32::System::Console::{
-    COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
+use log::warn;
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, S_OK};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING, PIPE_ACCESS_INBOUND,
+    PIPE_ACCESS_OUTBOUND,
 };
+use windows_sys::Win32::System::Console::{COORD, HPCON};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+    PIPE_TYPE_BYTE, PIPE_WAIT,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcessId, PROCESS_INFORMATION};
 use windows_sys::core::{HRESULT, PWSTR};
 use windows_sys::{s, w};
 
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
-    InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute,
+    DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
+    UpdateProcThreadAttribute,
 };
 
-use super::blocking::{UnblockedReader, UnblockedWriter};
-use super::child::ChildExitWatcher;
-use super::{Pty, cmdline, win32_string};
+use super::child::ChildProcess;
+use super::{OwnedHandle, Pty, cmdline, win32_string};
 use crate::{Options, WindowSize};
 
-const PIPE_CAPACITY: usize = 0x10_0000; // 1MB
+const PIPE_CAPACITY: u32 = 128 * 1024;
+const ERROR_PIPE_CONNECTED: u32 = 535;
+static PIPE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
+// Function types for the ConPTY pseudo console API.
+//
+// Note: The vendored conpty.dll exports both ConptyCreatePseudoConsole and
+// CreatePseudoConsole as aliases pointing to the same implementation. We use
+// the Conpty-prefixed versions as they are the primary exports.
 type CreatePseudoConsoleFn =
     unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> HRESULT;
 type ResizePseudoConsoleFn = unsafe extern "system" fn(HPCON, COORD) -> HRESULT;
 type ClosePseudoConsoleFn = unsafe extern "system" fn(HPCON);
 
-struct ConptyApi {
+struct ConptyFns {
     create: CreatePseudoConsoleFn,
     resize: ResizePseudoConsoleFn,
     close: ClosePseudoConsoleFn,
 }
 
-impl ConptyApi {
-    fn new() -> Self {
-        match Self::load_conpty() {
-            Some(conpty) => {
-                info!("Using conpty.dll for pseudoconsole");
-                conpty
-            }
-            None => {
-                // Cannot load conpty.dll - use the standard Windows API.
-                info!("Using Windows API for pseudoconsole");
-                Self {
-                    create: CreatePseudoConsole,
-                    resize: ResizePseudoConsole,
-                    close: ClosePseudoConsole,
-                }
-            }
-        }
-    }
-
-    /// Try loading ConptyApi from conpty.dll library.
-    fn load_conpty() -> Option<Self> {
-        type LoadedFn = unsafe extern "system" fn() -> isize;
+impl ConptyFns {
+    /// Load function pointers from the vendored conpty.dll.
+    ///
+    /// conpty.dll must be present next to the executable (placed there by
+    /// build.rs via fetch-conpty.ts). At runtime, the DLL will look for
+    /// OpenConsole.exe in the same directory; if found, it uses OpenConsole
+    /// as the console host. Otherwise, it falls back to the system's conhost.exe.
+    fn load() -> Result<Self> {
+        type RawFn = unsafe extern "system" fn() -> isize;
         unsafe {
             let hmodule = LoadLibraryW(w!("conpty.dll"));
             if hmodule.is_null() {
-                return None;
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    "conpty.dll not found next to the executable — \
+                     ensure the build completed successfully",
+                ));
             }
-            let create_fn = GetProcAddress(hmodule, s!("CreatePseudoConsole"))?;
-            let resize_fn = GetProcAddress(hmodule, s!("ResizePseudoConsole"))?;
-            let close_fn = GetProcAddress(hmodule, s!("ClosePseudoConsole"))?;
 
-            Some(Self {
-                create: mem::transmute::<LoadedFn, CreatePseudoConsoleFn>(create_fn),
-                resize: mem::transmute::<LoadedFn, ResizePseudoConsoleFn>(resize_fn),
-                close: mem::transmute::<LoadedFn, ClosePseudoConsoleFn>(close_fn),
+            // Use the Conpty-prefixed exports; these are the primary exports
+            // from the DLL. The unprefixed versions (CreatePseudoConsole, etc.)
+            // are compatibility aliases pointing to the same implementations.
+            let create = GetProcAddress(hmodule, s!("ConptyCreatePseudoConsole"))
+                .ok_or_else(|| Error::new(ErrorKind::NotFound, "ConptyCreatePseudoConsole not found in conpty.dll"))?;
+            let resize = GetProcAddress(hmodule, s!("ConptyResizePseudoConsole"))
+                .ok_or_else(|| Error::new(ErrorKind::NotFound, "ConptyResizePseudoConsole not found in conpty.dll"))?;
+            let close = GetProcAddress(hmodule, s!("ConptyClosePseudoConsole"))
+                .ok_or_else(|| Error::new(ErrorKind::NotFound, "ConptyClosePseudoConsole not found in conpty.dll"))?;
+
+            // hmodule is intentionally leaked: the DLL must remain loaded for
+            // the lifetime of any HPCON created through it.
+            Ok(Self {
+                create: mem::transmute::<RawFn, CreatePseudoConsoleFn>(create),
+                resize: mem::transmute::<RawFn, ResizePseudoConsoleFn>(resize),
+                close: mem::transmute::<RawFn, ClosePseudoConsoleFn>(close),
             })
         }
     }
 }
 
-/// RAII Pseudoconsole handle.
+/// RAII Pseudoconsole handle backed by the vendored conpty.dll + OpenConsole.exe.
 pub struct Conpty {
     handle: Option<HPCON>,
-    api: ConptyApi,
+    fns: ConptyFns,
+    close_thread: Option<JoinHandle<()>>,
 }
 
 impl Conpty {
     pub fn resize(&mut self, window_size: WindowSize) {
         let Some(handle) = self.handle else { return };
-        let result = unsafe { (self.api.resize)(handle, window_size.into()) };
+        let result = unsafe { (self.fns.resize)(handle, window_size.into()) };
         if result != S_OK {
-            log::error!("ResizePseudoConsole failed: HRESULT 0x{:08X}", result);
+            log::error!("ConptyResizePseudoConsole failed: HRESULT 0x{:08X}", result);
         }
     }
 
     /// Close HPCON on a background thread, sending `CTRL_CLOSE_EVENT` to
-    /// attached processes. `ClosePseudoConsole` blocks until the conout
+    /// attached processes. `ConptyClosePseudoConsole` blocks until the conout
     /// pipe is fully read, so the worker loop must keep draining reads.
     pub fn close_async(&mut self) {
+        if self.close_thread.is_some() {
+            return;
+        }
+
         if let Some(handle) = self.handle.take() {
-            let close = self.api.close;
-            std::thread::Builder::new()
+            let close = self.fns.close;
+            self.close_thread = std::thread::Builder::new()
                 .name("pty-hpcon-close".into())
                 .spawn(move || unsafe { close(handle) })
                 .ok();
@@ -112,7 +133,11 @@ impl Drop for Conpty {
         if let Some(handle) = self.handle.take() {
             // Blocks until conout pipe is drained. Skipped if close_async
             // already took the handle.
-            unsafe { (self.api.close)(handle) }
+            unsafe { (self.fns.close)(handle) }
+        }
+
+        if let Some(close_thread) = self.close_thread.take() {
+            let _ = close_thread.join();
         }
     }
 }
@@ -121,22 +146,18 @@ impl Drop for Conpty {
 unsafe impl Send for Conpty {}
 
 pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
-    let api = ConptyApi::new();
+    let fns = ConptyFns::load()?;
     let mut pty_handle: HPCON = 0;
 
-    // Passing 0 as the size parameter allows the "system default" buffer
-    // size to be used. There may be small performance and memory advantages
-    // to be gained by tuning this in the future, but it's likely a reasonable
-    // start point.
-    let (conout, conout_pty_handle) = miow::pipe::anonymous(0)?;
-    let (conin_pty_handle, conin) = miow::pipe::anonymous(0)?;
+    let (conout, conout_for_pty) = create_overlapped_pipe_pair(PIPE_ACCESS_INBOUND, PIPE_CAPACITY)?;
+    let (conin, conin_for_pty) = create_overlapped_pipe_pair(PIPE_ACCESS_OUTBOUND, PIPE_CAPACITY)?;
 
     // Create the Pseudo Console, using the pipes.
     let result = unsafe {
-        (api.create)(
+        (fns.create)(
             window_size.into(),
-            conin_pty_handle.into_raw_handle() as HANDLE,
-            conout_pty_handle.into_raw_handle() as HANDLE,
+            conin_for_pty.raw(),
+            conout_for_pty.raw(),
             0,
             &mut pty_handle as *mut _,
         )
@@ -188,6 +209,7 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
     {
         startup_info_ex.lpAttributeList = attr_list.as_mut_ptr() as _;
     }
+    let _attr_list_guard = AttrListGuard(startup_info_ex.lpAttributeList.cast());
 
     unsafe {
         success = InitializeProcThreadAttributeList(
@@ -251,17 +273,23 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
             return Err(Error::last_os_error());
         }
     }
+    unsafe {
+        CloseHandle(proc_info.hThread);
+    }
 
-    let conin = UnblockedWriter::new(conin, PIPE_CAPACITY);
-    let conout = UnblockedReader::new(conout, PIPE_CAPACITY);
-
-    let child_watcher = ChildExitWatcher::new(proc_info.hProcess)?;
+    let child = ChildProcess::new(proc_info.hProcess)?;
     let conpty = Conpty {
         handle: Some(pty_handle as HPCON),
-        api,
+        fns,
+        close_thread: None,
     };
 
-    Ok(Pty::new(conpty, conout, conin, child_watcher))
+    Ok(Pty::new(
+        conpty,
+        OwnedHandle::new(conout.into_raw()),
+        OwnedHandle::new(conin.into_raw()),
+        child,
+    ))
 }
 
 // Windows environment variables are case-insensitive, and the caller is responsible for
@@ -326,6 +354,83 @@ impl From<WindowSize> for COORD {
         COORD {
             X: window_size.num_cols as i16,
             Y: window_size.num_lines as i16,
+        }
+    }
+}
+
+fn create_overlapped_pipe_pair(open_mode: u32, buffer_size: u32) -> Result<(OwnedHandle, OwnedHandle)> {
+    let pipe_name = unique_pipe_name();
+    let name_w = win32_string(&pipe_name);
+
+    // CreateNamedPipeW gives us an anonymous-like per-session endpoint with
+    // FILE_FLAG_OVERLAPPED, which ConPTY can use directly for async I/O.
+    let server_handle = unsafe {
+        CreateNamedPipeW(
+            name_w.as_ptr(),
+            open_mode | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1, // single instance — FILE_FLAG_FIRST_PIPE_INSTANCE ensures creation fails if name is squatted
+            buffer_size,
+            buffer_size,
+            0,
+            ptr::null_mut(),
+        )
+    };
+    if server_handle == INVALID_HANDLE_VALUE {
+        return Err(Error::last_os_error());
+    }
+    let server = OwnedHandle::new(server_handle);
+
+    let client_desired_access = if open_mode == PIPE_ACCESS_INBOUND {
+        FILE_GENERIC_WRITE
+    } else {
+        FILE_GENERIC_READ
+    };
+
+    let client_handle = unsafe {
+        CreateFileW(
+            name_w.as_ptr(),
+            client_desired_access,
+            0,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            ptr::null_mut(),
+        )
+    };
+    if client_handle == INVALID_HANDLE_VALUE {
+        return Err(Error::last_os_error());
+    }
+    let client = OwnedHandle::new(client_handle);
+
+    let connected = unsafe { ConnectNamedPipe(server.raw(), ptr::null_mut()) };
+    if connected == 0 {
+        let last_error = unsafe { GetLastError() };
+        if last_error != ERROR_PIPE_CONNECTED {
+            return Err(Error::last_os_error());
+        }
+    }
+
+    Ok((server, client))
+}
+
+fn unique_pipe_name() -> String {
+    let pid = unsafe { GetCurrentProcessId() };
+    let seq = PIPE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0u128, |d| d.as_nanos());
+    format!(r"\\.\pipe\rustty-conpty-{pid}-{seq}-{nonce:x}")
+}
+
+struct AttrListGuard(*mut std::ffi::c_void);
+
+impl Drop for AttrListGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                DeleteProcThreadAttributeList(self.0.cast());
+            }
         }
     }
 }

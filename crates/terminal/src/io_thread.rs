@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use async_channel::{Receiver, Sender, TryRecvError};
 
 use ghostty_vt::{Terminal, VtEvent};
-use pty::{PtyCommand, PtyEvent};
+use pty::{OutputBuffer, PtyCommand, PtyEvent};
 
 use crate::types::{IoEvent, SideEffect};
 
@@ -107,7 +107,7 @@ fn io_loop(
 /// caller doesn't need a second lock acquisition.
 fn feed_with_budget(
     terminal: &Mutex<Terminal>,
-    first_bytes: Vec<u8>,
+    first_bytes: OutputBuffer,
     pty_event_rx: &Receiver<PtyEvent>,
     event_tx: &Sender<IoEvent>,
 ) -> (Vec<VtEvent>, bool) {

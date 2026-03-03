@@ -21,3 +21,7 @@ rapidhash = "4.4.0"
 # Update the below paths to match your local vendored source
 gpui = { git = "file:///D:/projects/rust/rustty/vendor/zed/" }
 gpui_platform = { git = "file:///D:/projects/rust/rustty/vendor/zed/" }
+
+[profile.release]
+debug = true
+strip = "none"

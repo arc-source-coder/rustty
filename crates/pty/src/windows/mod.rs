@@ -1,56 +1,79 @@
 use std::ffi::OsStr;
+use std::num::NonZeroU32;
 use std::io::Result;
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
-use std::sync::mpsc::TryRecvError;
-
-use miow::pipe::{AnonRead, AnonWrite};
 
 use crate::{ChildEvent, Options, Shell, WindowSize};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 
-mod blocking;
 pub(crate) mod child;
 mod conpty;
 
-use blocking::{UnblockedReader, UnblockedWriter};
+use child::ChildProcess;
 use conpty::Conpty;
 
-pub const PTY_CHILD_EVENT_TOKEN: usize = 1;
-pub const PTY_READ_WRITE_TOKEN: usize = 2;
+pub struct OwnedHandle(HANDLE);
 
-type ReadPipe = UnblockedReader<AnonRead>;
-type WritePipe = UnblockedWriter<AnonWrite>;
+impl OwnedHandle {
+    pub fn new(handle: HANDLE) -> Self {
+        Self(handle)
+    }
+
+    pub fn raw(&self) -> HANDLE {
+        self.0
+    }
+
+    pub fn into_raw(mut self) -> HANDLE {
+        let handle = self.0;
+        self.0 = std::ptr::null_mut();
+        handle
+    }
+}
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                CloseHandle(self.0);
+            }
+            self.0 = std::ptr::null_mut();
+        }
+    }
+}
+
+unsafe impl Send for OwnedHandle {}
 
 pub struct Pty {
     // Backend MUST be the first field for correct drop order.
     // Dropping conout before backend will deadlock ClosePseudoConsole.
     backend: Conpty,
-    conout: ReadPipe,
-    conin: WritePipe,
-    child_watcher: child::ChildExitWatcher,
+    conout: OwnedHandle,
+    conin: OwnedHandle,
+    child: ChildProcess,
 }
 
 impl Pty {
     pub(crate) fn new(
         backend: Conpty,
-        conout: ReadPipe,
-        conin: WritePipe,
-        child_watcher: child::ChildExitWatcher,
+        conout: OwnedHandle,
+        conin: OwnedHandle,
+        child: ChildProcess,
     ) -> Self {
         Self {
             backend,
             conout,
             conin,
-            child_watcher,
+            child,
         }
     }
 
-    pub fn reader(&mut self) -> &mut ReadPipe {
-        &mut self.conout
+    pub fn conout_handle(&self) -> HANDLE {
+        self.conout.raw()
     }
 
-    pub fn writer(&mut self) -> &mut WritePipe {
-        &mut self.conin
+    pub fn conin_handle(&self) -> HANDLE {
+        self.conin.raw()
     }
 
     pub fn resize(&mut self, window_size: WindowSize) {
@@ -58,15 +81,16 @@ impl Pty {
     }
 
     pub fn next_child_event(&mut self) -> Option<ChildEvent> {
-        match self.child_watcher.event_rx().try_recv() {
-            Ok(event) => Some(event),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(ChildEvent::Exited(None)),
-        }
+        self.child.try_wait_event()
     }
 
-    pub fn child_watcher(&self) -> &child::ChildExitWatcher {
-        &self.child_watcher
+    pub fn child_handle(&self) -> HANDLE {
+        self.child.handle()
+    }
+
+    /// Retrieve the Process ID associated to the underlying child process.
+    pub fn pid(&self) -> Option<NonZeroU32> {
+        self.child.pid()
     }
 
     /// Begin graceful shutdown by closing HPCON asynchronously.
@@ -78,7 +102,7 @@ impl Pty {
 
     /// Force-kill the child process when graceful shutdown times out.
     pub fn force_terminate(&self) {
-        self.child_watcher.terminate();
+        self.child.terminate();
     }
 }
 

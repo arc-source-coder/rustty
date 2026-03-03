@@ -2,27 +2,22 @@
 name = "pty"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [dependencies]
 async-channel.workspace = true
 log = "0.4"
-polling = "3.8"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-rustix-openpty = "0.2.0"
-rustix = { version = "1.0.0", default-features = false, features = ["std"] }
-signal-hook = "0.4"
 
 [target.'cfg(windows)'.dependencies]
-piper = "0.2.1"
 miow = "0.6.0"
 windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_System_IO",
+    "Win32_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
 ] }

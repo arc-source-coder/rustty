@@ -1,29 +1,14 @@
-use async_channel::{Receiver, Sender, TryRecvError};
+use async_channel::{Receiver, Sender};
 use std::collections::VecDeque;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use polling::{Event, Events, PollMode, Poller};
-
 use crate::{
-    Options, PTY_COMMAND_CHANNEL_CAPACITY, PTY_EVENT_CHANNEL_CAPACITY, Pty, PtyCommand, PtyEvent,
-    WindowSize,
+    BufferPool, Options, OutputBuffer, PTY_COMMAND_CHANNEL_CAPACITY, PTY_EVENT_CHANNEL_CAPACITY,
+    Pty, PtyCommand, PtyEvent, WindowSize,
 };
 
-#[cfg(windows)]
-use crate::windows::{PTY_CHILD_EVENT_TOKEN, PTY_READ_WRITE_TOKEN};
-
-const READ_BUF_SIZE: usize = 0x10_0000; // 1MB
-const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
-#[cfg(windows)]
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
-
-// On unix, define token constants locally (unix backend doesn't
-// export them since it doesn't use IOCP).
-#[cfg(unix)]
-const PTY_READ_WRITE_TOKEN: usize = 0;
-#[cfg(unix)]
-const PTY_CHILD_EVENT_TOKEN: usize = 1;
 
 pub struct PtyHandle {
     pub event_rx: Receiver<PtyEvent>,
@@ -39,11 +24,12 @@ impl PtyHandle {
         // Spawn the platform PTY before moving to worker thread
         // so we can return spawn errors synchronously.
         let pty = crate::new(&options, window_size)?;
+        let command_signal_tx = command_tx.clone();
 
         let worker = thread::Builder::new()
             .name("pty-worker".into())
             .spawn(move || {
-                worker_loop(pty, event_tx, command_rx);
+                worker_loop(pty, event_tx, command_rx, command_signal_tx);
             })
             .map_err(|e| std::io::Error::other(format!("failed to spawn pty worker: {e}")))?;
 
@@ -57,9 +43,10 @@ impl PtyHandle {
 
 impl Drop for PtyHandle {
     fn drop(&mut self) {
-        // Close the event receiver first — this unblocks the worker
-        // thread if it's stuck in send_blocking() because nobody is
-        // draining the channel. Without this, join() below can deadlock.
+        // Unblock worker sends first: if the worker is stuck in
+        // send_blocking(Output) with no active consumer, closing the receiver
+        // makes that send fail immediately so shutdown can proceed.
+        self.event_rx.close();
         let _ = self.command_tx.try_send(PtyCommand::Close);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -67,282 +54,506 @@ impl Drop for PtyHandle {
     }
 }
 
-fn worker_loop(mut pty: Pty, event_tx: Sender<PtyEvent>, command_rx: Receiver<PtyCommand>) {
-    let poller = match Poller::new() {
-        Ok(p) => std::sync::Arc::new(p),
+fn worker_loop(
+    pty: Pty,
+    event_tx: Sender<PtyEvent>,
+    command_rx: Receiver<PtyCommand>,
+    command_signal_tx: Sender<PtyCommand>,
+) {
+    windows_worker_loop(pty, event_tx, command_rx, command_signal_tx);
+}
+
+fn create_event(manual_reset: bool) -> std::io::Result<windows_sys::Win32::Foundation::HANDLE> {
+    let handle = unsafe {
+        windows_sys::Win32::System::Threading::CreateEventW(
+            std::ptr::null_mut(),
+            manual_reset as i32,
+            0,
+            std::ptr::null(),
+        )
+    };
+    if handle.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(handle)
+}
+
+fn windows_worker_loop(
+    mut pty: Pty,
+    event_tx: Sender<PtyEvent>,
+    command_rx: Receiver<PtyCommand>,
+    command_signal_tx: Sender<PtyCommand>,
+) {
+    use std::sync::{Arc, Mutex};
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThreadId, INFINITE, SetEvent, WaitForMultipleObjects,
+    };
+
+    const MAX_WRITE_CHUNK: usize = 64 * 1024;
+
+    let cmd_event = match create_event(false) {
+        Ok(h) => h,
         Err(e) => {
             event_tx.send_blocking(PtyEvent::Error(e)).ok();
             return;
         }
     };
-
-    // Register PTY for polling.
-    #[cfg(windows)]
-    {
-        let interest = Event::all(PTY_READ_WRITE_TOKEN);
-        pty.reader().register(&poller, interest, PollMode::Level);
-        pty.writer().register(&poller, interest, PollMode::Level);
-        pty.child_watcher()
-            .register(&poller, Event::readable(PTY_CHILD_EVENT_TOKEN));
-    }
-
-    #[cfg(unix)]
-    unsafe {
-        let interest = Event::all(PTY_READ_WRITE_TOKEN);
-        if let Err(e) = poller.add_with_mode(pty.reader(), interest, PollMode::Level) {
+    let read_event = match create_event(false) {
+        Ok(h) => h,
+        Err(e) => {
+            unsafe { CloseHandle(cmd_event) };
             event_tx.send_blocking(PtyEvent::Error(e)).ok();
             return;
         }
-    }
+    };
+    let write_event = match create_event(false) {
+        Ok(h) => h,
+        Err(e) => {
+            unsafe {
+                CloseHandle(read_event);
+                CloseHandle(cmd_event)
+            };
+            event_tx.send_blocking(PtyEvent::Error(e)).ok();
+            return;
+        }
+    };
 
-    let mut events = Events::new();
-    let mut read_buf = vec![0u8; READ_BUF_SIZE];
-    let mut write_buf: VecDeque<u8> = VecDeque::new();
+    // async_channel::Receiver can't be waited on via WaitForMultipleObjects.
+    // Bridge it into a waitable event + shared queue.
+    let queued_commands = Arc::new(Mutex::new(VecDeque::<PtyCommand>::new()));
+    let queued_commands_tx = queued_commands.clone();
+    let cmd_thread_event = cmd_event as usize;
+    let cmd_forwarder = thread::Builder::new()
+        .name(format!("pty-cmd-forward-{}", unsafe {
+            GetCurrentThreadId()
+        }))
+        .spawn(move || {
+            while let Ok(cmd) = command_rx.recv_blocking() {
+                let is_close = matches!(cmd, PtyCommand::Close);
+                queued_commands_tx.lock().unwrap().push_back(cmd);
+                unsafe {
+                    SetEvent(cmd_thread_event as HANDLE);
+                }
+                if is_close {
+                    return;
+                }
+            }
+
+            queued_commands_tx
+                .lock()
+                .unwrap()
+                .push_back(PtyCommand::Close);
+            unsafe {
+                SetEvent(cmd_thread_event as HANDLE);
+            }
+        });
+
+    let mut read_overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    read_overlapped.hEvent = read_event;
+    let mut write_overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    write_overlapped.hEvent = write_event;
+
+    let pool = BufferPool::new(128 * 1024, 4);
+    let mut read_buf = pool.acquire();
+    let mut write_buf = VecDeque::<u8>::new();
+    let mut write_inflight = Vec::<u8>::new();
+    let mut read_pending;
+    let mut write_pending = false;
     let mut closing = false;
     let mut child_exited = false;
-    #[cfg(windows)]
     let mut shutdown_deadline: Option<Instant> = None;
 
-    loop {
-        events.clear();
+    let conout = pty.conout_handle();
+    let conin = pty.conin_handle();
+    let child = pty.child_handle();
 
-        let timeout = if closing {
-            Some(SHUTDOWN_POLL_INTERVAL)
-        } else {
-            // Wake periodically to check command_rx since we
-            // can't add an mpsc receiver to the poller.
-            Some(Duration::from_millis(10))
+    // Queue first read.
+    let (pending, output) = queue_read(
+        conout,
+        &mut read_overlapped,
+        &mut read_buf,
+        &pool,
+        &event_tx,
+        &mut closing,
+        &mut shutdown_deadline,
+    );
+    read_pending = pending;
+    if let Some(output) = output
+        && !emit_output(&event_tx, false, output)
+    {
+        return;
+    }
+
+    while !child_exited {
+        if !write_pending && (!write_inflight.is_empty() || !write_buf.is_empty()) {
+            if write_inflight.is_empty() {
+                let write_len = write_buf.len().min(MAX_WRITE_CHUNK);
+                write_inflight.extend(write_buf.drain(..write_len));
+            }
+            match start_write(conin, &mut write_overlapped, &write_inflight) {
+                Ok(OverlappedStart::Pending) => {
+                    write_pending = true;
+                }
+                Ok(OverlappedStart::Completed(written)) => {
+                    write_pending = false;
+                    if written >= write_inflight.len() {
+                        write_inflight.clear();
+                    } else {
+                        write_inflight.drain(..written);
+                    }
+                }
+                Err(e) => {
+                    report_non_broken_pipe_error(&event_tx, e);
+                    mark_closing(&mut closing, &mut shutdown_deadline);
+                    write_pending = false;
+                    write_inflight.clear();
+                }
+            }
+        }
+
+        let mut handles: [HANDLE; 4] = [cmd_event, child, read_event, write_event];
+        let mut handle_count = 3;
+        if write_pending {
+            handle_count = 4;
+        }
+
+        let timeout = match shutdown_deadline {
+            Some(deadline) => deadline
+                .checked_duration_since(Instant::now())
+                .map_or(0, |remaining| {
+                    remaining.as_millis().min(u32::MAX as u128) as u32
+                }),
+            None => INFINITE,
         };
 
-        if let Err(e) = poller.wait(&mut events, timeout) {
-            if e.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            event_tx.send_blocking(PtyEvent::Error(e)).ok();
-            break;
-        }
-
-        // --- Process poll events ---
-
-        let mut readable = false;
-        let mut writable = false;
-        let mut child_event = false;
-
-        for event in events.iter() {
-            match event.key {
-                k if k == PTY_READ_WRITE_TOKEN => {
-                    if event.readable {
-                        readable = true;
-                    }
-                    if event.writable {
-                        writable = true;
-                    }
+        let wait_result =
+            unsafe { WaitForMultipleObjects(handle_count, handles.as_mut_ptr(), 0, timeout) };
+        match wait_result {
+            x if x == WAIT_OBJECT_0 => {
+                let mut pending_resize = None;
+                let mut drained = VecDeque::new();
+                {
+                    let mut queue = queued_commands.lock().unwrap();
+                    std::mem::swap(&mut *queue, &mut drained);
                 }
-                k if k == PTY_CHILD_EVENT_TOKEN => {
-                    child_event = true;
-                }
-                _ => {}
-            }
-        }
 
-        // Always check (poll may have timed out but data could
-        // still be available on Windows via try_read).
-        readable = true;
-
-        // --- Read output ---
-
-        if readable {
-            loop {
-                let n = {
-                    #[cfg(windows)]
-                    {
-                        pty.reader().try_read(&mut read_buf)
-                    }
-                    #[cfg(unix)]
-                    {
-                        match pty.reader().read(&mut read_buf) {
-                            Ok(n) => n,
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
-                            Err(e) => {
-                                event_tx.send_blocking(PtyEvent::Error(e)).ok();
-                                return;
+                for cmd in drained {
+                    match cmd {
+                        PtyCommand::Write(data) => write_buf.extend(data),
+                        PtyCommand::Resize(size) => pending_resize = Some(size),
+                        PtyCommand::Close => {
+                            if !closing {
+                                pty.start_shutdown();
                             }
+                            mark_closing(&mut closing, &mut shutdown_deadline);
                         }
                     }
-                };
-
-                if n == 0 {
-                    break;
                 }
 
-                let data = read_buf[..n].to_vec();
-                if closing {
-                    // During shutdown, don't block on send.
-                    event_tx.try_send(PtyEvent::Output(data)).ok();
+                if let Some(size) = pending_resize {
+                    pty.resize(size);
+                }
+            }
+            x if x == WAIT_OBJECT_0 + 1 => {
+                if let Some(child_event) = pty.next_child_event() {
+                    child_exited = true;
+                    event_tx
+                        .send_blocking(PtyEvent::Exited(match child_event {
+                            crate::ChildEvent::Exited(s) => s,
+                        }))
+                        .ok();
+                }
+            }
+            x if x == WAIT_OBJECT_0 + 2 => {
+                use windows_sys::Win32::Foundation::ERROR_IO_INCOMPLETE;
+
+                read_pending = false;
+                let mut first_output = None;
+                let mut read = 0_u32;
+                let ok = unsafe { GetOverlappedResult(conout, &mut read_overlapped, &mut read, 0) };
+                if ok == 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() == Some(ERROR_IO_INCOMPLETE as i32) {
+                        mark_closing(&mut closing, &mut shutdown_deadline);
+                    } else {
+                        report_non_broken_pipe_error(&event_tx, err);
+                        mark_closing(&mut closing, &mut shutdown_deadline);
+                    }
+                } else if read == 0 {
+                    mark_closing(&mut closing, &mut shutdown_deadline);
                 } else {
-                    if event_tx.send_blocking(PtyEvent::Output(data)).is_err() {
-                        // Receiver dropped — shut down.
-                        return;
-                    }
+                    first_output = Some(pool.wrap(std::mem::take(&mut read_buf), read as usize));
+                    read_buf = pool.acquire();
                 }
-            }
-        }
 
-        // --- Write pending data ---
+                let mut second_output = None;
+                if first_output.is_some() && !closing {
+                    let (pending, output) = queue_read(
+                        conout,
+                        &mut read_overlapped,
+                        &mut read_buf,
+                        &pool,
+                        &event_tx,
+                        &mut closing,
+                        &mut shutdown_deadline,
+                    );
+                    read_pending = pending;
+                    second_output = output;
+                }
 
-        if writable || !write_buf.is_empty() {
-            while !write_buf.is_empty() {
-                let (front, _) = write_buf.as_slices();
-                if front.is_empty() {
+                if let Some(output) = first_output
+                    && !emit_output(&event_tx, closing, output)
+                {
                     break;
                 }
-                let n = {
-                    #[cfg(windows)]
-                    {
-                        pty.writer().try_write(front)
-                    }
-                    #[cfg(unix)]
-                    {
-                        match pty.writer().write(front) {
-                            Ok(n) => n,
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
-                            Err(e) => {
-                                log::error!("PTY write error: {e}");
-                                0
-                            }
-                        }
-                    }
-                };
-                if n == 0 {
+                if let Some(output) = second_output
+                    && !emit_output(&event_tx, closing, output)
+                {
                     break;
                 }
-                write_buf.drain(..n);
             }
-        }
-
-        // --- Check child exit ---
-
-        if (child_event || !child_exited)
-            && let Some(child_event) = pty.next_child_event()
-        {
-            child_exited = true;
-            if closing {
+            x if x == WAIT_OBJECT_0 + 3 => {
+                write_pending = false;
+                if let Err(e) = complete_write(conin, &mut write_overlapped, &mut write_inflight) {
+                    report_non_broken_pipe_error(&event_tx, e);
+                    mark_closing(&mut closing, &mut shutdown_deadline);
+                    write_inflight.clear();
+                }
+                // write_inflight may still have leftover bytes from a partial write.
+                // They'll be retried on the next loop iteration's start_write block.
+            }
+            WAIT_TIMEOUT => {
+                // Keep looping; timeout primarily drives shutdown deadline checks.
+            }
+            _ => {
                 event_tx
-                    .try_send(PtyEvent::Exited(match child_event {
-                        crate::ChildEvent::Exited(s) => s,
-                    }))
+                    .send_blocking(PtyEvent::Error(std::io::Error::last_os_error()))
                     .ok();
-            } else {
-                event_tx
-                    .send_blocking(PtyEvent::Exited(match child_event {
-                        crate::ChildEvent::Exited(s) => s,
-                    }))
-                    .ok();
-            }
-            // Child exited — begin shutdown.
-            closing = true;
-        }
-
-        // --- Process commands ---
-
-        let mut pending_resize: Option<WindowSize> = None;
-        loop {
-            match command_rx.try_recv() {
-                Ok(PtyCommand::Write(data)) => {
-                    write_buf.extend(&data);
-                }
-                Ok(PtyCommand::Resize(size)) => {
-                    pending_resize = Some(size);
-                }
-                Ok(PtyCommand::Close) => {
-                    if !closing {
-                        #[cfg(windows)]
-                        {
-                            // Close HPCON to send CTRL_CLOSE_EVENT, giving the
-                            // child a chance to exit gracefully before we force-kill.
-                            pty.start_shutdown();
-                            shutdown_deadline = Some(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT);
-                        }
-                    }
-                    closing = true;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Closed) => {
-                    if !closing {
-                        #[cfg(windows)]
-                        {
-                            pty.start_shutdown();
-                            shutdown_deadline = Some(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT);
-                        }
-                    }
-                    closing = true;
-                    break;
-                }
+                break;
             }
         }
 
-        // Apply coalesced resize (last-wins).
-        if let Some(size) = pending_resize {
-            pty.resize(size);
-        }
-
-        // --- Shutdown ---
-
-        if closing && child_exited {
-            // Child has exited and we've been asked to close.
-            // Drain any remaining output, then exit.
-            break;
-        }
-
-        #[cfg(windows)]
         if closing
             && !child_exited
             && let Some(deadline) = shutdown_deadline
             && Instant::now() >= deadline
         {
-            // Graceful shutdown timed out — force-kill the child.
             pty.force_terminate();
-            shutdown_deadline = None;
+            child_exited = true;
+            event_tx.send_blocking(PtyEvent::Exited(None)).ok();
+            break;
         }
 
-        // Re-register for polling on Unix (level-triggered
-        // should be automatic, but reregister for edge cases).
-        #[cfg(unix)]
-        {
-            let interest = Event::all(PTY_READ_WRITE_TOKEN);
-            let _ = poller.modify_with_mode(pty.reader(), interest, PollMode::Level);
-        }
-
-        #[cfg(windows)]
-        {
-            let interest = Event::all(PTY_READ_WRITE_TOKEN);
-            pty.reader().register(&poller, interest, PollMode::Level);
-            pty.writer().register(&poller, interest, PollMode::Level);
+        if !closing && !read_pending {
+            let (pending, output) = queue_read(
+                conout,
+                &mut read_overlapped,
+                &mut read_buf,
+                &pool,
+                &event_tx,
+                &mut closing,
+                &mut shutdown_deadline,
+            );
+            read_pending = pending;
+            if let Some(output) = output
+                && !emit_output(&event_tx, false, output)
+            {
+                break;
+            }
         }
     }
 
-    // Deregister and drop PTY (triggers ClosePseudoConsole /
-    // SIGHUP). conout is still valid at this point because
-    // backend is the first field and gets dropped first.
-    #[cfg(windows)]
-    {
-        pty.reader().deregister();
-        pty.writer().deregister();
-        pty.child_watcher().deregister();
+    // Cancel any pending IO and wait for the kernel to release our buffers.
+    if read_pending {
+        unsafe { CancelIoEx(conout, &mut read_overlapped as *mut _ as *mut _) };
+        let mut _bytes = 0u32;
+        unsafe { GetOverlappedResult(conout, &mut read_overlapped, &mut _bytes, 1) }; // bWait=TRUE
+    }
+    if write_pending {
+        unsafe { CancelIoEx(conin, &mut write_overlapped as *mut _ as *mut _) };
+        let mut _bytes = 0u32;
+        unsafe { GetOverlappedResult(conin, &mut write_overlapped, &mut _bytes, 1) }; // bWait=TRUE
     }
 
-    #[cfg(unix)]
-    {
-        let _ = poller.delete(pty.reader());
+    // Ensure the forwarder can exit even if the UI-side sender is still alive.
+    let _ = command_signal_tx.try_send(PtyCommand::Close);
+
+    if let Ok(handle) = cmd_forwarder {
+        let _ = handle.join();
     }
 
-    // pty is dropped here — platform Drop impl handles cleanup.
+    unsafe {
+        CloseHandle(write_event);
+        CloseHandle(read_event);
+        CloseHandle(cmd_event);
+    }
+
     drop(pty);
-
-    // If we haven't sent Exited yet, send it now.
     if !child_exited {
-        event_tx.try_send(PtyEvent::Exited(None)).ok();
+        event_tx.send_blocking(PtyEvent::Exited(None)).ok();
     }
+}
+
+fn mark_closing(closing: &mut bool, shutdown_deadline: &mut Option<Instant>) {
+    *closing = true;
+    shutdown_deadline.get_or_insert_with(|| Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT);
+}
+
+fn emit_output(event_tx: &Sender<PtyEvent>, closing: bool, data: OutputBuffer) -> bool {
+    if closing {
+        event_tx.try_send(PtyEvent::Output(data)).ok();
+        true
+    } else {
+        event_tx.send_blocking(PtyEvent::Output(data)).is_ok()
+    }
+}
+
+fn queue_read(
+    conout: windows_sys::Win32::Foundation::HANDLE,
+    read_overlapped: &mut windows_sys::Win32::System::IO::OVERLAPPED,
+    read_buf: &mut Vec<u8>,
+    pool: &std::sync::Arc<BufferPool>,
+    event_tx: &Sender<PtyEvent>,
+    closing: &mut bool,
+    shutdown_deadline: &mut Option<Instant>,
+) -> (bool, Option<OutputBuffer>) {
+    match start_read(conout, read_overlapped, read_buf) {
+        Ok(OverlappedStart::Pending) => (true, None),
+        Ok(OverlappedStart::Completed(n)) => {
+            if n == 0 {
+                mark_closing(closing, shutdown_deadline);
+                return (false, None);
+            }
+            let output = pool.wrap(std::mem::take(read_buf), n);
+            *read_buf = pool.acquire();
+            (false, Some(output))
+        }
+        Err(e) => {
+            report_non_broken_pipe_error(event_tx, e);
+            mark_closing(closing, shutdown_deadline);
+            (false, None)
+        }
+    }
+}
+
+fn report_non_broken_pipe_error(event_tx: &Sender<PtyEvent>, e: std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::BrokenPipe {
+        return true;
+    }
+    event_tx.send_blocking(PtyEvent::Error(e)).is_ok()
+}
+
+enum OverlappedStart {
+    Pending,
+    Completed(usize),
+}
+
+fn start_read(
+    conout: windows_sys::Win32::Foundation::HANDLE,
+    overlapped: &mut windows_sys::Win32::System::IO::OVERLAPPED,
+    buf: &mut [u8],
+) -> std::io::Result<OverlappedStart> {
+    use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_IO_PENDING};
+    use windows_sys::Win32::Storage::FileSystem::ReadFile;
+    use windows_sys::Win32::System::Threading::ResetEvent;
+
+    let mut read = 0_u32;
+    unsafe {
+        ResetEvent(overlapped.hEvent);
+        if ReadFile(
+            conout,
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+            &mut read,
+            overlapped,
+        ) == 0
+        {
+            let err = std::io::Error::last_os_error();
+            let raw = err.raw_os_error();
+            if raw == Some(ERROR_IO_PENDING as i32) {
+                // Overlapped read queued; completion arrives via read_event.
+                return Ok(OverlappedStart::Pending);
+            }
+            if raw == Some(ERROR_BROKEN_PIPE as i32) {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            return Err(err);
+        }
+    }
+    Ok(OverlappedStart::Completed(read as usize))
+}
+
+fn start_write(
+    conin: windows_sys::Win32::Foundation::HANDLE,
+    overlapped: &mut windows_sys::Win32::System::IO::OVERLAPPED,
+    data: &[u8],
+) -> std::io::Result<OverlappedStart> {
+    use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_IO_PENDING};
+    use windows_sys::Win32::Storage::FileSystem::WriteFile;
+    use windows_sys::Win32::System::Threading::ResetEvent;
+
+    if data.is_empty() {
+        return Ok(OverlappedStart::Completed(0));
+    }
+
+    let mut written = 0_u32;
+    unsafe {
+        ResetEvent(overlapped.hEvent);
+        if WriteFile(
+            conin,
+            data.as_ptr().cast(),
+            data.len() as u32,
+            &mut written,
+            overlapped,
+        ) == 0
+        {
+            let err = std::io::Error::last_os_error();
+            let raw = err.raw_os_error();
+            if raw == Some(ERROR_IO_PENDING as i32) {
+                // Overlapped write queued; completion arrives via write_event.
+                return Ok(OverlappedStart::Pending);
+            }
+            if raw == Some(ERROR_BROKEN_PIPE as i32) {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            return Err(err);
+        }
+    }
+    Ok(OverlappedStart::Completed(written as usize))
+}
+
+fn complete_write(
+    conin: windows_sys::Win32::Foundation::HANDLE,
+    overlapped: &mut windows_sys::Win32::System::IO::OVERLAPPED,
+    inflight: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::ERROR_IO_INCOMPLETE;
+    use windows_sys::Win32::System::IO::GetOverlappedResult;
+
+    if inflight.is_empty() {
+        return Ok(());
+    }
+
+    let mut written = 0_u32;
+    let ok = unsafe { GetOverlappedResult(conin, overlapped, &mut written, 0) };
+    if ok == 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(ERROR_IO_INCOMPLETE as i32) {
+            return Ok(());
+        }
+        return Err(err);
+    }
+
+    let written = written as usize;
+    if written >= inflight.len() {
+        inflight.clear();
+    } else {
+        inflight.drain(..written);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -365,10 +576,7 @@ mod tests {
     fn test_options() -> Options {
         Options {
             shell: Some(Shell {
-                #[cfg(windows)]
-                program: "powershell.exe".into(),
-                #[cfg(unix)]
-                program: "/bin/sh".into(),
+                program: "cmd.exe".into(),
                 args: vec![],
             }),
             ..Default::default()
@@ -412,10 +620,7 @@ mod tests {
         // Drain any initial output.
         while handle.event_rx.try_recv().is_ok() {}
 
-        #[cfg(windows)]
         let cmd = b"echo hello\r\n".to_vec();
-        #[cfg(unix)]
-        let cmd = b"echo hello\n".to_vec();
 
         handle
             .command_tx
