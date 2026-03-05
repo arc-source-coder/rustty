@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::sync::{Arc, Mutex};
 use std::{cell::Cell, rc::Rc};
 
@@ -7,8 +8,8 @@ use crate::text_runs::{BgRect, PositionedTextRun, build_row_runs};
 use ghostty_vt::{DirtyState, Terminal};
 use gpui::{
     App, Bounds, DefiniteLength, Element, ElementId, Entity, GlobalElementId, Hitbox,
-    HitboxBehavior, InspectorElementId, IntoElement, LayoutId, Length, Pixels, Point, SharedString,
-    Size, Style, TextAlign, TextRun, Window, fill, point, px, size,
+    HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, Length, PathBuilder, Pixels,
+    Point, SharedString, Size, Style, TextAlign, TextRun, Window, fill, hsla, point, px, size,
 };
 use terminal::TerminalSession;
 
@@ -40,7 +41,7 @@ struct CellMetricsCache {
 pub struct LayoutState {
     pub hitbox: Hitbox,
     pub grid: GridDimensions,
-    pub background_color: gpui::Hsla,
+    pub background_color: Hsla,
     /// Shared with TerminalElementState — Arc::clone is O(1).
     pub row_text_runs: Arc<Vec<Vec<PositionedTextRun>>>,
     pub bg_rects: Vec<BgRect>,
@@ -61,8 +62,8 @@ pub struct TerminalElementState {
     /// Cached font metrics (recomputed only when font config changes).
     cached_metrics: Option<CellMetricsCache>,
     /// Default fg/bg colors at last render (invalidate on change).
-    last_default_fg: Option<gpui::Hsla>,
-    last_default_bg: Option<gpui::Hsla>,
+    last_default_fg: Option<Hsla>,
+    last_default_bg: Option<Hsla>,
     /// Simple palette hash (invalidate on palette change).
     last_palette_hash: u64,
 }
@@ -141,6 +142,154 @@ impl TerminalElement {
             rows,
             metrics,
         }
+    }
+}
+
+/// Per-row selection segment for path-based rendering.
+#[derive(Debug, Clone, Copy)]
+struct SelectionLine {
+    start_x: Pixels,
+    end_x: Pixels,
+    y: Pixels,
+}
+
+/// Paint terminal selection using a continuous path with rounded corners.
+/// Adapted from Zed's HighlightedRange approach for multi-line selection rendering.
+fn paint_selection_path(
+    selection_rects: &[(u16, u16, u16)], // (row, start_col, end_col)
+    origin: Point<Pixels>,
+    metrics: &CellMetrics,
+    corner_radius: Pixels,
+    color: Hsla,
+    window: &mut Window,
+) {
+    // Convert selection rects to SelectionLine segments.
+    // Rows are already in order from the snapshot, so no sorting needed.
+    let lines: Vec<SelectionLine> = selection_rects
+        .iter()
+        .map(|&(row, start_col, end_col)| {
+            let start_x = origin.x + start_col as f32 * metrics.cell_width;
+            let end_x = origin.x + (end_col + 1) as f32 * metrics.cell_width;
+            let y = origin.y + row as f32 * metrics.line_height;
+            SelectionLine { start_x, end_x, y }
+        })
+        .collect();
+
+    if lines.is_empty() {
+        return;
+    }
+
+    // Group lines into contiguous ranges (handles multi-line selections with gaps).
+    // Selections from the snapshot are per-row, so we group contiguous rows.
+    let mut groups: Vec<Vec<SelectionLine>> = Vec::new();
+    let mut current_group: Vec<SelectionLine> = vec![lines[0]];
+    let threshold = f32::from(metrics.line_height) * 1.5;
+
+    for line in lines.iter().skip(1) {
+        let prev = current_group.last().unwrap();
+        if f32::from(line.y - prev.y) <= threshold {
+            current_group.push(*line);
+        } else {
+            groups.push(current_group);
+            current_group = vec![*line];
+        }
+    }
+    groups.push(current_group);
+
+    for group in groups {
+        paint_selection_group(&group, metrics.line_height, corner_radius, color, window);
+    }
+}
+
+/// Paint a contiguous group of selection lines as a single path.
+fn paint_selection_group(
+    lines: &[SelectionLine],
+    line_height: Pixels,
+    corner_radius: Pixels,
+    color: Hsla,
+    window: &mut Window,
+) {
+    if lines.is_empty() {
+        return;
+    }
+
+    let first_line = &lines[0];
+    let last_line = &lines[lines.len() - 1];
+
+    let first_top_left = point(first_line.start_x, first_line.y);
+    let first_top_right = point(first_line.end_x, first_line.y);
+
+    let curve_height = point(Pixels::ZERO, corner_radius);
+    let curve_width = |start_x: Pixels, end_x: Pixels| {
+        let max = (end_x - start_x) / 2.;
+        point(max.min(corner_radius), Pixels::ZERO)
+    };
+
+    let top_curve_width = curve_width(first_line.start_x, first_line.end_x);
+    let mut builder = PathBuilder::fill();
+
+    builder.move_to(first_top_right - top_curve_width);
+    builder.curve_to(first_top_right + curve_height, first_top_right);
+
+    // Build the right edge going down
+    let mut iter = lines.iter().peekable();
+    while let Some(line) = iter.next() {
+        let bottom_right = point(line.end_x, line.y + line_height);
+
+        if let Some(next_line) = iter.peek() {
+            let next_top_right = point(next_line.end_x, next_line.y);
+
+            match next_top_right.x.partial_cmp(&bottom_right.x).unwrap() {
+                Ordering::Equal => {
+                    builder.line_to(bottom_right);
+                }
+                Ordering::Less => {
+                    let cw = curve_width(next_top_right.x, bottom_right.x);
+                    builder.line_to(bottom_right - curve_height);
+                    builder.curve_to(bottom_right - cw, bottom_right);
+                    builder.line_to(next_top_right + cw);
+                    builder.curve_to(next_top_right + curve_height, next_top_right);
+                }
+                Ordering::Greater => {
+                    let cw = curve_width(bottom_right.x, next_top_right.x);
+                    builder.line_to(bottom_right - curve_height);
+                    builder.curve_to(bottom_right + cw, bottom_right);
+                    builder.line_to(next_top_right - cw);
+                    builder.curve_to(next_top_right + curve_height, next_top_right);
+                }
+            }
+        } else {
+            // Last line - curve the bottom-right corner
+            let cw = curve_width(line.start_x, line.end_x);
+            builder.line_to(bottom_right - curve_height);
+            builder.curve_to(bottom_right - cw, bottom_right);
+
+            // Bottom edge
+            let bottom_left = point(line.start_x, bottom_right.y);
+            builder.line_to(bottom_left + cw);
+            builder.curve_to(bottom_left - curve_height, bottom_left);
+        }
+    }
+
+    // Build the left edge going up
+    if first_line.start_x > last_line.start_x {
+        // Selection narrows at the bottom - add inner corner
+        let cw = curve_width(last_line.start_x, first_line.start_x);
+        let second_top_left = point(last_line.start_x, first_line.y + line_height);
+        builder.line_to(second_top_left + curve_height);
+        builder.curve_to(second_top_left + cw, second_top_left);
+        let first_bottom_left = point(first_line.start_x, second_top_left.y);
+        builder.line_to(first_bottom_left - cw);
+        builder.curve_to(first_bottom_left - curve_height, first_bottom_left);
+    }
+
+    // Close the path
+    builder.line_to(first_top_left + curve_height);
+    builder.curve_to(first_top_left + top_curve_width, first_top_left);
+    builder.line_to(first_top_right - top_curve_width);
+
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
     }
 }
 
@@ -404,20 +553,18 @@ impl Element for TerminalElement {
         }
 
         // Layer 3: Selection overlay (translucent).
-        let selection_color = gpui::Hsla {
-            h: 0.6,
-            s: 0.7,
-            l: 0.5,
-            a: 0.3,
-        };
-        for &(row, start_col, end_col) in &layout.selection_rects {
-            let width = (end_col - start_col + 1) as f32;
-            let pos = point(
-                origin.x + start_col as f32 * metrics.cell_width,
-                origin.y + row as f32 * metrics.line_height,
+        let selection_color = hsla(0.58, 0.70, 0.17, 0.25);
+        let corner_radius = px(0.15 * f32::from(metrics.line_height));
+
+        if !layout.selection_rects.is_empty() {
+            paint_selection_path(
+                &layout.selection_rects,
+                origin,
+                metrics,
+                corner_radius,
+                selection_color,
+                window,
             );
-            let sel_size = size(metrics.cell_width * width, metrics.line_height);
-            window.paint_quad(fill(Bounds::new(pos, sel_size), selection_color));
         }
 
         // Layer 4: Text runs.

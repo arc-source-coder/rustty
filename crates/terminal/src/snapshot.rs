@@ -4,6 +4,7 @@ use ghostty_vt::{ColorRGB, ColorState, CursorState, DirtyState, FlatCell, Termin
 /// Owned snapshot of all render data, built inside one Mutex lock scope.
 /// The renderer uses this for text shaping and painting without holding
 /// the terminal lock.
+#[derive(Clone)]
 pub struct RenderSnapshot {
     pub dirty: DirtyState,
     pub colors: ColorState,
@@ -15,6 +16,7 @@ pub struct RenderSnapshot {
 }
 
 /// Per-row snapshot data.
+#[derive(Clone)]
 pub struct RowSnapshot {
     pub cells: Option<Vec<FlatCell>>,
     pub dirty: bool,

@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use gpui::{AsyncApp, Context, Entity, Task, WeakEntity};
+use gpui::{AsyncApp, Context, Entity, Modifiers, Task, WeakEntity};
 
-use ghostty_vt::{ColorRGB, Terminal};
+use ghostty_vt::{ColorRGB, FlatCell, MouseMode, Terminal};
 use pty::{Options, PtyCommand, PtyHandle, Shell, WindowSize};
 
 use crate::config::{RenderConfig, SpawnConfig};
@@ -324,10 +324,141 @@ impl TerminalSession {
         }
     }
 
+    /// Set terminal selection in viewport coordinates (0-indexed).
+    /// start and end are (col, row) pairs where row is u32 for scrollback-aware coords.
+    /// rectangular = true for Alt+drag block selection.
+    pub fn set_selection(&self, start: (u16, u32), end: (u16, u32), rectangular: bool) {
+        self.terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .set_selection(start.0, start.1, end.0, end.1, rectangular);
+    }
+
+    /// Clear any active terminal selection.
+    pub fn clear_selection(&self) {
+        self.terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .clear_selection();
+    }
+
+    /// Copy the currently selected text. Returns None if no selection is active.
+    /// Caller is responsible for writing to the clipboard.
+    pub fn copy_selection(&self) -> Option<String> {
+        self.terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .selection_text()
+            .map(|s| s.as_str().to_owned())
+    }
+
     /// Access the render config.
     pub fn render_config(&self) -> &Entity<RenderConfig> {
         &self.render_config
     }
+
+    // --- Selection gesture handling ---
+
+    /// Handle mouse down for selection. Returns None to send to PTY, Some(anchor) if handled.
+    pub fn handle_mouse_down(
+        &self,
+        pos: (u16, u16),
+        click_count: u8,
+        mods: &Modifiers,
+    ) -> Option<Option<(u16, u16)>> {
+        let mut term = self.terminal.lock().expect("terminal mutex poisoned");
+
+        if term.input_opts().mouse_event != MouseMode::None && !mods.shift {
+            return None; // Let PTY handle it
+        }
+
+        match click_count {
+            1 => {
+                term.clear_selection();
+                Some(Some(pos)) // Return anchor for drag-to-select
+            }
+            2 => {
+                let (start, end) = Self::expand_word(&mut term, pos);
+                term.set_selection(start.0, start.1, end.0, end.1, false);
+                Some(None)
+            }
+            3 => {
+                let (start, end) = Self::expand_line(&mut term, pos);
+                term.set_selection(start.0, start.1, end.0, end.1, false);
+                Some(None)
+            }
+            _ => Some(None),
+        }
+    }
+
+    const WORD_DELIMITERS: &str = "/\\()\"'-.,:;<>~!@#$%^&*|+=[]{}~?\u{2502}";
+
+    fn classify_codepoint(cp: u32) -> DelimClass {
+        if cp == 0 || cp <= 0x20 {
+            return DelimClass::Control;
+        }
+        char::from_u32(cp)
+            .filter(|c| Self::WORD_DELIMITERS.contains(*c))
+            .map_or(DelimClass::Regular, |_| DelimClass::Delimiter)
+    }
+
+    fn effective_codepoint(cells: &[FlatCell], col: u16) -> u32 {
+        let idx = col as usize;
+        cells.get(idx).map_or(0, |cell| {
+            if cell.wide == 2 && idx > 0 {
+                cells[idx - 1].codepoint
+            } else {
+                cell.codepoint
+            }
+        })
+    }
+
+    fn expand_word(term: &mut Terminal, pos: (u16, u16)) -> ((u16, u32), (u16, u32)) {
+        let (col, row) = pos;
+        term.render_update();
+        let frame = term.begin_frame();
+
+        let cells = match frame.row_cells(row) {
+            Some(c) if !c.is_empty() => c,
+            _ => return ((col, row as u32), (col, row as u32)),
+        };
+
+        let col = col.min(cells.len().saturating_sub(1) as u16);
+        let target = Self::classify_codepoint(Self::effective_codepoint(&cells, col));
+
+        // Walk left to find start
+        let mut start = col;
+        while start > 0
+            && Self::classify_codepoint(Self::effective_codepoint(&cells, start - 1)) == target
+        {
+            start -= 1;
+        }
+
+        // Walk right to find end
+        let mut end = col;
+        while (end as usize) + 1 < cells.len()
+            && Self::classify_codepoint(Self::effective_codepoint(&cells, end + 1)) == target
+        {
+            end += 1;
+        }
+
+        ((start, row as u32), (end, row as u32))
+    }
+
+    fn expand_line(term: &mut Terminal, pos: (u16, u16)) -> ((u16, u32), (u16, u32)) {
+        let (_, row) = pos;
+        term.render_update();
+        let last_col = term.begin_frame().cols().saturating_sub(1);
+        ((0, row as u32), (last_col, row as u32))
+    }
+}
+
+/// Delimiter classification for word selection.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum DelimClass {
+    Control,   // space / empty / wide-continuation spacer
+    Delimiter, // punctuation delimiter
+    Regular,   // word character
 }
 
 #[cfg(test)]

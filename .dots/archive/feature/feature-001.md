@@ -1,8 +1,9 @@
 ---
 title: Selection + copy/paste (gestures, terminal-owned selection, clipboard)
-status: open
+status: closed
 priority: 2
 created-at: "2026-02-23T03:14:37Z"
+closed-at: "2026-03-05T16:14:33Z"
 blockers:
   - app-001
   - terminal-002

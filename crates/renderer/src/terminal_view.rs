@@ -2,12 +2,12 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use ghostty_vt::Terminal;
+use ghostty_vt::{MouseMode, Terminal};
 use gpui::{
-    App, Context, ElementId, Entity, FocusHandle, FocusOutEvent, Focusable, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Styled, Subscription,
-    Window, div, px,
+    App, ClipboardItem, Context, CursorStyle, ElementId, Entity, FocusHandle, FocusOutEvent,
+    Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta,
+    ScrollWheelEvent, Styled, Subscription, Window, div, px,
 };
 use terminal::TerminalSession;
 
@@ -17,6 +17,17 @@ use crate::terminal_element::{CellMetrics, TerminalElement};
 /// the element's window-relative origin during prepaint; `TerminalView` reads it
 /// in mouse handlers to convert window-space positions to element-local space.
 type SharedOrigin = Rc<Cell<Option<Point<Pixels>>>>;
+
+/// Controls where mouse events go for the duration of a left-button drag gesture.
+/// Determined once on mouse-down and held fixed until mouse-up to prevent
+/// mode drift if modifiers change mid-gesture.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GestureTarget {
+    /// Events forwarded to the PTY (mouse reporting mode is active).
+    Pty,
+    /// Events handled as host-side selection. rectangular = Alt was held at gesture start.
+    HostSelect { rectangular: bool },
+}
 
 /// GPUI entity that owns the renderer's view of a terminal session.
 ///
@@ -33,6 +44,11 @@ pub struct TerminalView {
     /// The element's window-relative origin, written by `TerminalElement::prepaint`.
     /// Used to convert window-space mouse positions to element-local positions.
     element_origin: SharedOrigin,
+    /// The viewport cell where a left-drag selection started.
+    /// None after double/triple-click (those complete immediately).
+    drag_anchor: Option<(u16, u16)>,
+    /// Gesture routing, set on left mouse-down, cleared on mouse-up and focus-out.
+    gesture_target: Option<GestureTarget>,
     /// Focus event subscriptions. Must be stored to keep the listeners active.
     _subscriptions: Vec<Subscription>,
 }
@@ -68,6 +84,8 @@ impl TerminalView {
             focus_handle,
             cell_metrics: None,
             element_origin: Rc::new(Cell::new(None)),
+            drag_anchor: None,
+            gesture_target: None,
             _subscriptions: vec![focus_in_sub, focus_out_sub],
         }
     }
@@ -84,6 +102,8 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.drag_anchor = None;
+        self.gesture_target = None;
         self.session.read(cx).send_focus_change(false);
     }
 
@@ -125,25 +145,110 @@ impl TerminalView {
         ))
     }
 
-    fn handle_mouse_down(
+    fn handle_left_mouse_down(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
-
-        let Some(button) = mouse_button_code(event.button) else {
-            return;
-        };
         let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
             return;
         };
 
-        // action 0 = press
+        // PTY consumes the gesture when mouse reporting is active AND Shift is not held.
+        // Shift always forces host-side selection override.
+        let mouse_reporting = self
+            .terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .input_opts()
+            .mouse_event
+            != MouseMode::None;
+
+        let target = if mouse_reporting && !event.modifiers.shift {
+            GestureTarget::Pty
+        } else {
+            // rectangular is captured at gesture start so Alt cannot flip mid-drag.
+            GestureTarget::HostSelect {
+                rectangular: event.modifiers.alt,
+            }
+        };
+        self.gesture_target = Some(target);
+
+        match target {
+            GestureTarget::Pty => {
+                self.session.read(cx).send_mouse_event(
+                    0,
+                    0,
+                    event.modifiers.shift,
+                    event.modifiers.alt,
+                    event.modifiers.control,
+                    x,
+                    y,
+                );
+            }
+            GestureTarget::HostSelect { .. } => {
+                match self.session.read(cx).handle_mouse_down(
+                    (x, y),
+                    event.click_count as u8,
+                    &event.modifiers,
+                ) {
+                    None => {}
+                    Some(anchor) => {
+                        self.drag_anchor = anchor;
+                        cx.notify();
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_right_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        let mouse_reporting = self
+            .terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .input_opts()
+            .mouse_event
+            != MouseMode::None;
+
+        if mouse_reporting && !event.modifiers.shift {
+            let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
+                return;
+            };
+            self.session.read(cx).send_mouse_event(
+                2,
+                0,
+                event.modifiers.shift,
+                event.modifiers.alt,
+                event.modifiers.control,
+                x,
+                y,
+            );
+        }
+        // Otherwise: wait for right mouse-up to copy+clear.
+    }
+
+    fn handle_middle_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
+            return;
+        };
         self.session.read(cx).send_mouse_event(
-            button,
-            0, // press
+            1,
+            0,
             event.modifiers.shift,
             event.modifiers.alt,
             event.modifiers.control,
@@ -152,23 +257,78 @@ impl TerminalView {
         );
     }
 
-    fn handle_mouse_up(
+    fn handle_left_mouse_up(
         &mut self,
         event: &MouseUpEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(button) = mouse_button_code(event.button) else {
+        if let Some(GestureTarget::Pty) = self.gesture_target {
+            if let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) {
+                self.session.read(cx).send_mouse_event(
+                    0,
+                    1,
+                    event.modifiers.shift,
+                    event.modifiers.alt,
+                    event.modifiers.control,
+                    x,
+                    y,
+                );
+            }
+        }
+        // HostSelect: selection already committed incrementally via mouse_move.
+        self.drag_anchor = None;
+        self.gesture_target = None;
+    }
+
+    fn handle_right_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mouse_reporting = self
+            .terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .input_opts()
+            .mouse_event
+            != MouseMode::None;
+
+        if mouse_reporting && !event.modifiers.shift {
+            if let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) {
+                self.session.read(cx).send_mouse_event(
+                    2,
+                    1,
+                    event.modifiers.shift,
+                    event.modifiers.alt,
+                    event.modifiers.control,
+                    x,
+                    y,
+                );
+            }
             return;
-        };
+        }
+        // Host-side right-click: copy selection to clipboard, then clear it.
+        if let Some(text) = self.session.read(cx).copy_selection() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+        self.session.read(cx).clear_selection();
+        cx.notify();
+    }
+
+    fn handle_middle_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
             return;
         };
-
-        // action 1 = release
         self.session.read(cx).send_mouse_event(
-            button,
-            1, // release
+            1,
+            1,
             event.modifiers.shift,
             event.modifiers.alt,
             event.modifiers.control,
@@ -183,31 +343,39 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Skip if mouse is outside the terminal bounds (negative coords after
-        // subtracting element origin). This prevents spurious events during
-        // window drag operations or when cursor leaves the terminal area.
         let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
             return;
         };
-
-        // Determine button code: use pressed button if any, otherwise 3 (no button).
-        // Button 3 is used for hover motion in Button/Any mouse modes.
-        // The encoder will only produce output when mouse mode supports motion.
         let button = event
             .pressed_button
             .and_then(mouse_button_code)
             .unwrap_or(3);
 
-        // action 2 = motion
-        self.session.read(cx).send_mouse_event(
-            button,
-            2, // motion
-            event.modifiers.shift,
-            event.modifiers.alt,
-            event.modifiers.control,
-            x,
-            y,
-        );
+        match self.gesture_target {
+            Some(GestureTarget::HostSelect { rectangular }) => {
+                if let Some((ax, ay)) = self.drag_anchor {
+                    // rectangular was captured at gesture start; ignore current modifiers.
+                    self.session.read(cx).set_selection(
+                        (ax, ay as u32),
+                        (x, y as u32),
+                        rectangular,
+                    );
+                    cx.notify();
+                }
+            }
+            _ => {
+                // PTY gesture or hover — forward to PTY (no-op when reporting off)
+                self.session.read(cx).send_mouse_event(
+                    button,
+                    2,
+                    event.modifiers.shift,
+                    event.modifiers.alt,
+                    event.modifiers.control,
+                    x,
+                    y,
+                );
+            }
+        }
     }
 
     fn handle_scroll_wheel(
@@ -290,6 +458,19 @@ impl TerminalView {
         }
         self.session.read(cx).send_paste(&text);
     }
+
+    fn handle_copy(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.session.read(cx).copy_selection() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.session.read(cx).clear_selection();
+            cx.notify();
+        }
+    }
+
+    /// Check if there's an active selection in the terminal.
+    fn has_selection(&self, cx: &Context<Self>) -> bool {
+        self.session.read(cx).copy_selection().is_some()
+    }
 }
 
 impl Focusable for TerminalView {
@@ -309,10 +490,23 @@ impl Render for TerminalView {
 
         div()
             .size_full()
+            .cursor(CursorStyle::IBeam)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.to_lowercase();
                 let mods = &event.keystroke.modifiers;
+
+                // Intercept copy: Ctrl+C (Windows, if selection exists) or Ctrl+Shift+C (all platforms)
+                let is_copy = (mods.control && mods.shift && key == "c")
+                    || (cfg!(target_os = "windows")
+                        && mods.control
+                        && !mods.shift
+                        && key == "c"
+                        && this.has_selection(cx));
+                if is_copy {
+                    this.handle_copy(window, cx);
+                    return;
+                }
 
                 // Intercept paste: Ctrl+V (Windows) or Ctrl+Shift+V (Linux) or Cmd+V (macOS)
                 let is_paste = (mods.control && key == "v")
@@ -327,12 +521,21 @@ impl Render for TerminalView {
                     .read(cx)
                     .send_key_event(&event.keystroke, event.is_held);
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
-            .on_mouse_down(MouseButton::Middle, cx.listener(Self::handle_mouse_down))
-            .on_mouse_down(MouseButton::Right, cx.listener(Self::handle_mouse_down))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
-            .on_mouse_up(MouseButton::Middle, cx.listener(Self::handle_mouse_up))
-            .on_mouse_up(MouseButton::Right, cx.listener(Self::handle_mouse_up))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_left_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_left_mouse_up))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(Self::handle_right_mouse_down),
+            )
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::handle_right_mouse_up))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(Self::handle_middle_mouse_down),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(Self::handle_middle_mouse_up),
+            )
             .on_mouse_move(cx.listener(Self::handle_mouse_move))
             .on_scroll_wheel(cx.listener(Self::handle_scroll_wheel))
             .child(terminal_element)
