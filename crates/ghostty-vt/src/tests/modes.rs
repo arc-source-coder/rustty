@@ -5,7 +5,18 @@ const DEFAULT_BG: (u8, u8, u8) = (0x1E, 0x1E, 0x2E);
 
 #[test]
 fn test_mode_flags_default() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
     // Defaults: no mouse, no bracketed paste, no kitty flags
     assert_eq!(unsafe { ghostty_vt_terminal_get_mouse_mode(ptr) }, 0);
     assert_eq!(unsafe { ghostty_vt_terminal_get_mouse_format(ptr) }, 0);
@@ -19,7 +30,18 @@ fn test_mode_flags_default() {
 
 #[test]
 fn test_bracketed_paste_enabled() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
     // CSI ?2004h enables bracketed paste
     let seq = b"\x1b[?2004h";
     unsafe { ghostty_vt_terminal_feed(ptr, seq.as_ptr(), seq.len()) };
@@ -33,7 +55,18 @@ fn test_bracketed_paste_enabled() {
 
 #[test]
 fn test_mouse_mode_enabled() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
     // CSI ?1003h enables any-event mouse tracking
     let seq = b"\x1b[?1003h";
     unsafe { ghostty_vt_terminal_feed(ptr, seq.as_ptr(), seq.len()) };

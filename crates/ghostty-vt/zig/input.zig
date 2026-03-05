@@ -15,10 +15,6 @@ const input_key = @import("ghostty/src/input/key.zig");
 const KittyFlags = @import("ghostty/src/terminal/kitty/key.zig").Flags;
 const Terminal = @import("ghostty/src/terminal/Terminal.zig");
 
-
-
-
-
 /// C-compatible snapshot of all terminal input mode flags.
 ///
 /// Captured once under the terminal mutex via ghostty_vt_terminal_get_input_opts.

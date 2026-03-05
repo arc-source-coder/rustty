@@ -15,11 +15,17 @@ pub fn detect_profiles() -> (Vec<Profile>, ProfileId) {
 /// Select the default profile. Prefers pwsh > PowerShell > first profile.
 fn select_default(profiles: &[Profile]) -> ProfileId {
     // Prefer pwsh (PowerShell Core) if available
-    if let Some(p) = profiles.iter().find(|p| matches!(p.shell_kind, ShellKind::Pwsh)) {
+    if let Some(p) = profiles
+        .iter()
+        .find(|p| matches!(p.shell_kind, ShellKind::Pwsh))
+    {
         return p.id;
     }
     // Fall back to Windows PowerShell
-    if let Some(p) = profiles.iter().find(|p| matches!(p.shell_kind, ShellKind::PowerShell)) {
+    if let Some(p) = profiles
+        .iter()
+        .find(|p| matches!(p.shell_kind, ShellKind::PowerShell))
+    {
         return p.id;
     }
     // Last resort: first profile
@@ -31,8 +37,14 @@ fn build_platform_profiles() -> Vec<Profile> {
     let mut profiles = Vec::new();
 
     // Always available on Windows
-    profiles.push(Profile::new("Command Prompt".into(), ShellKind::CommandPrompt));
-    profiles.push(Profile::new("Windows PowerShell".into(), ShellKind::PowerShell));
+    profiles.push(Profile::new(
+        "Command Prompt".into(),
+        ShellKind::CommandPrompt,
+    ));
+    profiles.push(Profile::new(
+        "Windows PowerShell".into(),
+        ShellKind::PowerShell,
+    ));
 
     // PowerShell Core (cross-platform) — check PATH
     if is_program_in_path("pwsh.exe") {
@@ -42,7 +54,12 @@ fn build_platform_profiles() -> Vec<Profile> {
     // WSL distros
     for distro_name in detect_wsl_distros() {
         let display = format!("{} (WSL)", distro_name);
-        profiles.push(Profile::new(display, ShellKind::Wsl { distro: distro_name }));
+        profiles.push(Profile::new(
+            display,
+            ShellKind::Wsl {
+                distro: distro_name,
+            },
+        ));
     }
 
     profiles
@@ -50,9 +67,7 @@ fn build_platform_profiles() -> Vec<Profile> {
 
 #[cfg(unix)]
 fn build_platform_profiles() -> Vec<Profile> {
-    let mut profiles = vec![
-        Profile::new("Default Shell".into(), ShellKind::UnixShell),
-    ];
+    let mut profiles = vec![Profile::new("Default Shell".into(), ShellKind::UnixShell)];
 
     // pwsh is cross-platform
     if is_program_in_path("pwsh") {
@@ -200,9 +215,7 @@ mod tests {
 
     #[test]
     fn select_default_falls_back_to_first() {
-        let profiles = vec![
-            Profile::new("shell".into(), ShellKind::UnixShell),
-        ];
+        let profiles = vec![Profile::new("shell".into(), ShellKind::UnixShell)];
         let default = select_default(&profiles);
         assert_eq!(default, profiles[0].id);
     }

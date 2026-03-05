@@ -5,7 +5,18 @@ const DEFAULT_BG: (u8, u8, u8) = (0x1E, 0x1E, 0x2E);
 
 #[test]
 fn test_render_update_empty() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
     let rc = unsafe { ghostty_vt_terminal_render_update(ptr) };
     assert_eq!(rc, 0);
     // First update is always full dirty
@@ -19,7 +30,18 @@ fn test_render_update_empty() {
 
 #[test]
 fn test_render_partial_dirty() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
     // First update → full dirty
     unsafe { ghostty_vt_terminal_render_update(ptr) };
     unsafe { ghostty_vt_terminal_render_clear_dirty(ptr) };
@@ -36,7 +58,18 @@ fn test_render_partial_dirty() {
 
 #[test]
 fn test_render_cursor() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
     unsafe { ghostty_vt_terminal_render_update(ptr) };
     let mut cursor = CursorState::default();
     let rc = unsafe { ghostty_vt_terminal_render_cursor(ptr, &mut cursor) };
@@ -51,7 +84,18 @@ fn test_render_cursor() {
 
 #[test]
 fn test_render_colors() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
     unsafe { ghostty_vt_terminal_render_update(ptr) };
     let mut colors = ColorState::default();
     let rc = unsafe { ghostty_vt_terminal_render_colors(ptr, &mut colors) };
@@ -62,7 +106,18 @@ fn test_render_colors() {
 
 #[test]
 fn test_render_palette() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
     unsafe { ghostty_vt_terminal_render_update(ptr) };
     let mut color = ColorRGB::default();
     let rc = unsafe { ghostty_vt_terminal_render_palette_color(ptr, 1, &mut color) };
@@ -76,7 +131,18 @@ fn test_render_palette() {
 
 #[test]
 fn test_render_row_cells() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
     let text = b"ABC";
     unsafe { ghostty_vt_terminal_feed(ptr, text.as_ptr(), text.len()) };
     unsafe { ghostty_vt_terminal_render_update(ptr) };
@@ -97,7 +163,18 @@ fn test_render_row_cells() {
 
 #[test]
 fn test_render_styled_cell() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
     // SGR 1 (bold) + SGR 31 (red fg) + "X"
     let seq = b"\x1b[1;31mX";
     unsafe { ghostty_vt_terminal_feed(ptr, seq.as_ptr(), seq.len()) };
@@ -117,7 +194,18 @@ fn test_render_styled_cell() {
 
 #[test]
 fn test_render_row_selection_none() {
-    let ptr = unsafe { ghostty_vt_terminal_new(80, 24, DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2) };
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
     unsafe { ghostty_vt_terminal_render_update(ptr) };
     let mut sx: u16 = 0;
     let mut ex: u16 = 0;

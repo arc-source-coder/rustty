@@ -1,7 +1,15 @@
 use crate::*;
 
-const DEFAULT_FG: ColorRGB = ColorRGB { r: 0xDD, g: 0xDD, b: 0xDD };
-const DEFAULT_BG: ColorRGB = ColorRGB { r: 0x1E, g: 0x1E, b: 0x2E };
+const DEFAULT_FG: ColorRGB = ColorRGB {
+    r: 0xDD,
+    g: 0xDD,
+    b: 0xDD,
+};
+const DEFAULT_BG: ColorRGB = ColorRGB {
+    r: 0x1E,
+    g: 0x1E,
+    b: 0x2E,
+};
 
 #[test]
 fn new_and_drop() {

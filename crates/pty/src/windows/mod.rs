@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
-use std::num::NonZeroU32;
 use std::io::Result;
 use std::iter::once;
+use std::num::NonZeroU32;
 use std::os::windows::ffi::OsStrExt;
 
 use crate::{ChildEvent, Options, Shell, WindowSize};

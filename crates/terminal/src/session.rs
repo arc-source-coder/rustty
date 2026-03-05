@@ -256,7 +256,11 @@ impl TerminalSession {
     /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
     /// Encoding and the PTY write both happen outside the lock.
     pub fn send_key_event(&self, keystroke: &gpui::Keystroke, is_held: bool) {
-        let opts = self.terminal.lock().expect("terminal mutex poisoned").input_opts();
+        let opts = self
+            .terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .input_opts();
         if let Some(bytes) = crate::input::encode_key_event(opts, keystroke, is_held) {
             self.write_to_pty(bytes);
         }
@@ -266,7 +270,11 @@ impl TerminalSession {
     ///
     /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
     pub fn send_paste(&self, text: &str) {
-        let opts = self.terminal.lock().expect("terminal mutex poisoned").input_opts();
+        let opts = self
+            .terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .input_opts();
         self.write_to_pty(crate::input::encode_paste(opts, text));
     }
 
@@ -274,7 +282,11 @@ impl TerminalSession {
     ///
     /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
     pub fn send_focus_change(&self, focused: bool) {
-        let opts = self.terminal.lock().expect("terminal mutex poisoned").input_opts();
+        let opts = self
+            .terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .input_opts();
         if let Some(bytes) = crate::input::encode_focus_change(opts, focused) {
             self.write_to_pty(bytes);
         }
@@ -297,7 +309,11 @@ impl TerminalSession {
         x: u16,
         y: u16,
     ) -> bool {
-        let opts = self.terminal.lock().expect("terminal mutex poisoned").input_opts();
+        let opts = self
+            .terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .input_opts();
         if let Some(bytes) =
             crate::input::encode_mouse_event(opts, button, action, shift, alt, ctrl, x, y)
         {

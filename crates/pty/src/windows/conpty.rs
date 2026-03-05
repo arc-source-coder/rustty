@@ -7,7 +7,9 @@ use std::thread::JoinHandle;
 use std::{mem, ptr};
 
 use log::warn;
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, S_OK};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, S_OK,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
     FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING, PIPE_ACCESS_INBOUND,
@@ -24,8 +26,8 @@ use windows_sys::core::{HRESULT, PWSTR};
 use windows_sys::{s, w};
 
 use windows_sys::Win32::System::Threading::{
-    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
-    DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
     UpdateProcThreadAttribute,
 };
@@ -76,12 +78,27 @@ impl ConptyFns {
             // Use the Conpty-prefixed exports; these are the primary exports
             // from the DLL. The unprefixed versions (CreatePseudoConsole, etc.)
             // are compatibility aliases pointing to the same implementations.
-            let create = GetProcAddress(hmodule, s!("ConptyCreatePseudoConsole"))
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "ConptyCreatePseudoConsole not found in conpty.dll"))?;
-            let resize = GetProcAddress(hmodule, s!("ConptyResizePseudoConsole"))
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "ConptyResizePseudoConsole not found in conpty.dll"))?;
-            let close = GetProcAddress(hmodule, s!("ConptyClosePseudoConsole"))
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "ConptyClosePseudoConsole not found in conpty.dll"))?;
+            let create =
+                GetProcAddress(hmodule, s!("ConptyCreatePseudoConsole")).ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::NotFound,
+                        "ConptyCreatePseudoConsole not found in conpty.dll",
+                    )
+                })?;
+            let resize =
+                GetProcAddress(hmodule, s!("ConptyResizePseudoConsole")).ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::NotFound,
+                        "ConptyResizePseudoConsole not found in conpty.dll",
+                    )
+                })?;
+            let close =
+                GetProcAddress(hmodule, s!("ConptyClosePseudoConsole")).ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::NotFound,
+                        "ConptyClosePseudoConsole not found in conpty.dll",
+                    )
+                })?;
 
             // hmodule is intentionally leaked: the DLL must remain loaded for
             // the lifetime of any HPCON created through it.
@@ -358,7 +375,10 @@ impl From<WindowSize> for COORD {
     }
 }
 
-fn create_overlapped_pipe_pair(open_mode: u32, buffer_size: u32) -> Result<(OwnedHandle, OwnedHandle)> {
+fn create_overlapped_pipe_pair(
+    open_mode: u32,
+    buffer_size: u32,
+) -> Result<(OwnedHandle, OwnedHandle)> {
     let pipe_name = unique_pipe_name();
     let name_w = win32_string(&pipe_name);
 

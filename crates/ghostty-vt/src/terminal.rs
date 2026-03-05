@@ -511,7 +511,11 @@ pub fn encode_key(
     unshifted_codepoint: u32,
     buf: &mut [u8],
 ) -> usize {
-    let text_ptr = if text.is_empty() { std::ptr::null() } else { text.as_ptr() };
+    let text_ptr = if text.is_empty() {
+        std::ptr::null()
+    } else {
+        text.as_ptr()
+    };
     unsafe {
         ghostty_vt_encode_key(
             opts.to_c(),

@@ -241,9 +241,21 @@ pub fn encode_key_event(
     let unshifted_codepoint = compute_unshifted_codepoint(keystroke);
 
     let mut buf = [0u8; ENCODE_BUF_SIZE];
-    let n = encode_key(opts, ghostty_key, mods, action, text.as_bytes(), unshifted_codepoint, &mut buf);
+    let n = encode_key(
+        opts,
+        ghostty_key,
+        mods,
+        action,
+        text.as_bytes(),
+        unshifted_codepoint,
+        &mut buf,
+    );
 
-    if n == 0 { None } else { Some(buf[..n].to_vec()) }
+    if n == 0 {
+        None
+    } else {
+        Some(buf[..n].to_vec())
+    }
 }
 
 /// Encode a bracketed paste. Wraps text with `\x1b[200~` / `\x1b[201~`
@@ -267,7 +279,11 @@ pub fn encode_focus_change(opts: InputOpts, focused: bool) -> Option<Vec<u8>> {
     if !opts.focus_event_mode {
         return None;
     }
-    if focused { Some(b"\x1b[I".to_vec()) } else { Some(b"\x1b[O".to_vec()) }
+    if focused {
+        Some(b"\x1b[I".to_vec())
+    } else {
+        Some(b"\x1b[O".to_vec())
+    }
 }
 
 /// Encode a mouse event using Ghostty's encoder.
@@ -295,7 +311,11 @@ pub fn encode_mouse_event(
     let mods: u8 = (shift as u8) | ((alt as u8) << 1) | ((ctrl as u8) << 2);
     let mut buf = [0u8; ENCODE_BUF_SIZE];
     let n = encode_mouse(opts, button, action, mods, x, y, &mut buf);
-    if n == 0 { None } else { Some(buf[..n].to_vec()) }
+    if n == 0 {
+        None
+    } else {
+        Some(buf[..n].to_vec())
+    }
 }
 
 #[cfg(test)]

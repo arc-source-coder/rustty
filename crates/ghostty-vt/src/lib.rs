@@ -6,8 +6,7 @@ pub(crate) use types::{BellCallback, ResponseCallback, TitleCallback};
 
 pub use terminal::key_from_w3c;
 pub use terminal::{
-    encode_key, encode_mouse, InputOpts, RenderFrame, SelectionText, Terminal,
-    VtEvent,
+    InputOpts, RenderFrame, SelectionText, Terminal, VtEvent, encode_key, encode_mouse,
 };
 pub use types::{ColorRGB, ColorState, CursorState, DirtyState, FlatCell, MouseFormat, MouseMode};
 
@@ -109,8 +108,6 @@ unsafe extern "C" {
         out_len: *mut usize,
     ) -> *const u8;
     pub(crate) fn ghostty_vt_bytes_free(bytes: *const u8, len: usize);
-
-
 
     pub(crate) fn ghostty_vt_terminal_is_focus_event_mode(terminal: *mut c_void) -> u8;
 
