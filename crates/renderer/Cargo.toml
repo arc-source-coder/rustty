@@ -9,4 +9,5 @@ bytemuck.workspace = true
 rapidhash.workspace = true
 terminal = { path = "../terminal" }
 ghostty_vt = { path = "../ghostty-vt" }
+ui = { path = "../ui" }
 log.workspace = true

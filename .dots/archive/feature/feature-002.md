@@ -1,8 +1,9 @@
 ---
 title: Scrollback + viewport (terminal-owned viewport, scroll APIs, wheel/keyboard scroll)
-status: open
+status: closed
 priority: 2
 created-at: "2026-02-23T03:14:37Z"
+closed-at: "2026-03-07T10:43:36Z"
 blockers:
   - app-001
   - terminal-002

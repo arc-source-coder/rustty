@@ -39,19 +39,20 @@ struct CellMetricsCache {
 
 /// The layout state produced by prepaint, consumed by paint.
 pub struct LayoutState {
-    pub hitbox: Hitbox,
-    pub grid: GridDimensions,
-    pub background_color: Hsla,
+    /// Retained to keep the hitbox alive for GPUI's hit-test ordering.
+    _hitbox: Hitbox,
+    grid: GridDimensions,
+    background_color: Hsla,
     /// Shared with TerminalElementState — Arc::clone is O(1).
-    pub row_text_runs: Arc<Vec<Vec<PositionedTextRun>>>,
-    pub bg_rects: Vec<BgRect>,
+    row_text_runs: Arc<Vec<Vec<PositionedTextRun>>>,
+    bg_rects: Vec<BgRect>,
     /// Per-row selection range: (row, start_col, end_col).
-    pub selection_rects: Vec<(u16, u16, u16)>,
-    pub cursor: Option<CursorLayout>,
+    selection_rects: Vec<(u16, u16, u16)>,
+    cursor: Option<CursorLayout>,
 }
 
 /// State persisted across frames via with_element_state.
-pub struct TerminalElementState {
+struct TerminalElementState {
     /// Per-row text runs from the last frame. Arc lets LayoutState share
     /// ownership without cloning on clean frames (Arc::clone is O(1)).
     /// Dirty frames use Arc::make_mut to get exclusive mutable access.
@@ -73,9 +74,9 @@ pub struct TerminalElement {
     session: Entity<TerminalSession>,
     terminal: Arc<Mutex<Terminal>>,
     element_id: ElementId,
-    /// Written during prepaint so `TerminalView` can subtract the element's
-    /// window-relative origin from raw mouse event positions.
-    origin_out: Rc<Cell<Option<Point<Pixels>>>>,
+    /// Written during prepaint so `TerminalView` can read the surface bounds for
+    /// mouse-coordinate conversion and for publishing scroll info to the scrollbar.
+    bounds_out: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
 impl TerminalElement {
@@ -83,13 +84,13 @@ impl TerminalElement {
         session: Entity<TerminalSession>,
         terminal: Arc<Mutex<Terminal>>,
         element_id: ElementId,
-        origin_out: Rc<Cell<Option<Point<Pixels>>>>,
+        bounds_out: Rc<Cell<Option<Bounds<Pixels>>>>,
     ) -> Self {
         Self {
             session,
             terminal,
             element_id,
-            origin_out,
+            bounds_out,
         }
     }
 
@@ -329,7 +330,7 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        self.origin_out.set(Some(bounds.origin));
+        self.bounds_out.set(Some(bounds));
         let render_config = {
             let entity = self.session.read(cx).render_config().clone();
             entity.read(cx).clone()
@@ -508,7 +509,7 @@ impl Element for TerminalElement {
             };
 
             let layout = LayoutState {
-                hitbox,
+                _hitbox: hitbox,
                 grid,
                 background_color,
                 row_text_runs,

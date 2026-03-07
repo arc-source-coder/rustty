@@ -5,3 +5,5 @@ edition.workspace = true
 
 [dependencies]
 gpui.workspace = true
+ghostty_vt = { path = "../ghostty-vt" }
+terminal = { path = "../terminal" }

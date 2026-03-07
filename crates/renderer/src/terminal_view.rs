@@ -4,19 +4,19 @@ use std::sync::{Arc, Mutex};
 
 use ghostty_vt::{MouseMode, Terminal};
 use gpui::{
-    App, ClipboardItem, Context, CursorStyle, ElementId, Entity, FocusHandle, FocusOutEvent,
-    Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, Styled, Subscription, Window, div, px,
+    App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle, ElementId, Entity,
+    FocusHandle, FocusOutEvent, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
+    Point, Render, ScrollDelta, ScrollWheelEvent, Styled, Subscription, Window, div, px,
 };
 use terminal::TerminalSession;
+use ui::scrollbar::ScrollbarState;
 
 use crate::terminal_element::{CellMetrics, TerminalElement};
 
-/// Shared between `TerminalView` and `TerminalElement`. `TerminalElement` writes
-/// the element's window-relative origin during prepaint; `TerminalView` reads it
-/// in mouse handlers to convert window-space positions to element-local space.
-type SharedOrigin = Rc<Cell<Option<Point<Pixels>>>>;
+/// `TerminalElement` writes the surface bounds during prepaint; `TerminalView` reads them
+/// each frame for mouse-coordinate conversion and to sync the scrollbar snapshot.
+type SurfaceBoundsCell = Rc<Cell<Option<Bounds<Pixels>>>>;
 
 /// Controls where mouse events go for the duration of a left-button drag gesture.
 /// Determined once on mouse-down and held fixed until mouse-up to prevent
@@ -41,14 +41,17 @@ pub struct TerminalView {
     /// Cached cell metrics. None until first render; always Some during mouse events
     /// (render always precedes input). Re-measured lazily if None.
     cell_metrics: Option<CellMetrics>,
-    /// The element's window-relative origin, written by `TerminalElement::prepaint`.
-    /// Used to convert window-space mouse positions to element-local positions.
-    element_origin: SharedOrigin,
+    /// Surface bounds written by `TerminalElement::prepaint` each frame.
+    /// Used to convert window-space mouse positions to element-local positions
+    /// and to sync the scrollbar geometry snapshot.
+    surface_bounds: SurfaceBoundsCell,
     /// The viewport cell where a left-drag selection started.
     /// None after double/triple-click (those complete immediately).
     drag_anchor: Option<(u16, u16)>,
     /// Gesture routing, set on left mouse-down, cleared on mouse-up and focus-out.
     gesture_target: Option<GestureTarget>,
+    /// Overlay scrollbar entity. Handles its own animation and input.
+    scrollbar: Entity<ScrollbarState>,
     /// Focus event subscriptions. Must be stored to keep the listeners active.
     _subscriptions: Vec<Subscription>,
 }
@@ -77,15 +80,19 @@ impl TerminalView {
             let element_id = ElementId::Name(format!("terminal-{}", s.id.as_u64()).into());
             (terminal, element_id)
         };
+
+        let scrollbar = cx.new(|_cx| ScrollbarState::new(session.clone()));
+
         Self {
             session,
             terminal,
             element_id,
             focus_handle,
             cell_metrics: None,
-            element_origin: Rc::new(Cell::new(None)),
+            surface_bounds: Rc::new(Cell::new(None)),
             drag_anchor: None,
             gesture_target: None,
+            scrollbar,
             _subscriptions: vec![focus_in_sub, focus_out_sub],
         }
     }
@@ -127,9 +134,13 @@ impl TerminalView {
             )
         });
 
-        // `event.position` is window-relative; subtract the element's origin to
-        // get a position local to the terminal surface (i.e. excluding the title bar).
-        let origin = self.element_origin.get().unwrap_or_default();
+        // `event.position` is window-relative; subtract the element's origin
+        // (derived from surface bounds) to get a position local to the terminal surface.
+        let origin = self
+            .surface_bounds
+            .get()
+            .map(|b| b.origin)
+            .unwrap_or_default();
         let x_px = f32::from(position.x) - f32::from(origin.x);
         let y_px = f32::from(position.y) - f32::from(origin.y);
         if x_px < 0.0 || y_px < 0.0 {
@@ -151,6 +162,13 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Scrollbar drag takes priority: the scrollbar entity registers its own
+        // mouse handlers in `ScrollbarElement::paint`, so we only need to ensure
+        // that when the scrollbar is actively dragging we skip selection logic.
+        if self.scrollbar.read(cx).is_dragging() {
+            return;
+        }
+
         window.focus(&self.focus_handle, cx);
         let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
             return;
@@ -263,6 +281,11 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Scrollbar drag is ended by the scrollbar element's own mouse handler.
+        if self.scrollbar.read(cx).is_dragging() {
+            return;
+        }
+
         if let Some(GestureTarget::Pty) = self.gesture_target {
             if let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) {
                 self.session.read(cx).send_mouse_event(
@@ -343,6 +366,11 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Scrollbar drag is handled in the scrollbar element's own mouse handler.
+        if self.scrollbar.read(cx).is_dragging() {
+            return;
+        }
+
         let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
             return;
         };
@@ -407,8 +435,6 @@ impl TerminalView {
 
         // Try mouse reporting first. send_mouse_event returns false when
         // mouse reporting is disabled — fall back to viewport scrolling.
-        // First event determines if mouse reporting is active; subsequent
-        // events in the same gesture are sent the same way.
         let consumed = self.session.read(cx).send_mouse_event(
             button,
             0,
@@ -440,10 +466,8 @@ impl TerminalView {
             } else {
                 lines as i32
             };
-            self.terminal
-                .lock()
-                .expect("terminal mutex poisoned")
-                .scroll_viewport(delta);
+            self.session.read(cx).scroll_viewport(delta);
+            self.scrollbar.update(cx, |s, cx| s.on_scroll(window, cx));
             cx.notify();
         }
     }
@@ -467,10 +491,56 @@ impl TerminalView {
         }
     }
 
+    /// Try to handle a keystroke as a scroll command.
+    /// Returns `true` if the key was consumed (should not be forwarded to PTY).
+    fn try_handle_scroll_key(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let key = keystroke.key.to_lowercase();
+        let mods = &keystroke.modifiers;
+        let session = self.session.read(cx);
+
+        let scroll_action = match key.as_str() {
+            "pageup" | "page_up" if mods.shift || !session.is_alternate_screen() => {
+                let page = session.current_size().rows.saturating_sub(1).max(1) as i32;
+                Some(ScrollAction::Delta(-page))
+            }
+            "pagedown" | "page_down" if mods.shift || !session.is_alternate_screen() => {
+                let page = session.current_size().rows.saturating_sub(1).max(1) as i32;
+                Some(ScrollAction::Delta(page))
+            }
+            "home" if mods.shift => Some(ScrollAction::ToTop),
+            "end" if mods.shift => Some(ScrollAction::ToBottom),
+            _ => None,
+        };
+
+        if let Some(action) = scroll_action {
+            match action {
+                ScrollAction::Delta(delta) => session.scroll_viewport(delta),
+                ScrollAction::ToTop => session.scroll_to_top(),
+                ScrollAction::ToBottom => session.scroll_to_bottom(),
+            }
+            self.scrollbar.update(cx, |s, cx| s.on_scroll(window, cx));
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
     /// Check if there's an active selection in the terminal.
     fn has_selection(&self, cx: &Context<Self>) -> bool {
         self.session.read(cx).copy_selection().is_some()
     }
+}
+
+/// Scroll actions that can be triggered by keyboard shortcuts.
+enum ScrollAction {
+    Delta(i32),
+    ToTop,
+    ToBottom,
 }
 
 impl Focusable for TerminalView {
@@ -485,8 +555,22 @@ impl Render for TerminalView {
             self.session.clone(),
             self.terminal.clone(),
             self.element_id.clone(),
-            Rc::clone(&self.element_origin),
+            Rc::clone(&self.surface_bounds),
         );
+
+        // Sync the scrollbar snapshot. `surface_bounds` was written by `TerminalElement`
+        // during the previous prepaint; it lags one frame on first render but is always
+        // fresh once the element has painted. `ScrollbarElement::compute_layout` receives
+        // the live bounds from its own prepaint, so geometry is never stale.
+        if self.surface_bounds.get().is_some() {
+            let info = self
+                .terminal
+                .lock()
+                .expect("terminal mutex poisoned")
+                .scrollbar_info();
+            self.scrollbar
+                .update(cx, |state, _cx| state.sync_snapshot(info));
+        }
 
         div()
             .size_full()
@@ -517,6 +601,11 @@ impl Render for TerminalView {
                     return;
                 }
 
+                // Intercept scroll keys
+                if this.try_handle_scroll_key(&event.keystroke, window, cx) {
+                    return;
+                }
+
                 this.session
                     .read(cx)
                     .send_key_event(&event.keystroke, event.is_held);
@@ -539,6 +628,7 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::handle_mouse_move))
             .on_scroll_wheel(cx.listener(Self::handle_scroll_wheel))
             .child(terminal_element)
+            .child(self.scrollbar.clone())
     }
 }
 

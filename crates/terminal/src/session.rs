@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use gpui::{AsyncApp, Context, Entity, Modifiers, Task, WeakEntity};
+use gpui::{AsyncApp, Context, Entity, Keystroke, Modifiers, Task, WeakEntity};
 
 use ghostty_vt::{ColorRGB, FlatCell, MouseMode, Terminal};
 use pty::{Options, PtyCommand, PtyHandle, Shell, WindowSize};
 
 use crate::config::{RenderConfig, SpawnConfig};
+use crate::input::{encode_focus_change, encode_key_event, encode_mouse_event, encode_paste};
 use crate::io_thread;
 use crate::types::{
     GridSize, IoEvent, ProcessState, ResizeRequest, SessionId, SessionMetadata, SideEffect,
@@ -255,13 +256,18 @@ impl TerminalSession {
     ///
     /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
     /// Encoding and the PTY write both happen outside the lock.
-    pub fn send_key_event(&self, keystroke: &gpui::Keystroke, is_held: bool) {
-        let opts = self
-            .terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .input_opts();
-        if let Some(bytes) = crate::input::encode_key_event(opts, keystroke, is_held) {
+    pub fn send_key_event(&self, keystroke: &Keystroke, is_held: bool) {
+        let bytes = {
+            let mut term = self.terminal.lock().expect("terminal mutex poisoned");
+            let opts = term.input_opts();
+            let bytes = encode_key_event(opts, keystroke, is_held);
+            // Scroll to bottom on user input (like Windows Terminal / Ghostty).
+            if bytes.is_some() && !term.viewport_is_bottom() {
+                term.scroll_to_bottom();
+            }
+            bytes
+        };
+        if let Some(bytes) = bytes {
             self.write_to_pty(bytes);
         }
     }
@@ -270,12 +276,15 @@ impl TerminalSession {
     ///
     /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
     pub fn send_paste(&self, text: &str) {
-        let opts = self
-            .terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .input_opts();
-        self.write_to_pty(crate::input::encode_paste(opts, text));
+        let bytes = {
+            let mut term = self.terminal.lock().expect("terminal mutex poisoned");
+            let opts = term.input_opts();
+            if !term.viewport_is_bottom() {
+                term.scroll_to_bottom();
+            }
+            encode_paste(opts, text)
+        };
+        self.write_to_pty(bytes);
     }
 
     /// Encode and send a focus change to the PTY.
@@ -287,7 +296,7 @@ impl TerminalSession {
             .lock()
             .expect("terminal mutex poisoned")
             .input_opts();
-        if let Some(bytes) = crate::input::encode_focus_change(opts, focused) {
+        if let Some(bytes) = encode_focus_change(opts, focused) {
             self.write_to_pty(bytes);
         }
     }
@@ -314,9 +323,7 @@ impl TerminalSession {
             .lock()
             .expect("terminal mutex poisoned")
             .input_opts();
-        if let Some(bytes) =
-            crate::input::encode_mouse_event(opts, button, action, shift, alt, ctrl, x, y)
-        {
+        if let Some(bytes) = encode_mouse_event(opts, button, action, shift, alt, ctrl, x, y) {
             self.write_to_pty(bytes);
             true
         } else {
@@ -355,6 +362,46 @@ impl TerminalSession {
     /// Access the render config.
     pub fn render_config(&self) -> &Entity<RenderConfig> {
         &self.render_config
+    }
+
+    /// Scroll the viewport by delta rows. Negative = up (towards history).
+    pub fn scroll_viewport(&self, delta: i32) {
+        self.terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .scroll_viewport(delta);
+    }
+
+    /// Scroll to the top of scrollback.
+    pub fn scroll_to_top(&self) {
+        self.terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .scroll_to_top();
+    }
+
+    /// Scroll to the bottom (active area).
+    pub fn scroll_to_bottom(&self) {
+        self.terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .scroll_to_bottom();
+    }
+
+    /// Scroll to an absolute row offset (for scrollbar thumb drag).
+    pub fn scroll_to_row(&self, row: u64) {
+        self.terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .scroll_to_row(row);
+    }
+
+    /// Whether the alternate screen is currently active.
+    pub fn is_alternate_screen(&self) -> bool {
+        self.terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .is_alternate_screen()
     }
 
     // --- Selection gesture handling ---

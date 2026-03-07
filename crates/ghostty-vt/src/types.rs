@@ -78,6 +78,18 @@ pub struct FlatCell {
     pub _padding: [u8; 2],
 }
 
+/// Scrollbar positioning info from Ghostty's PageList.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScrollbarInfo {
+    /// Total rows in page list (scrollback + active area).
+    pub total_rows: u64,
+    /// Row offset of viewport from top of scrollback.
+    pub top_row: u64,
+    /// Number of visible viewport rows.
+    pub viewport_rows: u64,
+}
+
 // Verify ABI matches Zig side
 const _: () = assert!(std::mem::size_of::<FlatCell>() == 28);
 const _: () = assert!(std::mem::align_of::<FlatCell>() == 4);

@@ -212,6 +212,11 @@ impl Terminal {
         unsafe { ghostty_vt_terminal_is_focus_event_mode(self.handle) != 0 }
     }
 
+    /// Whether the alternate screen is active.
+    pub fn is_alternate_screen(&self) -> bool {
+        unsafe { ghostty_vt_terminal_is_alternate_screen(self.handle) != 0 }
+    }
+
     /// Snapshot all input-relevant mode flags into an [`InputOpts`].
     ///
     /// Must be called under the terminal mutex. The returned value is
@@ -250,6 +255,24 @@ impl Terminal {
     /// Scroll the viewport to the bottom (active area).
     pub fn scroll_to_bottom(&mut self) {
         unsafe { ghostty_vt_terminal_scroll_viewport_bottom(self.handle) }
+    }
+
+    /// Scroll viewport to an absolute row offset from the top of scrollback.
+    pub fn scroll_to_row(&mut self, row: u64) {
+        unsafe { ghostty_vt_terminal_scroll_to_row(self.handle, row) }
+    }
+
+    /// Read-only - Whether the viewport is at the bottom (active area).
+    pub fn viewport_is_bottom(&self) -> bool {
+        unsafe { ghostty_vt_terminal_viewport_is_bottom(self.handle) != 0 }
+    }
+
+    /// Query scrollbar positioning info (total rows, viewport offset, viewport size).
+    /// Read-only - Can be called under the mutex for snapshot coherence.
+    pub fn scrollbar_info(&self) -> ScrollbarInfo {
+        let mut out = ScrollbarInfo::default();
+        unsafe { ghostty_vt_terminal_scrollbar_info(self.handle, &mut out) };
+        out
     }
 
     // --- Selection (set/clear mutate, text read is &self) ---

@@ -10,7 +10,7 @@ use crate::types::{IoEvent, SideEffect};
 
 /// Maximum time the IO thread holds the terminal lock before yielding.
 /// Prevents UI thread starvation under heavy output.
-const IO_LOCK_BUDGET: Duration = Duration::from_millis(4);
+const IO_LOCK_BUDGET: Duration = Duration::from_millis(8);
 
 /// Timeout for synchronized output safety timer.
 /// Matches Ghostty's 1-second timeout.

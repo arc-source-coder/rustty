@@ -8,7 +8,9 @@ pub use terminal::key_from_w3c;
 pub use terminal::{
     InputOpts, RenderFrame, SelectionText, Terminal, VtEvent, encode_key, encode_mouse,
 };
-pub use types::{ColorRGB, ColorState, CursorState, DirtyState, FlatCell, MouseFormat, MouseMode};
+pub use types::{
+    ColorRGB, ColorState, CursorState, DirtyState, FlatCell, MouseFormat, MouseMode, ScrollbarInfo,
+};
 
 unsafe extern "C" {
     pub(crate) fn ghostty_vt_terminal_new(
@@ -50,10 +52,18 @@ unsafe extern "C" {
     pub(crate) fn ghostty_vt_terminal_is_bracketed_paste(terminal: *mut c_void) -> u8;
     pub(crate) fn ghostty_vt_terminal_get_kitty_keyboard_flags(terminal: *mut c_void) -> u8;
     pub(crate) fn ghostty_vt_terminal_is_synchronized_output(terminal: *mut c_void) -> u8;
+    pub(crate) fn ghostty_vt_terminal_is_focus_event_mode(terminal: *mut c_void) -> u8;
+    pub(crate) fn ghostty_vt_terminal_is_alternate_screen(terminal: *mut c_void) -> u8;
 
     pub(crate) fn ghostty_vt_terminal_scroll_viewport(terminal: *mut c_void, delta: i32);
     pub(crate) fn ghostty_vt_terminal_scroll_viewport_top(terminal: *mut c_void);
     pub(crate) fn ghostty_vt_terminal_scroll_viewport_bottom(terminal: *mut c_void);
+    pub(crate) fn ghostty_vt_terminal_scrollbar_info(
+        terminal: *mut c_void,
+        out: *mut ScrollbarInfo,
+    ) -> c_int;
+    pub(crate) fn ghostty_vt_terminal_viewport_is_bottom(terminal: *mut c_void) -> u8;
+    pub(crate) fn ghostty_vt_terminal_scroll_to_row(terminal: *mut c_void, row: u64);
 
     pub(crate) fn ghostty_vt_terminal_render_update(terminal: *mut c_void) -> c_int;
     pub(crate) fn ghostty_vt_terminal_render_dirty(terminal: *mut c_void) -> u8;
@@ -108,8 +118,6 @@ unsafe extern "C" {
         out_len: *mut usize,
     ) -> *const u8;
     pub(crate) fn ghostty_vt_bytes_free(bytes: *const u8, len: usize);
-
-    pub(crate) fn ghostty_vt_terminal_is_focus_event_mode(terminal: *mut c_void) -> u8;
 
     /// Snapshot all input-relevant mode flags into a C struct.
     /// Must be called under the terminal mutex; returns a plain-data copy.

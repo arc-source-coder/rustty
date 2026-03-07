@@ -44,3 +44,10 @@ export fn ghostty_vt_terminal_is_focus_event_mode(ptr: ?*anyopaque) callconv(.c)
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     return @intFromBool(handle.terminal_inst.modes.get(.focus_event));
 }
+
+/// Returns 1 if the alternate screen is active, 0 for primary.
+export fn ghostty_vt_terminal_is_alternate_screen(ptr: ?*anyopaque) callconv(.c) u8 {
+    if (ptr == null) return 0;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
+    return @intFromBool(handle.terminal_inst.screens.active_key == .alternate);
+}

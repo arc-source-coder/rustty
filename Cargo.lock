@@ -4203,6 +4203,7 @@ dependencies = [
  "log",
  "rapidhash",
  "terminal",
+ "ui",
 ]
 
 [[package]]
@@ -5360,7 +5361,9 @@ dependencies = [
 name = "ui"
 version = "0.1.0"
 dependencies = [
+ "ghostty_vt",
  "gpui",
+ "terminal",
 ]
 
 [[package]]

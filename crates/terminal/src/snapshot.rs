@@ -1,5 +1,7 @@
 use crate::ResizeRequest;
-use ghostty_vt::{ColorRGB, ColorState, CursorState, DirtyState, FlatCell, Terminal};
+use ghostty_vt::{
+    ColorRGB, ColorState, CursorState, DirtyState, FlatCell, ScrollbarInfo, Terminal,
+};
 
 /// Owned snapshot of all render data, built inside one Mutex lock scope.
 /// The renderer uses this for text shaping and painting without holding
@@ -13,6 +15,8 @@ pub struct RenderSnapshot {
     pub num_cols: u16,
     pub palette: [ColorRGB; 256],
     pub rows: Vec<RowSnapshot>,
+    pub scrollbar: ScrollbarInfo,
+    pub is_alternate_screen: bool,
 }
 
 /// Per-row snapshot data.
@@ -44,6 +48,9 @@ impl RenderSnapshot {
 
         terminal.render_update();
         let frame = terminal.begin_frame();
+
+        let scrollbar = terminal.scrollbar_info();
+        let is_alternate_screen = terminal.is_alternate_screen();
 
         let dirty = frame.dirty();
         let colors = frame.colors();
@@ -92,6 +99,8 @@ impl RenderSnapshot {
             num_cols,
             palette,
             rows,
+            scrollbar,
+            is_alternate_screen,
         }
     }
 }
