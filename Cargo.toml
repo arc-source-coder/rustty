@@ -18,6 +18,9 @@ log = "0.4.29"
 async-channel = "2.5.0"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 rapidhash = "4.4.0"
+
+windows-sys = { version = "0.59" }
+
 # Update the below paths to match your local vendored source
 gpui = { git = "file:///D:/projects/rust/rustty/vendor/zed/" }
 gpui_platform = { git = "file:///D:/projects/rust/rustty/vendor/zed/" }

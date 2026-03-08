@@ -2,20 +2,24 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use bytes::Bytes;
 use gpui::{AsyncApp, Context, Entity, Keystroke, Modifiers, Task, WeakEntity};
 
 use ghostty_vt::{ColorRGB, FlatCell, MouseMode, Terminal};
-use pty::{Options, PtyCommand, PtyHandle, Shell, WindowSize};
+use pty::{Options, Shell, WindowSize};
 
 use crate::config::{RenderConfig, SpawnConfig};
 use crate::input::{encode_focus_change, encode_key_event, encode_mouse_event, encode_paste};
-use crate::io_thread;
 use crate::types::{
-    GridSize, IoEvent, ProcessState, ResizeRequest, SessionId, SessionMetadata, SideEffect,
+    GridSize, IoEvent, IoMsg, ProcessState, ReadThreadNotify, SessionId, SessionMetadata,
 };
+use crate::{io_thread, read_thread};
 
-/// Capacity for the side-effect / lifecycle event channel.
+/// Capacity for the IoMsg channel (GPUI + read thread → IO thread).
 /// Matches Ghostty's BlockingQueue capacity (64).
+const IO_MSG_CHANNEL_CAPACITY: usize = 64;
+
+/// Capacity for the IoEvent channel (read thread → GPUI event task).
 const IO_EVENT_CHANNEL_CAPACITY: usize = 64;
 
 pub struct TerminalSession {
@@ -24,11 +28,13 @@ pub struct TerminalSession {
     size: GridSize,
     spawn_config: SpawnConfig,
     render_config: Entity<RenderConfig>,
-    pty: PtyHandle,
+    /// Sender for user input and resize commands to the IO thread.
+    io_tx: crossbeam_channel::Sender<IoMsg>,
     metadata: SessionMetadata,
     process_state: ProcessState,
 
-    _io_thread: Option<JoinHandle<()>>,
+    read_thread: Option<JoinHandle<()>>,
+    io_thread: Option<JoinHandle<()>>,
     _signal_task: Task<()>,
     _event_task: Task<()>,
 }
@@ -71,26 +77,55 @@ impl TerminalSession {
         let window_size = WindowSize {
             num_cols: size.cols,
             num_lines: size.rows,
-            cell_width: 8,   // placeholder — renderer will resize with real metrics
-            cell_height: 16, // placeholder
+            // Placeholders - renderer will update these with real font metrics
+            cell_width: 8,
+            cell_height: 16,
         };
 
-        let pty = PtyHandle::spawn(pty_options, window_size).expect("failed to spawn PTY");
+        let pty = pty::new(&pty_options, window_size).expect("failed to spawn PTY");
+        let (reader, writer) = pty.split();
 
-        // Channels: IO thread → UI thread
+        // ReadThreadNotify: shared signal from IO thread → read thread.
+        // Create the IOCP handle here so session owns the lifetime.
+        let notify_iocp = unsafe {
+            windows_sys::Win32::System::IO::CreateIoCompletionPort(
+                windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+                std::ptr::null_mut(),
+                0,
+                0,
+            )
+        };
+        assert!(
+            !notify_iocp.is_null(),
+            "CreateIoCompletionPort failed for ReadThreadNotify"
+        );
+        let notify = Arc::new(ReadThreadNotify::new(notify_iocp));
+
+        // Channels:
+        //   io_tx/io_rx:     crossbeam bounded 64  — GPUI + read thread → IO thread
+        //   signal_tx/rx:    async_channel bounded 1  — read/IO thread → GPUI signal task
+        //   event_tx/rx:     async_channel bounded 64 — read thread → GPUI event task
+        let (io_tx, io_rx) = crossbeam_channel::bounded::<IoMsg>(IO_MSG_CHANNEL_CAPACITY);
         let (signal_tx, signal_rx) = async_channel::bounded::<()>(1);
         let (event_tx, event_rx) = async_channel::bounded::<IoEvent>(IO_EVENT_CHANNEL_CAPACITY);
 
-        // Spawn IO thread.
-        let io_thread = io_thread::spawn(
+        // Read thread gets its own io_tx clone for device replies.
+        let io_tx_for_read = io_tx.clone();
+
+        // Spawn read thread (hot path: conout reads + terminal.feed()).
+        let read_thread = read_thread::spawn(
+            reader,
             terminal.clone(),
-            pty.event_rx.clone(),
-            pty.command_tx.clone(),
-            signal_tx,
+            notify.clone(),
+            io_tx_for_read,
+            signal_tx.clone(),
             event_tx,
         );
 
-        // Signal task: awaits render wakeup, calls cx.notify().
+        // Spawn IO thread (cold path: writes, resize coalescing, sync-output timer).
+        let io_thread = io_thread::spawn(writer, terminal.clone(), notify, io_rx, signal_tx);
+
+        // Signal task: awaits render wakeup from read/IO thread, calls cx.notify().
         let signal_task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             loop {
                 match signal_rx.recv().await {
@@ -104,7 +139,7 @@ impl TerminalSession {
             }
         });
 
-        // Event task: processes IoEvents (side effects + lifecycle).
+        // Event task: processes IoEvents (Bell, TitleChanged, Exited, Error).
         let event_task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             loop {
                 match event_rx.recv().await {
@@ -127,26 +162,25 @@ impl TerminalSession {
             size,
             spawn_config,
             render_config,
-            pty,
+            io_tx,
             metadata: SessionMetadata::default(),
             process_state: ProcessState::Running,
-            _io_thread: Some(io_thread),
+            read_thread: Some(read_thread),
+            io_thread: Some(io_thread),
             _signal_task: signal_task,
             _event_task: event_task,
         }
     }
 
-    /// Handle an IoEvent from the IO thread.
+    /// Handle an IoEvent from the read thread.
     fn handle_io_event(&mut self, event: IoEvent, cx: &mut Context<Self>) {
         match event {
-            IoEvent::SideEffect(effect) => match effect {
-                SideEffect::Bell => {
-                    self.metadata.bell_count += 1;
-                }
-                SideEffect::TitleChanged(title) => {
-                    self.metadata.title = if title.is_empty() { None } else { Some(title) };
-                }
-            },
+            IoEvent::Bell => {
+                self.metadata.bell_count += 1;
+            }
+            IoEvent::TitleChanged(title) => {
+                self.metadata.title = if title.is_empty() { None } else { Some(title) };
+            }
             IoEvent::Exited(status) => {
                 self.process_state = ProcessState::Exited(status);
             }
@@ -164,67 +198,24 @@ impl TerminalSession {
         &self.terminal
     }
 
-    /// Set cell pixel dimensions. Briefly locks the terminal mutex.
-    ///
-    /// Note: the renderer path uses `RenderSnapshot::capture(resize)` instead
-    /// to fold this into a single lock. This method is available for
-    /// non-renderer callers.
-    pub fn set_cell_size(&self, width_px: u16, height_px: u16) {
-        self.terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .set_cell_size(width_px, height_px);
-    }
-
-    /// Resize the terminal grid and notify the PTY.
-    /// Briefly locks the terminal mutex.
-    ///
-    /// Note: the renderer path uses `RenderSnapshot::capture(resize)` instead
-    /// to fold resize + snapshot into a single lock. This method is available
-    /// for non-renderer callers.
-    pub fn resize(&mut self, new_size: GridSize, cell_width: u16, cell_height: u16) {
+    /// Request a resize from the renderer.
+    /// Sends IoMsg::Resize to the IO thread, which coalesces (25ms) then signals
+    /// the read thread to call ResizePseudoConsole + terminal.resize().
+    /// Includes cell dimensions for CSI size reports.
+    pub fn request_resize(&mut self, cols: u16, rows: u16, cell_width: u16, cell_height: u16) {
+        let new_size = GridSize::new(cols, rows);
         if new_size == self.size {
             return;
         }
         self.size = new_size;
 
-        self.terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .resize(new_size.cols, new_size.rows);
-
         let window_size = WindowSize {
-            num_cols: new_size.cols,
-            num_lines: new_size.rows,
+            num_cols: cols,
+            num_lines: rows,
             cell_width,
             cell_height,
         };
-        self.pty
-            .command_tx
-            .try_send(PtyCommand::Resize(window_size))
-            .ok();
-    }
-
-    /// Apply resize bookkeeping after `RenderSnapshot::capture()` has already
-    /// resized the terminal inside the lock. Updates stored grid size and
-    /// notifies the PTY. Does NOT lock the terminal mutex.
-    pub fn apply_resize(&mut self, resize: &ResizeRequest) {
-        let new_size = GridSize::new(resize.cols, resize.rows);
-        if new_size == self.size {
-            return;
-        }
-        self.size = new_size;
-
-        let window_size = WindowSize {
-            num_cols: resize.cols,
-            num_lines: resize.rows,
-            cell_width: resize.cell_width,
-            cell_height: resize.cell_height,
-        };
-        self.pty
-            .command_tx
-            .try_send(PtyCommand::Resize(window_size))
-            .ok();
+        self.io_tx.try_send(IoMsg::Resize(window_size)).ok();
     }
 
     /// Current grid size.
@@ -233,8 +224,8 @@ impl TerminalSession {
     }
 
     /// Write user input bytes to the PTY.
-    pub fn write_to_pty(&self, data: Vec<u8>) {
-        self.pty.command_tx.try_send(PtyCommand::Write(data)).ok();
+    pub fn write_to_pty(&self, data: Bytes) {
+        self.io_tx.try_send(IoMsg::Input(data)).ok();
     }
 
     /// Current process state.
@@ -268,7 +259,7 @@ impl TerminalSession {
             bytes
         };
         if let Some(bytes) = bytes {
-            self.write_to_pty(bytes);
+            self.write_to_pty(Bytes::from(bytes));
         }
     }
 
@@ -284,7 +275,7 @@ impl TerminalSession {
             }
             encode_paste(opts, text)
         };
-        self.write_to_pty(bytes);
+        self.write_to_pty(Bytes::from(bytes));
     }
 
     /// Encode and send a focus change to the PTY.
@@ -297,7 +288,7 @@ impl TerminalSession {
             .expect("terminal mutex poisoned")
             .input_opts();
         if let Some(bytes) = encode_focus_change(opts, focused) {
-            self.write_to_pty(bytes);
+            self.write_to_pty(Bytes::from(bytes));
         }
     }
 
@@ -324,7 +315,7 @@ impl TerminalSession {
             .expect("terminal mutex poisoned")
             .input_opts();
         if let Some(bytes) = encode_mouse_event(opts, button, action, shift, alt, ctrl, x, y) {
-            self.write_to_pty(bytes);
+            self.write_to_pty(Bytes::from(bytes));
             true
         } else {
             false
@@ -500,6 +491,30 @@ impl TerminalSession {
     }
 }
 
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        // 1. Send Close (blocking — must not be lost).
+        //    IO thread receives Close, signals read thread, drains input, calls
+        //    close_async on HPCON, then exits.
+        let _ = self.io_tx.send(IoMsg::Close);
+
+        // 2. Join read thread FIRST — it may still be draining conout or sending
+        //    device replies via io_tx. After this join, no more reads will arrive.
+        if let Some(handle) = self.read_thread.take() {
+            let _ = handle.join();
+        }
+
+        // 3. Join IO thread. io_tx (our copy) is still live here, so io_rx won't
+        //    disconnect prematurely. IO thread already exited from Close handler.
+        if let Some(handle) = self.io_thread.take() {
+            let _ = handle.join();
+        }
+
+        // io_tx drops here → io_rx disconnects (IO thread already gone).
+        // PtyWriter drops inside IO thread → Conpty::drop() joins close_thread → conin drops.
+    }
+}
+
 /// Delimiter classification for word selection.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum DelimClass {
@@ -553,12 +568,6 @@ mod tests {
             ProcessState::Error("test".into()),
             ProcessState::Error(_)
         ));
-    }
-
-    #[test]
-    fn side_effect_variants() {
-        let _bell = SideEffect::Bell;
-        let _title = SideEffect::TitleChanged("test".into());
     }
 
     #[test]

@@ -5,15 +5,7 @@ use std::process::ExitStatus;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use self::windows::Pty;
-
-mod buffer_pool;
-pub use buffer_pool::{BufferPool, OutputBuffer};
-
-mod handle;
-pub use handle::PtyHandle;
-
-// --- Shared types used by both platform backends ---
+pub use self::windows::{Pty, PtyReader, PtyWriter, ResizePseudoConsoleFn};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ChildEvent {
@@ -47,23 +39,6 @@ pub struct Options {
     pub env: HashMap<String, String>,
     #[cfg(windows)]
     pub escape_args: bool,
-}
-
-// --- Channel protocol ---
-
-pub const PTY_EVENT_CHANNEL_CAPACITY: usize = 64;
-pub const PTY_COMMAND_CHANNEL_CAPACITY: usize = 64;
-
-pub enum PtyCommand {
-    Write(Vec<u8>),
-    Resize(WindowSize),
-    Close,
-}
-
-pub enum PtyEvent {
-    Output(OutputBuffer),
-    Exited(Option<ExitStatus>),
-    Error(std::io::Error),
 }
 
 /// Create a new platform PTY.

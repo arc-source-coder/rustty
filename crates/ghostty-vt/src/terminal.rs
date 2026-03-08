@@ -140,13 +140,14 @@ impl Terminal {
     }
 
     /// Drain all events produced during the last `feed()` call(s).
-    /// Returns the events and clears the internal queue.
+    /// Writes events to the provided bufer and clears the internal queue.
     ///
     /// Note: cannot be called while a `RenderFrame` is alive —
     /// the frame borrows `&self` and `drain_events` needs `&mut self`.
     /// This is enforced statically by the borrow checker.
-    pub fn drain_events(&mut self) -> Vec<VtEvent> {
-        std::mem::take(&mut *self.events)
+    pub fn drain_events(&mut self, buf: &mut Vec<VtEvent>) {
+        buf.clear();
+        std::mem::swap(&mut *self.events, buf);
     }
 
     /// Update the persistent render state from current terminal state.
@@ -205,6 +206,12 @@ impl Terminal {
     /// Whether synchronized output mode (DEC 2026) is active.
     pub fn is_synchronized_output(&self) -> bool {
         unsafe { ghostty_vt_terminal_is_synchronized_output(self.handle) != 0 }
+    }
+
+    /// Reset synchronized output mode (DEC 2026).
+    /// Used by the sync-output safety timer to unfreeze misbehaving programs.
+    pub fn reset_synchronized_output(&mut self) {
+        unsafe { ghostty_vt_terminal_reset_synchronized_output(self.handle) }
     }
 
     /// Whether focus event mode (DEC 1004) is active.

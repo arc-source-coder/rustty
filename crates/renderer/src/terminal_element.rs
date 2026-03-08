@@ -367,26 +367,19 @@ impl Element for TerminalElement {
 
             let grid = Self::compute_grid(bounds.size, metrics);
 
-            // Build resize request (always passed — set_cell_size is cheap,
-            // terminal.resize is a no-op if dimensions haven't changed).
+            // Compute cell dimensions for CSI size reports.
             let cell_w = f32::from(metrics.cell_width) as u16;
             let cell_h = f32::from(metrics.line_height) as u16;
-            let resize = terminal::ResizeRequest {
-                cols: grid.cols,
-                rows: grid.rows,
-                cell_width: cell_w,
-                cell_height: cell_h,
-            };
 
-            // Snapshot render data: single lock scope handles resize + snapshot.
+            // Snapshot render data: single lock scope.
             let snapshot = terminal::RenderSnapshot::capture(
                 &mut terminal.lock().expect("terminal mutex poisoned"),
-                Some(&resize),
             );
 
-            // Update session bookkeeping + notify PTY (no lock needed).
+            // Notify the PTY to resize.
+            // IO thread will resize terminal after ConPTY reflows.
             session.update(cx, |s, _cx| {
-                s.apply_resize(&resize);
+                s.request_resize(grid.cols, grid.rows, cell_w, cell_h);
             });
 
             let default_fg = color_rgb_to_hsla(snapshot.colors.foreground);

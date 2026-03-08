@@ -12,8 +12,8 @@ import { join } from "node:path";
 import { mkdirSync, existsSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
-const CONPTY_VERSION = "1.23.260121001";
-const RELEASE_TAG = "v1.23.20211.0";
+const CONPTY_VERSION = "1.25.260303002-preview";
+const RELEASE_TAG = "v1.25.622.0";
 const NUPKG_URL = `https://github.com/microsoft/terminal/releases/download/${RELEASE_TAG}/Microsoft.Windows.Console.ConPTY.${CONPTY_VERSION}.nupkg`;
 
 const MARKER_FILENAME = ".conpty-version";

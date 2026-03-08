@@ -39,7 +39,8 @@ fn resize() {
 fn bell_event() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     term.feed(b"\x07");
-    let events = term.drain_events();
+    let mut events: Vec<VtEvent> = Vec::new();
+    term.drain_events(&mut events);
     assert_eq!(events, vec![VtEvent::Bell]);
 }
 
@@ -48,7 +49,8 @@ fn title_event() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     // OSC 0 (set title): ESC ] 0 ; title ST
     term.feed(b"\x1b]0;My Title\x1b\\");
-    let events = term.drain_events();
+    let mut events: Vec<VtEvent> = Vec::new();
+    term.drain_events(&mut events);
     assert_eq!(events, vec![VtEvent::TitleChanged("My Title".to_string())]);
 }
 
@@ -56,8 +58,10 @@ fn title_event() {
 fn drain_events_clears_queue() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     term.feed(b"\x07");
-    let _ = term.drain_events();
-    let events = term.drain_events();
+    let mut events: Vec<VtEvent> = Vec::new();
+    term.drain_events(&mut events);
+    events.clear();
+    term.drain_events(&mut events);
     assert!(events.is_empty());
 }
 
@@ -65,7 +69,8 @@ fn drain_events_clears_queue() {
 fn multiple_events_in_one_feed() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     term.feed(b"\x07\x07\x1b]0;Title\x1b\\");
-    let events = term.drain_events();
+    let mut events: Vec<VtEvent> = Vec::new();
+    term.drain_events(&mut events);
     assert_eq!(events.len(), 3);
     assert_eq!(events[0], VtEvent::Bell);
     assert_eq!(events[1], VtEvent::Bell);

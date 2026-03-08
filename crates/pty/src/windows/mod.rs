@@ -6,12 +6,59 @@ use std::os::windows::ffi::OsStrExt;
 
 use crate::{ChildEvent, Options, Shell, WindowSize};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::System::Console::HPCON;
 
 pub(crate) mod child;
 mod conpty;
 
 use child::ChildProcess;
 use conpty::Conpty;
+
+pub use conpty::ResizePseudoConsoleFn;
+
+/// Read-half of a split PTY. Owns conout + child process.
+/// Holds raw HPCON + resize function pointer for resize operations.
+pub struct PtyReader {
+    pub conout: OwnedHandle,
+    pub child: ChildProcess,
+    pub hpcon: HPCON,
+    pub resize_fn: ResizePseudoConsoleFn,
+}
+
+unsafe impl Send for PtyReader {}
+
+/// Write-half of a split PTY. Owns conin + backend (HPCON for close + drop).
+pub struct PtyWriter {
+    // Backend MUST be first field: HPCON must close before conin pipe.
+    pub backend: Conpty,
+    pub conin: OwnedHandle,
+}
+
+unsafe impl Send for PtyWriter {}
+
+impl Pty {
+    /// Consume the PTY into read and write halves for separate thread ownership.
+    pub fn split(self) -> (PtyReader, PtyWriter) {
+        let hpcon = self.backend.raw_hpcon();
+        let resize_fn = self.backend.resize_fn();
+
+        let Pty {
+            backend,
+            conout,
+            conin,
+            child,
+        } = self;
+
+        let reader = PtyReader {
+            conout,
+            child,
+            hpcon,
+            resize_fn,
+        };
+        let writer = PtyWriter { backend, conin };
+        (reader, writer)
+    }
+}
 
 pub struct OwnedHandle(HANDLE);
 
@@ -74,10 +121,6 @@ impl Pty {
 
     pub fn conin_handle(&self) -> HANDLE {
         self.conin.raw()
-    }
-
-    pub fn resize(&mut self, window_size: WindowSize) {
-        self.backend.resize(window_size);
     }
 
     pub fn next_child_event(&mut self) -> Option<ChildEvent> {

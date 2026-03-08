@@ -38,6 +38,14 @@ export fn ghostty_vt_terminal_is_synchronized_output(ptr: ?*anyopaque) callconv(
     return @intFromBool(handle.terminal_inst.modes.get(.synchronized_output));
 }
 
+/// Reset synchronized output mode (DEC 2026). Called by the sync-output
+/// safety timer to prevent frozen terminals.
+export fn ghostty_vt_terminal_reset_synchronized_output(ptr: ?*anyopaque) callconv(.c) void {
+    if (ptr == null) return;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
+    handle.terminal_inst.modes.set(.synchronized_output, false);
+}
+
 /// Returns 1 if focus event mode (DEC 1004) is active, 0 otherwise
 export fn ghostty_vt_terminal_is_focus_event_mode(ptr: ?*anyopaque) callconv(.c) u8 {
     if (ptr == null) return 0;

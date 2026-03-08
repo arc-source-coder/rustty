@@ -52,6 +52,7 @@ unsafe extern "C" {
     pub(crate) fn ghostty_vt_terminal_is_bracketed_paste(terminal: *mut c_void) -> u8;
     pub(crate) fn ghostty_vt_terminal_get_kitty_keyboard_flags(terminal: *mut c_void) -> u8;
     pub(crate) fn ghostty_vt_terminal_is_synchronized_output(terminal: *mut c_void) -> u8;
+    pub(crate) fn ghostty_vt_terminal_reset_synchronized_output(terminal: *mut c_void);
     pub(crate) fn ghostty_vt_terminal_is_focus_event_mode(terminal: *mut c_void) -> u8;
     pub(crate) fn ghostty_vt_terminal_is_alternate_screen(terminal: *mut c_void) -> u8;
 

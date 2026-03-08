@@ -1,4 +1,3 @@
-use crate::ResizeRequest;
 use ghostty_vt::{
     ColorRGB, ColorState, CursorState, DirtyState, FlatCell, ScrollbarInfo, Terminal,
 };
@@ -33,19 +32,10 @@ pub struct RowSnapshot {
 impl RenderSnapshot {
     /// Build a snapshot from a locked Terminal.
     ///
-    /// Optionally applies resize + cell size update inside the same lock
-    /// scope, avoiding extra mutex acquisitions.
-    ///
-    /// Calls resize (if needed) → `render_update()` → `begin_frame()` →
+    /// Calls `render_update()` → `begin_frame()` →
     /// copies all data → drops frame (clears dirty) → returns owned snapshot.
-    ///
     /// The caller must hold the Mutex lock.
-    pub fn capture(terminal: &mut Terminal, resize: Option<&ResizeRequest>) -> Self {
-        if let Some(r) = resize {
-            terminal.set_cell_size(r.cell_width, r.cell_height);
-            terminal.resize(r.cols, r.rows);
-        }
-
+    pub fn capture(terminal: &mut Terminal) -> Self {
         terminal.render_update();
         let frame = terminal.begin_frame();
 

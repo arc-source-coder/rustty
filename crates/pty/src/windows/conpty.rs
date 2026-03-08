@@ -47,7 +47,7 @@ static PIPE_COUNTER: AtomicU32 = AtomicU32::new(0);
 // the Conpty-prefixed versions as they are the primary exports.
 type CreatePseudoConsoleFn =
     unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> HRESULT;
-type ResizePseudoConsoleFn = unsafe extern "system" fn(HPCON, COORD) -> HRESULT;
+pub type ResizePseudoConsoleFn = unsafe extern "system" fn(HPCON, COORD) -> HRESULT;
 type ClosePseudoConsoleFn = unsafe extern "system" fn(HPCON);
 
 struct ConptyFns {
@@ -119,12 +119,15 @@ pub struct Conpty {
 }
 
 impl Conpty {
-    pub fn resize(&mut self, window_size: WindowSize) {
-        let Some(handle) = self.handle else { return };
-        let result = unsafe { (self.fns.resize)(handle, window_size.into()) };
-        if result != S_OK {
-            log::error!("ConptyResizePseudoConsole failed: HRESULT 0x{:08X}", result);
-        }
+    /// Raw HPCON value for the read thread (resize operations).
+    /// Returns 0 if HPCON has been taken by close_async.
+    pub fn raw_hpcon(&self) -> HPCON {
+        self.handle.unwrap_or(0)
+    }
+
+    /// Resize function pointer for the read thread.
+    pub fn resize_fn(&self) -> ResizePseudoConsoleFn {
+        self.fns.resize
     }
 
     /// Close HPCON on a background thread, sending `CTRL_CLOSE_EVENT` to

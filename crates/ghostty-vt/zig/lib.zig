@@ -79,10 +79,18 @@ export fn ghostty_vt_terminal_resize(
     if (ptr == null) return 1;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     handle.terminal_inst.resize(handle.alloc, cols, rows) catch return 2;
+
+    // Update pixel dimensions for Kitty graphics protocol.
+    // We read cell dimensions from handle since they're stored separately.
+    if (handle.cell_width_px > 0 and handle.cell_height_px > 0) {
+        handle.terminal_inst.width_px = @as(u32, cols) * @as(u32, handle.cell_width_px);
+        handle.terminal_inst.height_px = @as(u32, rows) * @as(u32, handle.cell_height_px);
+    }
+
     return 0;
 }
 
-/// Set cell pixel dimensions for size reports (CSI 14t, CSI 16t).
+/// Set cell pixel dimensions for size reports (CSI 14t, CSI 16t) and Kitty graphics.
 /// Called by the renderer whenever font metrics change.
 export fn ghostty_vt_terminal_set_cell_size(
     ptr: ?*anyopaque,
@@ -91,6 +99,14 @@ export fn ghostty_vt_terminal_set_cell_size(
 ) callconv(.c) void {
     if (ptr == null) return;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
+
+    // Store cell dimensions for resize calculations and CSI reports
     handle.cell_width_px = width_px;
     handle.cell_height_px = height_px;
+
+    // Update pixel dimensions for Kitty graphics protocol.
+    if (width_px > 0 and height_px > 0) {
+        handle.terminal_inst.width_px = @as(u32, handle.terminal_inst.cols) * @as(u32, width_px);
+        handle.terminal_inst.height_px = @as(u32, handle.terminal_inst.rows) * @as(u32, height_px);
+    }
 }

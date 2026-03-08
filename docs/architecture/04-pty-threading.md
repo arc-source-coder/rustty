@@ -1,5 +1,7 @@
 # PTY and Threading Design
 
+> **IMPORTANT:** Superseded by the model in [11-pty-threading-v2.md](11-pty-threading-v2.md)
+
 > **Update:** `portable-pty` has been replaced with a custom PTY backend
 > ported from Alacritty (ConPTY on Windows, openpty on Unix). See
 > [the migration plan](../plans/2026-02-24-pty-001-alacritty-backend.md).

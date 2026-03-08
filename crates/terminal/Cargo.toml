@@ -9,3 +9,15 @@ async-channel.workspace = true
 gpui.workspace = true
 ghostty_vt = { path = "../ghostty-vt" }
 pty = { path = "../pty" }
+crossbeam-channel = "0.5.15"
+windows-sys = {
+    workspace = true,
+    features = [
+        "Win32_Foundation",
+        "Win32_Storage_FileSystem",
+        "Win32_System_IO",
+        "Win32_System_Threading",
+        "Win32_System_Console",
+    ]
+}
+bytes = "1.11.1"
