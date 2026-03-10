@@ -3,7 +3,6 @@ const Allocator = std.mem.Allocator;
 
 const terminal = @import("ghostty/src/terminal/main.zig");
 const color = terminal.color;
-const StyleFlags = @TypeOf((@as(terminal.Style, .{})).flags);
 
 // --- Callback function pointer types ---
 pub const BellCallback = *const fn (?*anyopaque) callconv(.c) void;
@@ -187,57 +186,6 @@ const ShimHandler = struct {
     }
 };
 
-/// C-safe flattened cell for rendering
-pub const FlatCell = extern struct {
-    /// Primary codepoint (0 = empty cell)
-    codepoint: u32,
-    /// Number of extra codepoints in the grapheme cluster (0 for simple chars)
-    grapheme_len: u8,
-    /// Wide property: 0=narrow, 1=wide, 2=spacer_tail, 3=spacer_head
-    wide: u8,
-
-    // --- Style (resolved from style.Style) ---
-    /// Foreground color type: 0=none/default, 1=palette, 2=rgb
-    fg_color_type: u8,
-    fg_r: u8,
-    fg_g: u8,
-    fg_b: u8,
-    fg_palette: u8,
-
-    /// Background color type: 0=none/default, 1=palette, 2=rgb
-    /// Note: for bg_color_palette/bg_color_rgb content_tags, bg is set
-    /// from the cell content directly (not from style).
-    bg_color_type: u8,
-    bg_r: u8,
-    bg_g: u8,
-    bg_b: u8,
-    bg_palette: u8,
-
-    /// Underline color type: 0=none, 1=palette, 2=rgb
-    ul_color_type: u8,
-    ul_r: u8,
-    ul_g: u8,
-    ul_b: u8,
-    ul_palette: u8,
-
-    /// Style flags packed into a u16 matching Zig's Style.Flags layout:
-    /// bit 0: bold, 1: italic, 2: faint, 3: blink, 4: inverse,
-    /// 5: invisible, 6: strikethrough, 7: overline
-    /// bits 8-10: underline (0=none,1=single,2=double,3=curly,4=dotted,5=dashed)
-    style_flags: u16,
-
-    _padding: [2]u8,
-
-    // Verify ABI stability at compile time
-    comptime {
-        std.debug.assert(@sizeOf(FlatCell) == 28);
-        std.debug.assert(@alignOf(FlatCell) == 4);
-        // Verify style_flags bitcast stays u16-sized without referencing
-        // private Ghostty internals by name.
-        std.debug.assert(@bitSizeOf(StyleFlags) == 16);
-    }
-};
-
 // --- TerminalHandle: owns all terminal state ---
 pub const TerminalHandle = struct {
     alloc: Allocator,
@@ -246,8 +194,9 @@ pub const TerminalHandle = struct {
     handler: ShimHandler,
     callbacks: Callbacks,
     render_state: terminal.RenderState,
-    flat_cells: []FlatCell = &.{},
     grapheme_buf: []u32 = &.{},
+    palette_cache: [256]color.RGB.C = std.mem.zeroes([256]color.RGB.C),
+    palette_dirty: bool = true,
 
     /// Cell pixel dimensions — set by Rust via ghostty_vt_terminal_set_cell_size().
     /// Used for size report responses (CSI 14t, CSI 16t).
@@ -255,12 +204,6 @@ pub const TerminalHandle = struct {
     /// will be skipped until the renderer provides real values.
     cell_width_px: u16 = 0,
     cell_height_px: u16 = 0,
-
-    pub fn ensureFlatCells(self: *TerminalHandle, cols: u16) !void {
-        if (self.flat_cells.len >= cols) return;
-        if (self.flat_cells.len > 0) self.alloc.free(self.flat_cells);
-        self.flat_cells = try self.alloc.alloc(FlatCell, cols);
-    }
 
     pub fn copyGraphemeToBuf(self: *TerminalHandle, grapheme: []const u21) !void {
         if (self.grapheme_buf.len < grapheme.len) {
@@ -313,7 +256,6 @@ pub const TerminalHandle = struct {
 
     pub fn deinit(self: *TerminalHandle) void {
         const alloc = self.alloc;
-        if (self.flat_cells.len > 0) alloc.free(self.flat_cells);
         if (self.grapheme_buf.len > 0) alloc.free(self.grapheme_buf);
         self.render_state.deinit(alloc);
         self.stream.deinit();

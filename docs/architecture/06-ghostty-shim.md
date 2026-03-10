@@ -1,5 +1,7 @@
 # Ghostty Zig Shim Design
 
+> **IMPORTANT:** The FFI data design is superseded by the design in [12-zero-copy-ffi-rework.md](12-zero-copy-ffi-rework.md)
+
 ## Purpose
 
 Document the exact Ghostty 1.3.x internal APIs the Zig shim consumes, the

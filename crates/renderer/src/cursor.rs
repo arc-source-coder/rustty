@@ -1,4 +1,4 @@
-use ghostty_vt::CursorState;
+use ghostty_vt::{CursorState, RenderFrame};
 use gpui::{
     App, BorderStyle, Bounds, Hsla, Pixels, Point, ShapedLine, SharedString, TextAlign, TextRun,
     Window, fill, outline, point, px, size,
@@ -78,7 +78,7 @@ pub fn build_cursor(
     metrics: &CellMetrics,
     cursor_color: Hsla,
     bg_color: Hsla,
-    snapshot: &terminal::RenderSnapshot,
+    frame: &RenderFrame,
     base_font: &gpui::Font,
     window: &mut Window,
 ) -> Option<CursorLayout> {
@@ -99,22 +99,19 @@ pub fn build_cursor(
     );
 
     // Get the cell under the cursor for block text rendering
-    let cell = snapshot
-        .rows
-        .get(state.y as usize)
-        .and_then(|row| row.cells.as_ref())
+    let raw_cell = frame
+        .row_raw(state.y)
         .and_then(|cells| cells.get(state.x as usize));
 
-    // Extract the character under the cursor for width calculation
-    let cursor_char = cell
-        .filter(|c| c.codepoint != 0)
-        .and_then(|c| char::from_u32(c.codepoint));
+    let cursor_char = raw_cell
+        .filter(|c| c.codepoint() != 0)
+        .and_then(|c| char::from_u32(c.codepoint()));
 
-    // For block cursor, shape the text so we can paint it in inverse color
     let block_text = if shape == CursorShape::Block {
-        cell.filter(|c| c.codepoint != 0 && c.codepoint != b' ' as u32)
+        raw_cell
+            .filter(|c| c.codepoint() != 0 && c.codepoint() != b' ' as u32)
             .and_then(|c| {
-                let ch = char::from_u32(c.codepoint).unwrap_or('\u{FFFD}');
+                let ch = char::from_u32(c.codepoint()).unwrap_or('\u{FFFD}');
                 let text = ch.to_string();
                 let run = TextRun {
                     len: text.len(),

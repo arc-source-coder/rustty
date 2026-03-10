@@ -1,6 +1,8 @@
 # Data Model
 
-> **Update:** The single-thread model (UI + IO on same thread) 
+> **IMPORTANT:** The FFI design is superseded by the design in [12-zero-copy-ffi-rework.md](12-zero-copy-ffi-rework.md)
+
+> **Update:** The single-thread model (UI + IO on same thread)
 > has been replaced with 3-thread model inspired by Ghostty (UI, IO, PTY) See
 > [the migration plan](../plans/2026-02-27-renderer-001-terminal-renderer.md).
 

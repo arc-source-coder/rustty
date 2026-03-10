@@ -67,6 +67,8 @@ export fn ghostty_vt_terminal_feed(
 ) callconv(.c) c_int {
     if (ptr == null) return 1;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
+    // TODO: figure out a way to only mark as dirty when the palette actually cahnges
+    handle.palette_dirty = true;
     handle.stream.nextSlice(bytes[0..len]) catch return 2;
     return 0;
 }

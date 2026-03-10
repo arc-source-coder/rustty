@@ -562,12 +562,9 @@ impl Render for TerminalView {
         // during the previous prepaint; it lags one frame on first render but is always
         // fresh once the element has painted. `ScrollbarElement::compute_layout` receives
         // the live bounds from its own prepaint, so geometry is never stale.
+        // `last_scrollbar_info` was captured under the render mutex in prepaint
         if self.surface_bounds.get().is_some() {
-            let info = self
-                .terminal
-                .lock()
-                .expect("terminal mutex poisoned")
-                .scrollbar_info();
+            let info = self.session.read(cx).last_scrollbar_info();
             self.scrollbar
                 .update(cx, |state, _cx| state.sync_snapshot(info));
         }

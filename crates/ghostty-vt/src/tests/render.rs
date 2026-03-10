@@ -105,32 +105,7 @@ fn test_render_colors() {
 }
 
 #[test]
-fn test_render_palette() {
-    let ptr = unsafe {
-        ghostty_vt_terminal_new(
-            80,
-            24,
-            DEFAULT_FG.0,
-            DEFAULT_FG.1,
-            DEFAULT_FG.2,
-            DEFAULT_BG.0,
-            DEFAULT_BG.1,
-            DEFAULT_BG.2,
-        )
-    };
-    unsafe { ghostty_vt_terminal_render_update(ptr) };
-    let mut color = ColorRGB::default();
-    let rc = unsafe { ghostty_vt_terminal_render_palette_color(ptr, 1, &mut color) };
-    assert_eq!(rc, 0);
-    // Palette index 1 is red in Ghostty's default palette (#cc6666)
-    assert_eq!(color.r, 204);
-    assert_eq!(color.g, 102);
-    assert_eq!(color.b, 102);
-    unsafe { ghostty_vt_terminal_free(ptr) };
-}
-
-#[test]
-fn test_render_row_cells() {
+fn test_render_row_raw() {
     let ptr = unsafe {
         ghostty_vt_terminal_new(
             80,
@@ -148,21 +123,23 @@ fn test_render_row_cells() {
     unsafe { ghostty_vt_terminal_render_update(ptr) };
 
     let mut len: u16 = 0;
-    let cells = unsafe { ghostty_vt_terminal_render_row_cells(ptr, 0, &mut len) };
-    assert!(!cells.is_null());
+    let raw_ptr = unsafe { ghostty_vt_terminal_render_row_raw(ptr, 0, &mut len) };
+    assert!(!raw_ptr.is_null());
     assert_eq!(len, 80);
 
-    let cells_slice = unsafe { std::slice::from_raw_parts(cells, len as usize) };
-    assert_eq!(cells_slice[0].codepoint, b'A' as u32);
-    assert_eq!(cells_slice[1].codepoint, b'B' as u32);
-    assert_eq!(cells_slice[2].codepoint, b'C' as u32);
-    assert_eq!(cells_slice[0].wide, 0); // narrow
-    assert_eq!(cells_slice[0].grapheme_len, 0);
+    let cells = unsafe { std::slice::from_raw_parts(raw_ptr as *const RawCell, len as usize) };
+    assert_eq!(cells[0].codepoint(), b'A' as u32);
+    assert_eq!(cells[1].codepoint(), b'B' as u32);
+    assert_eq!(cells[2].codepoint(), b'C' as u32);
+    assert_eq!(cells[0].content_tag(), 0); // codepoint
+    assert_eq!(cells[0].wide(), 0); // narrow
+    assert!(!cells[0].has_grapheme());
+
     unsafe { ghostty_vt_terminal_free(ptr) };
 }
 
 #[test]
-fn test_render_styled_cell() {
+fn test_render_row_styles() {
     let ptr = unsafe {
         ghostty_vt_terminal_new(
             80,
@@ -180,15 +157,51 @@ fn test_render_styled_cell() {
     unsafe { ghostty_vt_terminal_feed(ptr, seq.as_ptr(), seq.len()) };
     unsafe { ghostty_vt_terminal_render_update(ptr) };
 
+    // Raw cells
     let mut len: u16 = 0;
-    let cells = unsafe { ghostty_vt_terminal_render_row_cells(ptr, 0, &mut len) };
-    let cells_slice = unsafe { std::slice::from_raw_parts(cells, len as usize) };
-    assert_eq!(cells_slice[0].codepoint, b'X' as u32);
-    // Bold flag should be set (bit 0)
-    assert!(cells_slice[0].style_flags & 1 != 0);
+    let raw_ptr = unsafe { ghostty_vt_terminal_render_row_raw(ptr, 0, &mut len) };
+    let cells = unsafe { std::slice::from_raw_parts(raw_ptr as *const RawCell, len as usize) };
+    assert_eq!(cells[0].codepoint(), b'X' as u32);
+    assert!(cells[0].style_id() != 0); // has a non-default style
+
+    // Styles
+    let mut slen: u16 = 0;
+    let styles_ptr = unsafe { ghostty_vt_terminal_render_row_styles(ptr, 0, &mut slen) };
+    let styles =
+        unsafe { std::slice::from_raw_parts(styles_ptr as *const CellStyle, slen as usize) };
+    assert!(styles[0].is_bold());
     // Foreground should be palette color (red = palette index 1)
-    assert_eq!(cells_slice[0].fg_color_type, 1); // palette
-    assert_eq!(cells_slice[0].fg_palette, 1); // red
+    assert_eq!(styles[0].fg.tag, 1); // palette
+    assert_eq!(styles[0].fg.r, 1); // palette index 1 = red
+
+    unsafe { ghostty_vt_terminal_free(ptr) };
+}
+
+#[test]
+fn test_render_palette_batch() {
+    let ptr = unsafe {
+        ghostty_vt_terminal_new(
+            80,
+            24,
+            DEFAULT_FG.0,
+            DEFAULT_FG.1,
+            DEFAULT_FG.2,
+            DEFAULT_BG.0,
+            DEFAULT_BG.1,
+            DEFAULT_BG.2,
+        )
+    };
+    unsafe { ghostty_vt_terminal_render_update(ptr) };
+
+    let palette_ptr = unsafe { ghostty_vt_terminal_render_palette(ptr) };
+    assert!(!palette_ptr.is_null());
+
+    let palette = unsafe { &*(palette_ptr as *const [ColorRGB; 256]) };
+    // Palette index 1 is red in Ghostty's default palette (#cc6666)
+    assert_eq!(palette[1].r, 204);
+    assert_eq!(palette[1].g, 102);
+    assert_eq!(palette[1].b, 102);
+
     unsafe { ghostty_vt_terminal_free(ptr) };
 }
 

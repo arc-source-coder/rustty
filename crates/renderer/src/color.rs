@@ -1,8 +1,8 @@
-use ghostty_vt::{ColorRGB, FlatCell};
+use ghostty_vt::{CellStyle, ColorRGB};
 use gpui::{Hsla, Rgba};
 use rapidhash::v3::rapidhash_v3;
 
-pub fn palette_hash(palette: &[ghostty_vt::ColorRGB; 256]) -> u64 {
+pub fn palette_hash(palette: &[ColorRGB; 256]) -> u64 {
     // Safety: ColorRGB is #[repr(C)], 3 × u8, no padding (size == 3).
     // Pod + Zeroable derived in ghostty-vt. cast_slice is safe for align-1 types.
     let bytes: &[u8] = bytemuck::cast_slice(palette);
@@ -25,8 +25,10 @@ pub fn color_rgb_to_hsla(c: ColorRGB) -> Hsla {
     rgb_to_hsla(c.r, c.g, c.b)
 }
 
-/// Pre-resolved palette colors. Built once per frame from the
-/// snapshot's raw palette data. Avoids per-cell conversion.
+/// Pre-resolved palette colors. Built once when the palette changes,
+/// then cached in `TerminalElementState` across frames.
+/// Avoids 256 × float conversions per frame when palette is unchanged.
+#[derive(Clone)]
 pub struct PaletteCache {
     colors: [Hsla; 256],
 }
@@ -45,60 +47,29 @@ impl PaletteCache {
     }
 }
 
-/// Resolve the foreground color from a FlatCell.
-///
-/// - type 0: default foreground
-/// - type 1: palette color
-/// - type 2: direct RGB
-pub fn resolve_fg(cell: &FlatCell, palette: &PaletteCache, default_fg: Hsla) -> Hsla {
-    match cell.fg_color_type {
-        0 => default_fg,
-        1 => palette.get(cell.fg_palette),
-        _ => rgb_to_hsla(cell.fg_r, cell.fg_g, cell.fg_b),
+/// Resolve the foreground color from a CellStyle.
+/// Returns default_fg when style is None (default style, style_id == 0).
+pub fn resolve_fg(style: Option<&CellStyle>, palette: &PaletteCache, default_fg: Hsla) -> Hsla {
+    match style {
+        None => default_fg,
+        Some(s) => match s.fg.tag {
+            1 => palette.get(s.fg.r),
+            2 => rgb_to_hsla(s.fg.r, s.fg.g, s.fg.b),
+            _ => default_fg,
+        },
     }
 }
 
-/// Resolve the background color from a FlatCell.
-pub fn resolve_bg(cell: &FlatCell, palette: &PaletteCache, default_bg: Hsla) -> Hsla {
-    match cell.bg_color_type {
-        0 => default_bg,
-        1 => palette.get(cell.bg_palette),
-        _ => rgb_to_hsla(cell.bg_r, cell.bg_g, cell.bg_b),
+/// Resolve the background color from a CellStyle (style_id != 0 path).
+/// Does NOT handle bg_only cells — those are decoded directly from RawCell
+/// in build_row_runs to avoid stale style SOA slots.
+pub fn resolve_bg(style: Option<&CellStyle>, palette: &PaletteCache, default_bg: Hsla) -> Hsla {
+    match style {
+        None => default_bg,
+        Some(s) => match s.bg.tag {
+            1 => palette.get(s.bg.r),
+            2 => rgb_to_hsla(s.bg.r, s.bg.g, s.bg.b),
+            _ => default_bg,
+        },
     }
-}
-
-// --- Style flag extraction ---
-// FlatCell.style_flags is a packed u16 bitfield (matches Ghostty Style.Flags).
-
-const FLAG_BOLD: u16 = 1 << 0;
-const FLAG_ITALIC: u16 = 1 << 1;
-const FLAG_FAINT: u16 = 1 << 2;
-const FLAG_INVERSE: u16 = 1 << 4;
-const FLAG_INVISIBLE: u16 = 1 << 5;
-const FLAG_STRIKETHROUGH: u16 = 1 << 6;
-const UNDERLINE_MASK: u16 = 0b111 << 8;
-const UNDERLINE_SHIFT: u16 = 8;
-
-pub fn is_bold(cell: &FlatCell) -> bool {
-    cell.style_flags & FLAG_BOLD != 0
-}
-pub fn is_italic(cell: &FlatCell) -> bool {
-    cell.style_flags & FLAG_ITALIC != 0
-}
-pub fn is_faint(cell: &FlatCell) -> bool {
-    cell.style_flags & FLAG_FAINT != 0
-}
-pub fn is_inverse(cell: &FlatCell) -> bool {
-    cell.style_flags & FLAG_INVERSE != 0
-}
-pub fn is_invisible(cell: &FlatCell) -> bool {
-    cell.style_flags & FLAG_INVISIBLE != 0
-}
-pub fn is_strikethrough(cell: &FlatCell) -> bool {
-    cell.style_flags & FLAG_STRIKETHROUGH != 0
-}
-
-/// Underline variant: 0=none, 1=single, 2=double, 3=curly, 4=dotted, 5=dashed
-pub fn underline_style(cell: &FlatCell) -> u8 {
-    ((cell.style_flags & UNDERLINE_MASK) >> UNDERLINE_SHIFT) as u8
 }

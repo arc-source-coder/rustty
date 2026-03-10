@@ -80,16 +80,15 @@ fn multiple_events_in_one_feed() {
 #[test]
 fn render_frame_dirty_lifecycle() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
-    term.render_update();
     {
-        let frame = term.begin_frame();
+        let frame = term.render_frame();
         // First update is always full dirty
         assert_eq!(frame.dirty(), DirtyState::Full);
         assert_eq!(frame.rows(), 24);
         assert_eq!(frame.cols(), 80);
     } // frame dropped — dirty cleared
     {
-        let frame = term.begin_frame();
+        let frame = term.render_frame();
         assert_eq!(frame.dirty(), DirtyState::Clean);
     }
 }
@@ -97,11 +96,9 @@ fn render_frame_dirty_lifecycle() {
 #[test]
 fn render_frame_partial_dirty() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
-    term.render_update();
-    drop(term.begin_frame()); // clear initial full dirty
+    drop(term.render_frame()); // clear initial full dirty
     term.feed(b"Hello");
-    term.render_update();
-    let frame = term.begin_frame();
+    let frame = term.render_frame();
     assert!(frame.dirty().is_dirty());
     assert!(frame.row_dirty(0));
 }
@@ -109,8 +106,7 @@ fn render_frame_partial_dirty() {
 #[test]
 fn render_frame_cursor() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
-    term.render_update();
-    let frame = term.begin_frame();
+    let frame = term.render_frame();
     let cursor = frame.cursor();
     assert_eq!(cursor.x, 0);
     assert_eq!(cursor.y, 0);
@@ -122,76 +118,72 @@ fn render_frame_cursor() {
 #[test]
 fn render_frame_colors_and_palette() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
-    term.render_update();
-    let frame = term.begin_frame();
+    let frame = term.render_frame();
     let _colors = frame.colors();
     // Palette index 1 is red (#cc6666 in Ghostty defaults)
-    let red = frame.palette_color(1);
+    let red = frame.palette()[1];
     assert_eq!(red.r, 204);
     assert_eq!(red.g, 102);
     assert_eq!(red.b, 102);
 }
 
 #[test]
-fn row_cells_ascii() {
+fn row_raw_ascii() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     term.feed(b"ABC");
-    term.render_update();
-    let frame = term.begin_frame();
-    let cells = frame.row_cells(0).expect("row 0 should exist");
+    let frame = term.render_frame();
+    let cells = frame.row_raw(0).expect("row 0 should exist");
     assert_eq!(cells.len(), 80);
-    assert_eq!(cells[0].codepoint, b'A' as u32);
-    assert_eq!(cells[1].codepoint, b'B' as u32);
-    assert_eq!(cells[2].codepoint, b'C' as u32);
-    assert_eq!(cells[0].wide, 0); // narrow
-    assert_eq!(cells[0].grapheme_len, 0);
+    assert_eq!(cells[0].codepoint(), b'A' as u32);
+    assert_eq!(cells[1].codepoint(), b'B' as u32);
+    assert_eq!(cells[2].codepoint(), b'C' as u32);
+    assert_eq!(cells[0].wide(), 0); // narrow
+    assert!(!cells[0].has_grapheme()); // grapheme_len 0
 }
 
 #[test]
-fn row_cells_styled() {
+fn row_raw_styled() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     // SGR 1 (bold) + SGR 31 (red fg) + "X"
     term.feed(b"\x1b[1;31mX");
-    term.render_update();
-    let frame = term.begin_frame();
-    let cells = frame.row_cells(0).unwrap();
-    assert_eq!(cells[0].codepoint, b'X' as u32);
+    let frame = term.render_frame();
+    let cells = frame.row_raw(0).unwrap();
+    let styles = frame.row_styles(0).unwrap();
+    assert_eq!(cells[0].codepoint(), b'X' as u32);
     // Bold flag (bit 0)
-    assert!(cells[0].style_flags & 1 != 0);
+    assert!(styles[0].is_bold());
     // Foreground: palette color, index 1 (red)
-    assert_eq!(cells[0].fg_color_type, 1);
-    assert_eq!(cells[0].fg_palette, 1);
+    assert_eq!(styles[0].fg.tag, 1); // palette
+    assert_eq!(styles[0].fg.r, 1); // palette index
 }
 
 #[test]
-fn row_cells_out_of_bounds_returns_none() {
+fn row_raw_out_of_bounds_returns_none() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
-    term.render_update();
-    let frame = term.begin_frame();
-    assert!(frame.row_cells(100).is_none());
+    let frame = term.render_frame();
+    assert!(frame.row_raw(100).is_none());
 }
 
 #[test]
-fn multiple_row_cells_calls_are_independent() {
+fn multiple_row_raw_calls_are_independent() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     term.feed(b"Row0\r\nRow1");
-    term.render_update();
-    let frame = term.begin_frame();
-    // Each call returns an owned Vec — previous data is not overwritten
-    let row0 = frame.row_cells(0).unwrap();
-    let row1 = frame.row_cells(1).unwrap();
 
-    assert_eq!(row0[0].codepoint, b'R' as u32);
-    assert_eq!(row0[3].codepoint, b'0' as u32);
-    assert_eq!(row1[0].codepoint, b'R' as u32);
-    assert_eq!(row1[3].codepoint, b'1' as u32);
+    let frame = term.render_frame();
+    // Each call returns an owned Vec — previous data is not overwritten
+    let row0 = frame.row_raw(0).unwrap();
+    let row1 = frame.row_raw(1).unwrap();
+
+    assert_eq!(row0[0].codepoint(), b'R' as u32);
+    assert_eq!(row0[3].codepoint(), b'0' as u32);
+    assert_eq!(row1[0].codepoint(), b'R' as u32);
+    assert_eq!(row1[3].codepoint(), b'1' as u32);
 }
 
 #[test]
 fn row_selection_none_by_default() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
-    term.render_update();
-    let frame = term.begin_frame();
+    let frame = term.render_frame();
     assert!(frame.row_selection(0).is_none());
 }
 
@@ -237,9 +229,8 @@ fn selection_lifecycle() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     term.feed(b"Hello, World!");
     assert!(term.set_selection(0, 0, 4, 0, false));
-    term.render_update();
     {
-        let frame = term.begin_frame();
+        let frame = term.render_frame();
         let sel = frame.row_selection(0);
         assert_eq!(sel, Some((0, 4)));
     }
@@ -247,9 +238,8 @@ fn selection_lifecycle() {
     assert_eq!(text.as_str(), "Hello");
     drop(text);
     term.clear_selection();
-    term.render_update();
     {
-        let frame = term.begin_frame();
+        let frame = term.render_frame();
         assert!(frame.row_selection(0).is_none());
     }
 }

@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::{
     fmt::{Debug, Formatter, Result},
     ops::Deref,
@@ -60,15 +59,10 @@ unsafe extern "C" fn response_trampoline(userdata: *mut c_void, ptr: *const u8, 
 /// `Send` but not `Sync` — all access must go through an external
 /// `Mutex<Terminal>` when shared between threads.
 /// All mutating operations take `&mut self`; read operations take `&self`.
-/// Use `begin_frame()` to access render state — while the returned
-/// `RenderFrame` exists, no mutation can occur (enforced by borrow checker).
+/// Use `render_frame()` to access render state.
 pub struct Terminal {
     handle: *mut c_void,
     events: Box<Vec<VtEvent>>,
-    /// Prevents calling `begin_frame()` twice in the same scope.
-    /// The first frame's Drop clears dirty flags, silently corrupting
-    /// the second frame's view. debug_assert catches this during dev.
-    frame_active: Cell<bool>,
 }
 
 // Safety: Terminal wraps a Zig-allocated handle that is not thread-safe.
@@ -105,11 +99,7 @@ impl Terminal {
             );
         }
 
-        Some(Terminal {
-            handle,
-            events,
-            frame_active: Cell::new(false),
-        })
+        Some(Terminal { handle, events })
     }
 
     /// Feed raw bytes (PTY output) to the terminal emulator.
@@ -150,35 +140,43 @@ impl Terminal {
         std::mem::swap(&mut *self.events, buf);
     }
 
-    /// Update the persistent render state from current terminal state.
-    /// Call this after feeding bytes and before `begin_frame()`.
-    pub fn render_update(&mut self) {
+    /// Update the persistent render state and return a detached frame accessor.
+    ///
+    /// Calls `render_update()` then constructs a `RenderFrame` holding the
+    /// raw handle pointer. The frame can be used after the `MutexGuard<Terminal>`
+    /// that gave us `&mut self` is dropped — the caller controls the lock scope.
+    ///
+    /// The caller MUST query any non-RenderState fields (`scrollbar_info`,
+    /// `is_alternate_screen`, etc.) before the guard drops.
+    /// `frame.*()` calls are safe after the lock drops because RenderState
+    /// is only mutated by render_update() on the UI thread.
+    ///
+    /// SAFETY: `render_frame()` takes `&mut self`, so the borrow checker prevents
+    /// creating a second frame while the `MutexGuard<Terminal>` is still held.
+    /// However, once the guard drops the frame becomes detached, and the borrow
+    /// checker can no longer prevent a second `render_frame()` call on the same
+    /// guard (in a subsequent lock scope) before the first frame is dropped.
+    ///
+    /// Callers MUST ensure the previous `RenderFrame` is dropped before calling
+    /// `render_frame()` again. Violating this causes the first frame's `Drop` to clear
+    /// dirty flags that the second frame still needs, producing incorrect rendering.
+    ///
+    /// The architectural invariant (only prepaint creates frames, and prepaint drops
+    /// the frame before its next invocation) satisfies this requirement.
+    ///
+    /// When `RenderFrame` is dropped, dirty flags are cleared automatically.
+    pub fn render_frame(&mut self) -> RenderFrame {
+        // Ignore return: a failed update (allocation error inside Ghostty)
+        // leaves RenderState in its previous valid state. We hand out a
+        // frame over stale-but-consistent data rather than crashing or
+        // skipping the frame. The dirty flags are unchanged, so the next
+        // successful update will re-render the affected rows.
         unsafe {
             ghostty_vt_terminal_render_update(self.handle);
         }
-    }
-
-    /// Borrow render state for the current frame.
-    /// While the returned `RenderFrame` exists, mutating methods
-    /// (`feed`, `resize`, `render_update`, scroll, selection mutation)
-    /// cannot be called — enforced by the borrow checker.
-    ///
-    /// When the `RenderFrame` is dropped, dirty flags are cleared
-    /// automatically.
-    ///
-    /// # Panics (debug only)
-    ///
-    /// Debug-asserts if a `RenderFrame` is already active. Calling
-    /// `begin_frame()` twice in the same scope would cause the first
-    /// frame's Drop to clear dirty flags, silently corrupting the
-    /// second frame's view.
-    pub fn begin_frame(&self) -> RenderFrame<'_> {
-        debug_assert!(
-            !self.frame_active.get(),
-            "begin_frame() called while a RenderFrame is already active"
-        );
-        self.frame_active.set(true);
-        RenderFrame { terminal: self }
+        RenderFrame {
+            handle: self.handle,
+        }
     }
 
     // --- Mode flag queries (read-only, &self) ---
@@ -332,74 +330,120 @@ impl Drop for Terminal {
     }
 }
 
-/// Borrow guard for render state access.
+/// Detached render state accessor — holds a raw Zig handle pointer.
 ///
-/// Holds `&Terminal`, preventing mutation while render data is read.
-/// When dropped, dirty flags are cleared automatically (calls
-/// `render_clear_dirty` on the underlying handle) and the
-/// `frame_active` guard is released.
+/// Created by `Terminal::render_frame()` which calls `render_update()` and
+/// returns this with the mutex already dropped. The handle pointer is
+/// Zig-allocated and heap-stable.
 ///
-/// Cell data returned by `row_cells()` is owned (`Vec<FlatCell>`) because
-/// the Zig side uses a single shared flat_cells buffer that gets
-/// overwritten on each FFI call. Owned copies are safe (~2KB per row memcpy).
-pub struct RenderFrame<'a> {
-    terminal: &'a Terminal,
+/// Cell and style data returned by `row_raw()` and `row_styles()` are
+/// zero-copy slices into RenderState memory. These pointers are stable
+/// from the moment `render_frame()` returns until the next `render_update()`.
+/// Thus, it is stable for the entire frame (when frame drops, dirty flags clear).
+///
+/// This detached design allows the mutex to be dropped immediately after
+/// `render_update()`, so the read thread can call `feed()` without blocking
+/// on text run building or cursor generation.
+pub struct RenderFrame {
+    handle: *mut c_void,
 }
 
-impl<'a> RenderFrame<'a> {
+impl RenderFrame {
+    /// Get raw cell data for a row (zero-copy pointer into Zig memory).
+    /// Returns `None` if row is out of bounds.
+    ///
+    /// Safety: The returned slice borrows from RenderState memory
+    /// that is stable for the lifetime of this RenderFrame.
+    pub fn row_raw(&self, y: u16) -> Option<&[RawCell]> {
+        let mut len: u16 = 0;
+        let ptr = unsafe { ghostty_vt_terminal_render_row_raw(self.handle, y, &mut len) };
+        if ptr.is_null() || len == 0 {
+            return None;
+        }
+        // Safety: RawCell is #[repr(transparent)] over u64.
+        // The pointer comes from RenderState memory which is stable
+        // for the frame's lifetime. The len is verified by the Zig side.
+        Some(unsafe { std::slice::from_raw_parts(ptr as *const RawCell, len as usize) })
+    }
+
+    /// Get style data for a row (zero-copy pointer into Zig memory).
+    /// Returns `None` if row is out of bounds.
+    ///
+    /// Individual entries are only valid when the corresponding
+    /// RawCell's style_id != 0 or content_tag is bg_color_*.
+    pub fn row_styles(&self, y: u16) -> Option<&[CellStyle]> {
+        let mut len: u16 = 0;
+        let ptr = unsafe { ghostty_vt_terminal_render_row_styles(self.handle, y, &mut len) };
+        if ptr.is_null() || len == 0 {
+            return None;
+        }
+        // Safety: The Zig FFI returns *const CellStyle (the Zig extern struct).
+        // Rust's CellStyle is #[repr(C)] with the same layout, verified by
+        // Zig comptime assertions. Pointer is into RenderState memory,
+        // stable for the frame's lifetime.
+        Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
+    }
+
+    /// Get grapheme codepoints for a multi-codepoint cluster cell (on-demand).
+    /// Returns a slice into the Zig-side scratch buffer (widened u21→u32).
+    ///
+    /// Returns `None` if the cell is not a grapheme cluster (`has_grapheme() == false`).
+    ///
+    /// SAFETY: The returned slice points into a single per-handle scratch buffer
+    /// that is overwritten on every call. This means:
+    ///   - The slice is **only valid until the next `cell_grapheme()` call**.
+    ///   - Holding two slices from two calls simultaneously is **undefined behaviour**.
+    ///
+    /// This is safe within `build_row_runs` because the loop consumes
+    /// each slice (pushes chars to `cell_text`) before advancing to
+    /// the next cell, which is the only call site.
+    /// Do not refactor the call site without re-checking this invariant.
+    pub fn cell_grapheme(&self, row: u16, col: u16) -> Option<&[u32]> {
+        let mut len: u8 = 0;
+        let ptr =
+            unsafe { ghostty_vt_terminal_render_cell_grapheme(self.handle, row, col, &mut len) };
+        if ptr.is_null() || len == 0 {
+            return None;
+        }
+        // SAFETY: Zig widens u21→u32 into `handle.grapheme_buf`, a heap-stable
+        // scratch buffer that is only mutated by this function. The caller
+        // (build_row_runs) consumes the slice in the same iteration step before
+        // issuing any further cell_grapheme() call, so no aliasing occurs.
+        Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
+    }
+
+    /// Get the full 256-entry palette (zero-copy pointer into sidecar).
+    /// The sidecar is refreshed during render_update().
+    pub fn palette(&self) -> &[ColorRGB; 256] {
+        let ptr = unsafe { ghostty_vt_terminal_render_palette(self.handle) };
+        // Safety: palette_cache is always initialized after render_update().
+        // 256 × ColorRGB (3 bytes each) = 768 bytes.
+        unsafe { &*(ptr as *const [ColorRGB; 256]) }
+    }
+
     /// Current dirty state of the render data.
+    #[inline(always)]
     pub fn dirty(&self) -> DirtyState {
-        let raw = unsafe { ghostty_vt_terminal_render_dirty(self.terminal.handle) };
+        let raw = unsafe { ghostty_vt_terminal_render_dirty(self.handle) };
         DirtyState::from_raw(raw)
     }
 
     /// Number of rows in the current render state.
+    #[inline(always)]
     pub fn rows(&self) -> u16 {
-        unsafe { ghostty_vt_terminal_render_rows(self.terminal.handle) }
+        unsafe { ghostty_vt_terminal_render_rows(self.handle) }
     }
 
     /// Number of columns in the current render state.
+    #[inline(always)]
     pub fn cols(&self) -> u16 {
-        unsafe { ghostty_vt_terminal_render_cols(self.terminal.handle) }
+        unsafe { ghostty_vt_terminal_render_cols(self.handle) }
     }
 
     /// Whether a specific row has changed since last clear.
+    #[inline(always)]
     pub fn row_dirty(&self, y: u16) -> bool {
-        unsafe { ghostty_vt_terminal_render_row_dirty(self.terminal.handle, y) != 0 }
-    }
-
-    /// Current cursor state.
-    pub fn cursor(&self) -> CursorState {
-        let mut out = CursorState::default();
-        unsafe { ghostty_vt_terminal_render_cursor(self.terminal.handle, &mut out) };
-        out
-    }
-
-    /// Current terminal colors (foreground, background, cursor).
-    pub fn colors(&self) -> ColorState {
-        let mut out = ColorState::default();
-        unsafe { ghostty_vt_terminal_render_colors(self.terminal.handle, &mut out) };
-        out
-    }
-
-    /// Get a palette color by index (0–255).
-    pub fn palette_color(&self, index: u8) -> ColorRGB {
-        let mut out = ColorRGB::default();
-        unsafe { ghostty_vt_terminal_render_palette_color(self.terminal.handle, index, &mut out) };
-        out
-    }
-
-    /// Get flattened cell data for a row. Returns an owned `Vec<FlatCell>`.
-    /// Returns `None` if the row is out of bounds.
-    pub fn row_cells(&self, y: u16) -> Option<Vec<FlatCell>> {
-        let mut len: u16 = 0;
-        let ptr =
-            unsafe { ghostty_vt_terminal_render_row_cells(self.terminal.handle, y, &mut len) };
-        if ptr.is_null() || len == 0 {
-            return None;
-        }
-        let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-        Some(slice.to_vec())
+        unsafe { ghostty_vt_terminal_render_row_dirty(self.handle, y) != 0 }
     }
 
     /// Get selection range for a row. Returns `Some((start_x, end_x))` if
@@ -408,12 +452,7 @@ impl<'a> RenderFrame<'a> {
         let mut start_x: u16 = 0;
         let mut end_x: u16 = 0;
         let has = unsafe {
-            ghostty_vt_terminal_render_row_selection(
-                self.terminal.handle,
-                y,
-                &mut start_x,
-                &mut end_x,
-            )
+            ghostty_vt_terminal_render_row_selection(self.handle, y, &mut start_x, &mut end_x)
         };
         if has != 0 {
             Some((start_x, end_x))
@@ -422,31 +461,26 @@ impl<'a> RenderFrame<'a> {
         }
     }
 
-    /// Get grapheme codepoints for a cell with a multi-codepoint cluster.
-    /// Returns `None` if the cell has no grapheme (`grapheme_len == 0`) or
-    /// is out of bounds.
-    ///
-    /// Returns owned data — the Zig side uses a shared buffer, so
-    /// returning a borrowed slice would be unsound across multiple calls.
-    pub fn cell_grapheme(&self, row: u16, col: u16) -> Option<Vec<u32>> {
-        let mut len: u8 = 0;
-        let ptr = unsafe {
-            ghostty_vt_terminal_render_cell_grapheme(self.terminal.handle, row, col, &mut len)
-        };
-        if ptr.is_null() || len == 0 {
-            return None;
-        }
-        let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-        Some(slice.to_vec())
+    /// Current cursor state.
+    pub fn cursor(&self) -> CursorState {
+        let mut out = CursorState::default();
+        unsafe { ghostty_vt_terminal_render_cursor(self.handle, &mut out) };
+        out
+    }
+
+    /// Current terminal colors (foreground, background, cursor).
+    pub fn colors(&self) -> ColorState {
+        let mut out = ColorState::default();
+        unsafe { ghostty_vt_terminal_render_colors(self.handle, &mut out) };
+        out
     }
 }
 
-impl<'a> Drop for RenderFrame<'a> {
+impl Drop for RenderFrame {
     fn drop(&mut self) {
         unsafe {
-            ghostty_vt_terminal_render_clear_dirty(self.terminal.handle);
+            ghostty_vt_terminal_render_clear_dirty(self.handle);
         }
-        self.terminal.frame_active.set(false);
     }
 }
 

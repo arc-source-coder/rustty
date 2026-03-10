@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use std::{cell::Cell, rc::Rc};
 
 use crate::color::{PaletteCache, color_rgb_to_hsla, palette_hash};
 use crate::cursor::{CursorLayout, build_cursor};
-use crate::text_runs::{BgRect, PositionedTextRun, build_row_runs};
+use crate::text_runs::{BgRect, FontVariants, PositionedTextRun, build_row_runs};
 use ghostty_vt::{DirtyState, Terminal};
 use gpui::{
     App, Bounds, DefiniteLength, Element, ElementId, Entity, GlobalElementId, Hitbox,
@@ -45,8 +46,11 @@ pub struct LayoutState {
     background_color: Hsla,
     /// Shared with TerminalElementState — Arc::clone is O(1).
     row_text_runs: Arc<Vec<Vec<PositionedTextRun>>>,
-    bg_rects: Vec<BgRect>,
+    row_bg_rects: Arc<Vec<Vec<BgRect>>>,
     /// Per-row selection range: (row, start_col, end_col).
+    /// At most one selection exists; this Vec has at most `rows` entries.
+    /// Built fresh every non-Clean frame; empty on Clean (selection changes
+    /// always force DirtyState::Full, so Clean implies no selection change).
     selection_rects: Vec<(u16, u16, u16)>,
     cursor: Option<CursorLayout>,
 }
@@ -57,6 +61,10 @@ struct TerminalElementState {
     /// ownership without cloning on clean frames (Arc::clone is O(1)).
     /// Dirty frames use Arc::make_mut to get exclusive mutable access.
     row_text_runs: Arc<Vec<Vec<PositionedTextRun>>>,
+    /// Per-row background rects. Cached alongside text runs because they
+    /// change under identical conditions (same dirty-row flags, same
+    /// force_full triggers). Arc::clone is O(1) on clean frames.
+    row_bg_rects: Arc<Vec<Vec<BgRect>>>,
     /// Grid dimensions at last render (invalidate on change).
     last_cols: u16,
     last_rows: u16,
@@ -67,6 +75,7 @@ struct TerminalElementState {
     last_default_bg: Option<Hsla>,
     /// Simple palette hash (invalidate on palette change).
     last_palette_hash: u64,
+    palette_cache: Option<PaletteCache>,
 }
 
 /// The GPUI Element that renders the terminal surface.
@@ -371,26 +380,65 @@ impl Element for TerminalElement {
             let cell_w = f32::from(metrics.cell_width) as u16;
             let cell_h = f32::from(metrics.line_height) as u16;
 
-            // Snapshot render data: single lock scope.
-            let snapshot = terminal::RenderSnapshot::capture(
-                &mut terminal.lock().expect("terminal mutex poisoned"),
-            );
+            // Critical lock section: Lock is held only for render_update() + reading
+            // non-RenderState fields.
+            // All RenderState reads (rows, cols, palette, colors, cursor, row data)
+            // happen outside the lock via frame.*(). Keep this block minimal.
+            let lock_start = Instant::now();
+            let (frame, scrollbar, is_alt) = {
+                let mut term = terminal.lock().expect("terminal mutex poisoned");
+                let frame = term.render_frame(); // calls render_update() internally
+                // Non-RenderState: MUST be queried before guard drops
+                let scrollbar = term.scrollbar_info();
+                let is_alt = term.is_alternate_screen();
+                (frame, scrollbar, is_alt)
+            };
 
-            // Notify the PTY to resize.
-            // IO thread will resize terminal after ConPTY reflows.
+            // MutexGuard dropped here — read thread can call feed() immediately.
+            // Log after unlock so stdout latency doesn't extend the lock.
+            let lock_elapsed = lock_start.elapsed();
+            // println!("render mutex held for {}µs", lock_elapsed.as_micros());
+
+            let num_rows = frame.rows();
+
+            // Notify the PTY to resize and publish render-derived state
+            // so that TerminalView can read is_alternate_screen and
+            // scrollbar_info without taking a second lock.
             session.update(cx, |s, _cx| {
                 s.request_resize(grid.cols, grid.rows, cell_w, cell_h);
+                s.set_render_state(is_alt, scrollbar);
             });
 
-            let default_fg = color_rgb_to_hsla(snapshot.colors.foreground);
-            let default_bg = color_rgb_to_hsla(snapshot.colors.background);
-            let background_color = default_bg;
-            let palette = PaletteCache::from_raw(&snapshot.palette);
-            let base_font = gpui::font(&font_family);
+            let colors = frame.colors();
+            let cursor_state = frame.cursor();
+            let dirty = frame.dirty();
 
-            let num_rows = snapshot.num_rows;
-            let dirty = snapshot.dirty;
-            let p_hash = palette_hash(&snapshot.palette);
+            let default_fg = color_rgb_to_hsla(colors.foreground);
+            let default_bg = color_rgb_to_hsla(colors.background);
+            let background_color = default_bg;
+            let palette = frame.palette();
+            let p_hash = palette_hash(palette);
+            let base_font = gpui::font(&font_family);
+            // Built once per frame — 12 Arc clones total regardless of dirty row count.
+            let fonts = FontVariants::from_base(&base_font);
+
+            // Reuse the cached PaletteCache when the palette hash hasn't changed.
+            // PaletteCache is 256 × Hsla = 256 × 16 bytes = 4 KB. Building it
+            // costs 256 float conversions — skip it when palette is unchanged.
+            let palette_cache = if prev_state.as_ref().map_or(false, |s| {
+                s.last_palette_hash == p_hash && s.palette_cache.is_some()
+            }) {
+                // Palette unchanged — reuse cached conversion
+                prev_state
+                    .as_ref()
+                    .unwrap()
+                    .palette_cache
+                    .as_ref()
+                    .unwrap()
+                    .clone()
+            } else {
+                PaletteCache::from_raw(palette)
+            };
 
             let size_changed = prev_state
                 .as_ref()
@@ -405,100 +453,125 @@ impl Element for TerminalElement {
             let force_full =
                 size_changed || colors_changed || palette_changed || dirty == DirtyState::Full;
 
-            // row_text_runs: Arc-wrapped so clean frames share ownership
-            // without copying. Arc::make_mut gives exclusive access on
-            // dirty frames (clones only if there are other Arc holders,
-            // which there aren't — the previous LayoutState is long gone).
+            // row_text_runs and row_bg_rects: Arc-wrapped per-row caches.
+            // On Clean frames with no force_full, we share both Arcs unchanged
+            // On Partial frames, Arc::make_mut gives exclusive access and we
+            // patch only the dirty rows in-place.
+            // Arc::make_mut is a no-op clone here because the previous
+            // LayoutState no longer holds its Arc by prepaint time.
             let mut row_text_runs: Arc<Vec<Vec<PositionedTextRun>>>;
-            let mut bg_rects = Vec::new();
+            let mut row_bg_rects: Arc<Vec<Vec<BgRect>>>;
+            // selection_rects is a plain Vec: at most one selection exists,
+            // spanning at most `rows` entries. No caching needed — selection
+            // changes always produce DirtyState::Full, so the Clean path
+            // never has a stale selection to worry about.
+            let mut selection_rects: Vec<(u16, u16, u16)> = Vec::new();
 
             if !force_full && dirty == DirtyState::Clean {
-                // Nothing changed — share the cached Arc; no allocation.
-                row_text_runs = match prev_state {
-                    Some(state) => state.row_text_runs,
-                    None => Arc::new(Vec::new()),
-                };
-                // bg_rects are cheap to rebuild and never worth caching
-                // across frames — always produce them fresh.
-                for (y, row_snapshot) in snapshot.rows.iter().enumerate() {
-                    let runs = build_row_runs(
-                        row_snapshot,
-                        y as u16,
-                        &palette,
-                        default_fg,
-                        default_bg,
-                        &base_font,
-                        metrics.font_size,
-                    );
-                    bg_rects.extend(runs.bg_rects);
+                // Nothing changed — share both cached Arcs. Selection is
+                // guaranteed empty (any change would have forced DirtyState::Full).
+                match prev_state {
+                    Some(state) => {
+                        row_text_runs = state.row_text_runs;
+                        row_bg_rects = state.row_bg_rects;
+                    }
+                    None => {
+                        row_text_runs = Arc::new(Vec::new());
+                        row_bg_rects = Arc::new(Vec::new());
+                    }
                 }
             } else {
-                // Start from the cached row vec (or a fresh one) and patch
-                // only the dirty rows. Arc::make_mut is a no-op clone here
-                // because the previous LayoutState no longer holds this Arc.
-                row_text_runs = match prev_state {
-                    Some(state) if !force_full => state.row_text_runs,
-                    _ => {
-                        let mut v = Vec::with_capacity(num_rows as usize);
-                        v.resize_with(num_rows as usize, Vec::new);
-                        Arc::new(v)
+                // Partial or full update: start from cached or fresh vecs,
+                // then patch only dirty rows (or all rows on force_full).
+                match prev_state {
+                    Some(state) if !force_full => {
+                        row_text_runs = state.row_text_runs;
+                        row_bg_rects = state.row_bg_rects;
                     }
-                };
+                    _ => {
+                        let mut tr = Vec::with_capacity(num_rows as usize);
+                        tr.resize_with(num_rows as usize, Vec::new);
+                        row_text_runs = Arc::new(tr);
+                        let mut br = Vec::with_capacity(num_rows as usize);
+                        br.resize_with(num_rows as usize, Vec::new);
+                        row_bg_rects = Arc::new(br);
+                    }
+                }
 
-                let rows_mut = Arc::make_mut(&mut row_text_runs);
+                let runs_mut = Arc::make_mut(&mut row_text_runs);
+                let bgs_mut = Arc::make_mut(&mut row_bg_rects);
 
-                for (y, row_snapshot) in snapshot.rows.iter().enumerate() {
+                for y in 0..num_rows {
+                    if let Some((sx, ex)) = frame.row_selection(y) {
+                        selection_rects.push((y, sx, ex));
+                    }
+
+                    let row_dirty = frame.row_dirty(y);
+                    if !force_full && !row_dirty {
+                        // Row unchanged — cached text_runs and bg_rects are
+                        // still valid; skip all FFI reads for this row.
+                        continue;
+                    }
+
+                    let raw_cells = match frame.row_raw(y) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    let styles = match frame.row_styles(y) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+
                     let runs = build_row_runs(
-                        row_snapshot,
-                        y as u16,
-                        &palette,
+                        raw_cells,
+                        styles,
+                        y,
+                        &palette_cache,
                         default_fg,
                         default_bg,
-                        &base_font,
+                        &fonts,
                         metrics.font_size,
+                        &frame,
                     );
-                    if (force_full || row_snapshot.dirty) && y < rows_mut.len() {
-                        rows_mut[y] = runs.text_runs;
-                    }
-                    bg_rects.extend(runs.bg_rects);
-                }
-            }
 
-            // Selection.
-            let mut selection_rects = Vec::new();
-            for (y, row_snapshot) in snapshot.rows.iter().enumerate() {
-                if let Some((start_x, end_x)) = row_snapshot.selection {
-                    selection_rects.push((y as u16, start_x, end_x));
+                    if let Some(row_runs) = runs_mut.get_mut(y as usize) {
+                        *row_runs = runs.text_runs;
+                    }
+                    if let Some(row_bgs) = bgs_mut.get_mut(y as usize) {
+                        *row_bgs = runs.bg_rects;
+                    }
                 }
             }
 
             // Cursor.
-            let cursor_color = if snapshot.colors.has_cursor_color != 0 {
-                color_rgb_to_hsla(snapshot.colors.cursor_color)
+            let cursor_color = if colors.has_cursor_color != 0 {
+                color_rgb_to_hsla(colors.cursor_color)
             } else {
                 default_fg
             };
             let cursor = build_cursor(
-                &snapshot.cursor,
+                &cursor_state,
                 &metrics,
                 cursor_color,
                 default_bg,
-                &snapshot,
+                &frame,
                 &base_font,
                 window,
             );
 
             // Arc::clone is O(1) — state and layout share the same allocation.
-            // TerminalElementState carries the Arc into the next frame;
-            // LayoutState holds it for the duration of this frame's paint.
+            // TerminalElementState carries both Arcs into the next frame;
+            // LayoutState holds row_text_runs for the duration of this frame's paint.
             let new_state = TerminalElementState {
                 row_text_runs: Arc::clone(&row_text_runs),
+                row_bg_rects: Arc::clone(&row_bg_rects),
                 last_cols: grid.cols,
                 last_rows: grid.rows,
                 cached_metrics: Some(new_metrics),
                 last_default_fg: Some(default_fg),
                 last_default_bg: Some(default_bg),
                 last_palette_hash: p_hash,
+                palette_cache: Some(palette_cache),
             };
 
             let layout = LayoutState {
@@ -506,7 +579,7 @@ impl Element for TerminalElement {
                 grid,
                 background_color,
                 row_text_runs,
-                bg_rects,
+                row_bg_rects,
                 selection_rects,
                 cursor,
             };
@@ -537,13 +610,15 @@ impl Element for TerminalElement {
         window.paint_quad(fill(bounds, layout.background_color));
 
         // Layer 2: Non-default background spans.
-        for rect in &layout.bg_rects {
-            let pos = point(
-                origin.x + rect.col as f32 * metrics.cell_width,
-                origin.y + rect.row as f32 * metrics.line_height,
-            );
-            let sz = size(metrics.cell_width * rect.width as f32, metrics.line_height);
-            window.paint_quad(fill(Bounds::new(pos, sz), rect.color));
+        for bg_rects in layout.row_bg_rects.iter() {
+            for rect in bg_rects {
+                let pos = point(
+                    origin.x + rect.col as f32 * metrics.cell_width,
+                    origin.y + rect.row as f32 * metrics.line_height,
+                );
+                let sz = size(metrics.cell_width * rect.width as f32, metrics.line_height);
+                window.paint_quad(fill(Bounds::new(pos, sz), rect.color));
+            }
         }
 
         // Layer 3: Selection overlay (translucent).

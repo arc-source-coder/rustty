@@ -5,7 +5,7 @@ use std::thread::JoinHandle;
 use bytes::Bytes;
 use gpui::{AsyncApp, Context, Entity, Keystroke, Modifiers, Task, WeakEntity};
 
-use ghostty_vt::{ColorRGB, FlatCell, MouseMode, Terminal};
+use ghostty_vt::{ColorRGB, MouseMode, RawCell, ScrollbarInfo, Terminal};
 use pty::{Options, Shell, WindowSize};
 
 use crate::config::{RenderConfig, SpawnConfig};
@@ -32,6 +32,12 @@ pub struct TerminalSession {
     io_tx: crossbeam_channel::Sender<IoMsg>,
     metadata: SessionMetadata,
     process_state: ProcessState,
+    /// Cached from the render lock in prepaint; avoids a separate mutex acquisition
+    /// in `try_handle_scroll_key`. Updated every frame via `set_render_state`.
+    is_alternate_screen: bool,
+    /// Cached from the render lock in prepaint; avoids a separate mutex acquisition
+    /// in `render`. Updated every frame via `set_render_state`.
+    last_scrollbar_info: ScrollbarInfo,
 
     read_thread: Option<JoinHandle<()>>,
     io_thread: Option<JoinHandle<()>>,
@@ -165,6 +171,8 @@ impl TerminalSession {
             io_tx,
             metadata: SessionMetadata::default(),
             process_state: ProcessState::Running,
+            is_alternate_screen: false,
+            last_scrollbar_info: ScrollbarInfo::default(),
             read_thread: Some(read_thread),
             io_thread: Some(io_thread),
             _signal_task: signal_task,
@@ -389,10 +397,18 @@ impl TerminalSession {
 
     /// Whether the alternate screen is currently active.
     pub fn is_alternate_screen(&self) -> bool {
-        self.terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .is_alternate_screen()
+        self.is_alternate_screen
+    }
+
+    /// Last scrollbar info captured during prepaint.
+    pub fn last_scrollbar_info(&self) -> ScrollbarInfo {
+        self.last_scrollbar_info
+    }
+
+    /// Update render-derived state captured under the render mutex in prepaint.
+    pub fn set_render_state(&mut self, is_alternate_screen: bool, scrollbar_info: ScrollbarInfo) {
+        self.is_alternate_screen = is_alternate_screen;
+        self.last_scrollbar_info = scrollbar_info;
     }
 
     // --- Selection gesture handling ---
@@ -440,34 +456,33 @@ impl TerminalSession {
             .map_or(DelimClass::Regular, |_| DelimClass::Delimiter)
     }
 
-    fn effective_codepoint(cells: &[FlatCell], col: u16) -> u32 {
+    fn effective_codepoint(cells: &[RawCell], col: u16) -> u32 {
         let idx = col as usize;
         cells.get(idx).map_or(0, |cell| {
-            if cell.wide == 2 && idx > 0 {
-                cells[idx - 1].codepoint
+            if cell.wide() == 2 && idx > 0 {
+                cells[idx - 1].codepoint()
             } else {
-                cell.codepoint
+                cell.codepoint()
             }
         })
     }
 
     fn expand_word(term: &mut Terminal, pos: (u16, u16)) -> ((u16, u32), (u16, u32)) {
         let (col, row) = pos;
-        term.render_update();
-        let frame = term.begin_frame();
+        let frame = term.render_frame();
 
-        let cells = match frame.row_cells(row) {
+        let cells = match frame.row_raw(row) {
             Some(c) if !c.is_empty() => c,
             _ => return ((col, row as u32), (col, row as u32)),
         };
 
         let col = col.min(cells.len().saturating_sub(1) as u16);
-        let target = Self::classify_codepoint(Self::effective_codepoint(&cells, col));
+        let target = Self::classify_codepoint(Self::effective_codepoint(cells, col));
 
         // Walk left to find start
         let mut start = col;
         while start > 0
-            && Self::classify_codepoint(Self::effective_codepoint(&cells, start - 1)) == target
+            && Self::classify_codepoint(Self::effective_codepoint(cells, start - 1)) == target
         {
             start -= 1;
         }
@@ -475,7 +490,7 @@ impl TerminalSession {
         // Walk right to find end
         let mut end = col;
         while (end as usize) + 1 < cells.len()
-            && Self::classify_codepoint(Self::effective_codepoint(&cells, end + 1)) == target
+            && Self::classify_codepoint(Self::effective_codepoint(cells, end + 1)) == target
         {
             end += 1;
         }
@@ -485,8 +500,8 @@ impl TerminalSession {
 
     fn expand_line(term: &mut Terminal, pos: (u16, u16)) -> ((u16, u32), (u16, u32)) {
         let (_, row) = pos;
-        term.render_update();
-        let last_col = term.begin_frame().cols().saturating_sub(1);
+        let frame = term.render_frame();
+        let last_col = frame.cols().saturating_sub(1);
         ((0, row as u32), (last_col, row as u32))
     }
 }

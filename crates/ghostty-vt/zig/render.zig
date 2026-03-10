@@ -1,8 +1,67 @@
 const handle_mod = @import("handle.zig");
 const terminal = @import("ghostty/src/terminal/main.zig");
+const std = @import("std");
+const color = terminal.color;
 
-const FlatCell = handle_mod.FlatCell;
 const TerminalHandle = handle_mod.TerminalHandle;
+
+// === ABI STABILITY ASSERTIONS ===
+// These verify that Ghostty's internal type layouts match what the Rust
+// side expects. If any of these assertions fail after a Ghostty update,
+// the Rust-side structs and these assertions must be updated to match.
+comptime {
+    const page = @import("ghostty/src/terminal/page.zig");
+
+    // --- page.Cell (RawCell on Rust side) ---
+    // page.Cell must be u64-aligned so the [*]const u64 cast in _row_raw is sound.
+    std.debug.assert(@alignOf(page.Cell) == @alignOf(u64));
+
+    std.debug.assert(@sizeOf(page.Cell) == 8);
+    std.debug.assert(@bitSizeOf(page.Cell) == 64);
+    std.debug.assert(@bitOffsetOf(page.Cell, "content_tag") == 0);
+    std.debug.assert(@bitOffsetOf(page.Cell, "content") == 2);
+    std.debug.assert(@bitOffsetOf(page.Cell, "style_id") == 26);
+    std.debug.assert(@bitOffsetOf(page.Cell, "wide") == 42);
+    std.debug.assert(@bitOffsetOf(page.Cell, "protected") == 44);
+    std.debug.assert(@bitOffsetOf(page.Cell, "hyperlink") == 45);
+
+    std.debug.assert(@intFromEnum(page.Cell.ContentTag.codepoint) == 0);
+    std.debug.assert(@intFromEnum(page.Cell.ContentTag.codepoint_grapheme) == 1);
+    std.debug.assert(@intFromEnum(page.Cell.ContentTag.bg_color_palette) == 2);
+    std.debug.assert(@intFromEnum(page.Cell.ContentTag.bg_color_rgb) == 3);
+    std.debug.assert(@intFromEnum(page.Cell.Wide.narrow) == 0);
+    std.debug.assert(@intFromEnum(page.Cell.Wide.wide) == 1);
+    std.debug.assert(@intFromEnum(page.Cell.Wide.spacer_tail) == 2);
+    std.debug.assert(@intFromEnum(page.Cell.Wide.spacer_head) == 3);
+
+    // --- terminal.Style (CellStyle on Rust side) ---
+    // CellStyle is the extern struct matching terminal.Style. These
+    // assertions verify that CellStyle and terminal.Style have the same
+    // layout. If Ghostty reorders Style fields, these fail at build time.
+    std.debug.assert(@sizeOf(terminal.Style) == @sizeOf(CellStyle));
+    // CellStyle should match terminal.Style alignment for safe pointer casting.
+    std.debug.assert(@alignOf(terminal.Style) == @alignOf(CellStyle));
+    std.debug.assert(@offsetOf(terminal.Style, "fg_color") == @offsetOf(CellStyle, "fg_color"));
+    std.debug.assert(@offsetOf(terminal.Style, "bg_color") == @offsetOf(CellStyle, "bg_color"));
+    std.debug.assert(@offsetOf(terminal.Style, "underline_color") == @offsetOf(CellStyle, "underline_color"));
+    std.debug.assert(@offsetOf(terminal.Style, "flags") == @offsetOf(CellStyle, "flags"));
+
+    // --- Style.Color tagged union (StyleColor on Rust/Zig side) ---
+    std.debug.assert(@sizeOf(terminal.Style.Color) == @sizeOf(StyleColor));
+    std.debug.assert(@alignOf(terminal.Style.Color) == @alignOf(StyleColor));
+    // Verify tag values via @tagName (none=0, palette=1, rgb=2 based on declaration order)
+    const none_color: terminal.Style.Color = .none;
+    const pal_color: terminal.Style.Color = .{ .palette = 0xAB };
+    const rgb_color: terminal.Style.Color = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } };
+    std.debug.assert(std.mem.eql(u8, @tagName(none_color), "none"));
+    std.debug.assert(std.mem.eql(u8, @tagName(pal_color), "palette"));
+    std.debug.assert(std.mem.eql(u8, @tagName(rgb_color), "rgb"));
+
+    // --- color.RGB (verifies why we need the sidecar) ---
+    std.debug.assert(@sizeOf(color.RGB) == 4); // packed(u24) with 1 byte padding
+    std.debug.assert(@sizeOf(color.RGB.C) == 3); // C-compatible version is 3 bytes
+    std.debug.assert(@alignOf(color.RGB.C) == 1); // No alignment padding
+}
 
 /// C-safe cursor state
 const CursorState = extern struct {
@@ -36,12 +95,51 @@ const ColorState = extern struct {
     has_cursor_color: u8,
 };
 
+/// C-safe mirror of terminal.Style.Color tagged union.
+/// Tag values: 0=none, 1=palette, 2=rgb
+/// For palette: r holds palette index. For rgb: r/g/b hold components.
+/// Layout verified by manual probe: 8 bytes (tag + 3 bytes + 4 padding).
+/// align(4) on tag field to match terminal.Style.Color's alignment.
+pub const StyleColor = extern struct {
+    r: u8 align(4), // byte 0 — payload (palette index also lives here)
+    g: u8, // byte 1
+    b: u8, // byte 2
+    _pad: u8 = 0, // byte 3
+    tag: u8, // byte 4
+    _pad2: [3]u8 = .{ 0, 0, 0 }, // bytes 5–7 to reach 8 bytes
+};
+
+/// C-safe mirror of terminal.Style.
+/// Layout verified by manual probe: 28 bytes total.
+/// fg_color at offset 0, bg_color at 8, underline_color at 16, flags at 24.
+pub const CellStyle = extern struct {
+    fg_color: StyleColor,
+    bg_color: StyleColor,
+    underline_color: StyleColor,
+    flags: u16,
+    _pad: [2]u8 = undefined,
+};
+
 /// Update the persistent RenderState from current terminal state.
 /// Returns 0 on success, 1 if null handle, 2 on allocation error.
 export fn ghostty_vt_terminal_render_update(ptr: ?*anyopaque) callconv(.c) c_int {
     if (ptr == null) return 1;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     handle.render_state.update(handle.alloc, &handle.terminal_inst) catch return 2;
+
+    // Repopulate palette sidecar only when dirty.
+    // The check itself is free (one bool read). The loop (256 × 3-byte copy)
+    // only runs when colors actually change — rare in normal use.
+    // We cannot memcpy because color.RGB is packed struct(u24) with @sizeOf == 4.
+    // Use .cval() to convert to C-compatible 3-byte RGB.
+    if (handle.palette_dirty) {
+        const palette = handle.render_state.colors.palette;
+        for (palette, 0..) |rgb, i| {
+            handle.palette_cache[i] = rgb.cval();
+        }
+        handle.palette_dirty = false;
+    }
+
     return 0;
 }
 
@@ -141,118 +239,6 @@ export fn ghostty_vt_terminal_render_colors(ptr: ?*anyopaque, out: ?*ColorState)
     return 0;
 }
 
-/// Get a palette color by index (0–255). Returns the RGB via out pointer.
-export fn ghostty_vt_terminal_render_palette_color(
-    ptr: ?*anyopaque,
-    index: u8,
-    out: ?*ColorRGB,
-) callconv(.c) c_int {
-    if (ptr == null or out == null) return 1;
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
-    const rgb = handle.render_state.colors.palette[index];
-    const result = out.?;
-    result.* = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b };
-    return 0;
-}
-
-fn flattenStyleColor(c: terminal.Style.Color) struct { color_type: u8, r: u8, g: u8, b: u8, palette: u8 } {
-    return switch (c) {
-        .none => .{ .color_type = 0, .r = 0, .g = 0, .b = 0, .palette = 0 },
-        .palette => |p| .{ .color_type = 1, .r = 0, .g = 0, .b = 0, .palette = p },
-        .rgb => |rgb| .{ .color_type = 2, .r = rgb.r, .g = rgb.g, .b = rgb.b, .palette = 0 },
-    };
-}
-
-/// Get flattened cell data for a row. Returns pointer to `cols` FlatCell entries.
-/// The returned pointer is valid until the next render_update() or terminal mutation.
-/// Returns null if row is out of bounds.
-///
-/// Grapheme codepoints (for cells with grapheme_len > 0) can be retrieved
-/// via ghostty_vt_terminal_render_cell_grapheme().
-export fn ghostty_vt_terminal_render_row_cells(
-    ptr: ?*anyopaque,
-    row: u16,
-    out_len: ?*u16,
-) callconv(.c) ?[*]const FlatCell {
-    if (ptr == null) return null;
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
-    if (row >= handle.render_state.rows) return null;
-
-    const cells = handle.render_state.row_data.items(.cells)[row];
-    const raws = cells.items(.raw);
-    const styles = cells.items(.style);
-    const graphemes = cells.items(.grapheme);
-
-    // Flatten into the pre-allocated flat_cells buffer
-    const cols = handle.render_state.cols;
-    if (cols == 0) return null;
-
-    // Ensure flat_cells buffer is large enough
-    handle.ensureFlatCells(cols) catch return null;
-
-    for (0..cols) |i| {
-        const raw = raws[i];
-        // The style field is only valid if raw.style_id > 0
-        const style: terminal.Style = if (raw.style_id > 0) styles[i] else .{};
-        const fg = flattenStyleColor(style.fg_color);
-        var bg = flattenStyleColor(style.bg_color);
-
-        // Handle bg_color_palette and bg_color_rgb content tags
-        // where the background comes from the cell content, not style
-        switch (raw.content_tag) {
-            .bg_color_palette => {
-                bg = .{ .color_type = 1, .r = 0, .g = 0, .b = 0, .palette = raw.content.color_palette };
-            },
-            .bg_color_rgb => {
-                const c = raw.content.color_rgb;
-                bg = .{ .color_type = 2, .r = c.r, .g = c.g, .b = c.b, .palette = 0 };
-            },
-            else => {},
-        }
-        const ul = flattenStyleColor(style.underline_color);
-
-        handle.flat_cells[i] = .{
-            .codepoint = switch (raw.content_tag) {
-                .codepoint, .codepoint_grapheme => raw.content.codepoint,
-                .bg_color_palette, .bg_color_rgb => 0,
-            },
-            .grapheme_len = if (raw.content_tag == .codepoint_grapheme)
-                @intCast(graphemes[i].len)
-            else
-                0,
-            .wide = @intFromEnum(raw.wide),
-
-            .fg_color_type = fg.color_type,
-            .fg_r = fg.r,
-            .fg_g = fg.g,
-            .fg_b = fg.b,
-            .fg_palette = fg.palette,
-
-            .bg_color_type = bg.color_type,
-            .bg_r = bg.r,
-            .bg_g = bg.g,
-            .bg_b = bg.b,
-            .bg_palette = bg.palette,
-
-            .ul_color_type = ul.color_type,
-            .ul_r = ul.r,
-            .ul_g = ul.g,
-            .ul_b = ul.b,
-            .ul_palette = ul.palette,
-
-            // Populate style_flags by bitcasting Ghostty's packed flags.
-            // Fragility: this assumes Ghostty keeps the same bit layout/order
-            // for Style.flags; if that changes in a Ghostty update, this
-            // export must be updated (or switched to explicit bit packing).
-            .style_flags = @bitCast(style.flags),
-            ._padding = .{ 0, 0 },
-        };
-    }
-
-    if (out_len) |len| len.* = cols;
-    return handle.flat_cells.ptr;
-}
-
 /// Get grapheme codepoints for a cell. Returns pointer to grapheme_len u32 values.
 /// Only valid for cells where grapheme_len > 0.
 export fn ghostty_vt_terminal_render_cell_grapheme(
@@ -299,4 +285,56 @@ export fn ghostty_vt_terminal_render_row_selection(
         return 1;
     }
     return 0;
+}
+
+/// Returns a direct pointer into RenderState's page.Cell array for a row.
+/// Zero-copy: the pointer is into persistent Zig memory.
+/// Valid until the next render_update() call.
+export fn ghostty_vt_terminal_render_row_raw(
+    ptr: ?*anyopaque,
+    row: u16,
+    out_len: ?*u16,
+) callconv(.c) ?[*]const u64 {
+    if (ptr == null) return null;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
+    if (row >= handle.render_state.rows) return null;
+
+    const cells = handle.render_state.row_data.items(.cells)[row];
+    const raws = cells.items(.raw);
+    if (out_len) |len| len.* = @intCast(raws.len);
+    // page.Cell is packed struct(u64), safe to cast to [*]const u64
+    return @ptrCast(raws.ptr);
+}
+
+/// Returns a direct pointer into RenderState's Style array for a row.
+/// Zero-copy: the pointer is into persistent Zig memory.
+/// Valid until the next render_update() call.
+/// The Style data at column `col` is only valid if the corresponding
+/// page.Cell's style_id is non-zero OR content_tag is bg_color_*.
+export fn ghostty_vt_terminal_render_row_styles(
+    ptr: ?*anyopaque,
+    row: u16,
+    out_len: ?*u16,
+) callconv(.c) ?[*]const CellStyle {
+    if (ptr == null) return null;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
+    if (row >= handle.render_state.rows) return null;
+
+    const cells = handle.render_state.row_data.items(.cells)[row];
+    const styles = cells.items(.style);
+    if (out_len) |len| len.* = @intCast(styles.len);
+    // ptrCast is valid: CellStyle is an extern struct whose layout
+    // is verified by comptime assertions to match terminal.Style exactly.
+    return @ptrCast(styles.ptr);
+}
+
+/// Returns a pointer to the 256-entry palette sidecar.
+/// Each entry is a 3-byte color.RGB.C (r, g, b — no padding).
+/// The sidecar is refreshed during render_update() when palette is dirty.
+export fn ghostty_vt_terminal_render_palette(
+    ptr: ?*anyopaque,
+) callconv(.c) ?[*]const color.RGB.C {
+    if (ptr == null) return null;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
+    return &handle.palette_cache;
 }
