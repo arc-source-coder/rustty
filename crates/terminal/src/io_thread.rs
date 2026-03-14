@@ -20,7 +20,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use ghostty_vt::Terminal;
 use pty::{PtyWriter, WindowSize};
 
-use crate::types::{IoMsg, ReadThreadNotify};
+use crate::types::{IoMsg, ReadThreadNotify, ScrollOp};
 
 // Windows APIs
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, HANDLE};
@@ -146,6 +146,9 @@ impl IoThread {
                     self.pending_resize = Some(size);
                     self.resize_deadline = Some(Instant::now() + RESIZE_COALESCE);
                 }
+                Ok(IoMsg::Scroll(op)) => {
+                    self.apply_scroll(op);
+                }
                 Ok(IoMsg::StartSyncOutput) => {
                     // Start or reset the 1-second safety timer.
                     self.sync_output_deadline = Some(Instant::now() + SYNC_OUTPUT_TIMEOUT);
@@ -220,6 +223,22 @@ impl IoThread {
         }
     }
 
+    /// Apply a scroll operation under the terminal mutex, then wake the renderer.
+    ///
+    /// Mirrors Ghostty's `Termio.scrollViewport`: the lock is acquired
+    /// here on the IO thread, never on the UI thread.
+    fn apply_scroll(&self, op: ScrollOp) {
+        {
+            let mut term = self.terminal.lock().expect("terminal mutex poisoned");
+            match op {
+                ScrollOp::Delta(delta) => term.scroll_viewport(delta),
+                ScrollOp::Top => term.scroll_to_top(),
+                ScrollOp::Bottom => term.scroll_to_bottom(),
+            }
+        }
+        self.signal_tx.try_send(()).ok();
+    }
+
     fn handle_close(&mut self, io_rx: &Receiver<IoMsg>) {
         // 1. Signal read thread to shut down FIRST — prevents new resizes/replies.
         self.notify.closing.store(true, Ordering::Release);
@@ -232,7 +251,7 @@ impl IoThread {
         // 3. Signal read thread via IOCP.
         self.notify.signal();
 
-        // 4. Drain remaining messages — flush user Input, discard Reply/Resize.
+        // 4. Drain remaining messages — flush user Input, discard the rest.
         while let Ok(msg) = io_rx.try_recv() {
             match msg {
                 IoMsg::Input(bytes) => {
@@ -240,6 +259,7 @@ impl IoThread {
                 }
                 IoMsg::Reply(_) => {}  // discard device responses after close
                 IoMsg::Resize(_) => {} // discard
+                IoMsg::Scroll(_) => {} // discard — viewport state is moot at shutdown
                 IoMsg::StartSyncOutput => {} // discard
                 IoMsg::Close => {}     // duplicate
             }

@@ -161,7 +161,7 @@ fn key_map() -> &'static HashMap<String, i32> {
 /// Map a GPUI Keystroke.key string to a Ghostty Key enum integer.
 /// Returns `None` for keys we don't handle (modifier-only keys,
 /// media keys, etc.).
-fn map_key(key: &str) -> Option<i32> {
+pub(crate) fn map_key(key: &str) -> Option<i32> {
     key_map().get(key).copied()
 }
 

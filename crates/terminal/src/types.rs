@@ -63,6 +63,19 @@ pub enum IoEvent {
     Error(String),
 }
 
+/// Scroll operation forwarded from the UI thread to the IO thread.
+/// Mirrors Ghostty's `terminal.Terminal.ScrollViewport` union.
+/// The IO thread acquires the terminal mutex, applies the
+/// scroll, then wakes the renderer.
+pub enum ScrollOp {
+    /// Scroll by delta rows. Negative = up (towards history).
+    Delta(i32),
+    /// Scroll to the top of scrollback.
+    Top,
+    /// Scroll to the bottom (active area).
+    Bottom,
+}
+
 /// Messages sent from GPUI main thread (and read thread for Reply) to IO thread
 /// via crossbeam_channel.
 pub enum IoMsg {
@@ -74,6 +87,8 @@ pub enum IoMsg {
     Reply(Bytes),
     /// Resize request. IO thread coalesces (25ms), then signals read thread.
     Resize(WindowSize),
+    /// Scroll the viewport. IO thread acquires terminal mutex and applies.
+    Scroll(ScrollOp),
     /// Begin/reset the 1-second synchronized output safety timer.
     StartSyncOutput,
     /// Ordered shutdown.

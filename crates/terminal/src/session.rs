@@ -9,9 +9,11 @@ use ghostty_vt::{ColorRGB, MouseMode, RawCell, ScrollbarInfo, Terminal};
 use pty::{Options, Shell, WindowSize};
 
 use crate::config::{RenderConfig, SpawnConfig};
-use crate::input::{encode_focus_change, encode_key_event, encode_mouse_event, encode_paste};
+use crate::input::{
+    encode_focus_change, encode_key_event, encode_mouse_event, encode_paste, map_key,
+};
 use crate::types::{
-    GridSize, IoEvent, IoMsg, ProcessState, ReadThreadNotify, SessionId, SessionMetadata,
+    GridSize, IoEvent, IoMsg, ProcessState, ReadThreadNotify, ScrollOp, SessionId, SessionMetadata,
 };
 use crate::{io_thread, read_thread};
 
@@ -256,17 +258,24 @@ impl TerminalSession {
     /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
     /// Encoding and the PTY write both happen outside the lock.
     pub fn send_key_event(&self, keystroke: &Keystroke, is_held: bool) {
-        let bytes = {
+        // Resolve key first — pure hash-map lookup, no lock needed.
+        // Returns early for modifier-only keys and other unrecognised inputs.
+        let key_str = keystroke.key.to_lowercase();
+        if map_key(&key_str).is_none() {
+            return;
+        }
+
+        let opts = {
             let mut term = self.terminal.lock().expect("terminal mutex poisoned");
             let opts = term.input_opts();
-            let bytes = encode_key_event(opts, keystroke, is_held);
-            // Scroll to bottom on user input (like Windows Terminal / Ghostty).
-            if bytes.is_some() && !term.viewport_is_bottom() {
+            // Scroll to bottom on user input
+            if !term.viewport_is_bottom() {
                 term.scroll_to_bottom();
             }
-            bytes
+            opts
         };
-        if let Some(bytes) = bytes {
+
+        if let Some(bytes) = encode_key_event(opts, keystroke, is_held) {
             self.write_to_pty(Bytes::from(bytes));
         }
     }
@@ -275,26 +284,26 @@ impl TerminalSession {
     ///
     /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
     pub fn send_paste(&self, text: &str) {
-        let bytes = {
+        let opts = {
             let mut term = self.terminal.lock().expect("terminal mutex poisoned");
             let opts = term.input_opts();
             if !term.viewport_is_bottom() {
                 term.scroll_to_bottom();
             }
-            encode_paste(opts, text)
+            opts
         };
-        self.write_to_pty(Bytes::from(bytes));
+        self.write_to_pty(Bytes::from(encode_paste(opts, text)));
     }
 
     /// Encode and send a focus change to the PTY.
     ///
     /// Locks the terminal mutex only to snapshot mode flags (`input_opts()`).
     pub fn send_focus_change(&self, focused: bool) {
-        let opts = self
-            .terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .input_opts();
+        let opts = {
+            let term = self.terminal.lock().expect("terminal mutex poisoned");
+            let opts = term.input_opts();
+            opts
+        };
         if let Some(bytes) = encode_focus_change(opts, focused) {
             self.write_to_pty(Bytes::from(bytes));
         }
@@ -317,11 +326,11 @@ impl TerminalSession {
         x: u16,
         y: u16,
     ) -> bool {
-        let opts = self
-            .terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .input_opts();
+        let opts = {
+            let term = self.terminal.lock().expect("terminal mutex poisoned");
+            let opts = term.input_opts();
+            opts
+        };
         if let Some(bytes) = encode_mouse_event(opts, button, action, shift, alt, ctrl, x, y) {
             self.write_to_pty(Bytes::from(bytes));
             true
@@ -365,29 +374,27 @@ impl TerminalSession {
 
     /// Scroll the viewport by delta rows. Negative = up (towards history).
     pub fn scroll_viewport(&self, delta: i32) {
-        self.terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .scroll_viewport(delta);
+        self.io_tx
+            .try_send(IoMsg::Scroll(ScrollOp::Delta(delta)))
+            .ok();
     }
 
     /// Scroll to the top of scrollback.
     pub fn scroll_to_top(&self) {
-        self.terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .scroll_to_top();
+        self.io_tx.try_send(IoMsg::Scroll(ScrollOp::Top)).ok();
     }
 
     /// Scroll to the bottom (active area).
     pub fn scroll_to_bottom(&self) {
-        self.terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .scroll_to_bottom();
+        self.io_tx.try_send(IoMsg::Scroll(ScrollOp::Bottom)).ok();
     }
 
     /// Scroll to an absolute row offset (for scrollbar thumb drag).
+    ///
+    /// This cannot be forwarded to the IO thread like other scroll events
+    /// because the absolute row index must be resolved against live
+    /// `total_rows`, which changes as output arrives. Forwarding would
+    /// introduce a TOCTOU race (stale scrollback geometry).
     pub fn scroll_to_row(&self, row: u64) {
         self.terminal
             .lock()
