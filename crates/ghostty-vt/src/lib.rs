@@ -56,6 +56,7 @@ unsafe extern "C" {
     pub(crate) fn ghostty_vt_terminal_reset_synchronized_output(terminal: *mut c_void);
     pub(crate) fn ghostty_vt_terminal_is_focus_event_mode(terminal: *mut c_void) -> u8;
     pub(crate) fn ghostty_vt_terminal_is_alternate_screen(terminal: *mut c_void) -> u8;
+    pub(crate) fn ghostty_vt_terminal_is_mouse_alternate_scroll(terminal: *mut c_void) -> u8;
 
     pub(crate) fn ghostty_vt_terminal_scroll_viewport(terminal: *mut c_void, delta: i32);
     pub(crate) fn ghostty_vt_terminal_scroll_viewport_top(terminal: *mut c_void);
@@ -115,6 +116,35 @@ unsafe extern "C" {
         end_x: u16,
         end_y: u32,
         rectangular: u8,
+    ) -> c_int;
+    pub(crate) fn ghostty_vt_terminal_select_word_at(
+        terminal: *mut c_void,
+        x: u16,
+        y: u32,
+    ) -> c_int;
+    pub(crate) fn ghostty_vt_terminal_select_line_at(
+        terminal: *mut c_void,
+        x: u16,
+        y: u32,
+    ) -> c_int;
+    pub(crate) fn ghostty_vt_terminal_select_output_at(
+        terminal: *mut c_void,
+        x: u16,
+        y: u32,
+    ) -> c_int;
+    pub(crate) fn ghostty_vt_terminal_select_word_drag(
+        terminal: *mut c_void,
+        click_x: u16,
+        click_y: u32,
+        drag_x: u16,
+        drag_y: u32,
+    ) -> c_int;
+    pub(crate) fn ghostty_vt_terminal_select_line_drag(
+        terminal: *mut c_void,
+        click_x: u16,
+        click_y: u32,
+        drag_x: u16,
+        drag_y: u32,
     ) -> c_int;
     pub(crate) fn ghostty_vt_terminal_clear_selection(terminal: *mut c_void);
     pub(crate) fn ghostty_vt_terminal_get_selection_text(

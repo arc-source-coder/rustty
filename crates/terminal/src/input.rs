@@ -17,7 +17,7 @@ use ghostty_vt::{InputOpts, encode_key, encode_mouse};
 /// Maximum size for key/mouse encode output buffers.
 /// Ghostty's key encoder can produce up to ~32 bytes for complex
 /// kitty protocol sequences. 128 bytes is generous.
-const ENCODE_BUF_SIZE: usize = 128;
+pub const ENCODE_BUF_SIZE: usize = 128;
 
 /// Ghostty Mods packed bitfield (u16).
 /// Must match ghostty/src/input/key_mods.zig Mods packed struct.
@@ -211,11 +211,12 @@ fn compute_unshifted_codepoint(keystroke: &gpui::Keystroke) -> u32 {
 ///
 /// Returns `Some(Vec<u8>)` with the encoded bytes, or `None` if the
 /// keystroke produces no terminal output.
-pub fn encode_key_event(
+pub fn encode_key_event<'a>(
     opts: InputOpts,
     keystroke: &gpui::Keystroke,
     is_held: bool,
-) -> Option<Vec<u8>> {
+    buf: &'a mut [u8; ENCODE_BUF_SIZE],
+) -> Option<&'a [u8]> {
     let key_str = keystroke.key.to_lowercase();
     let ghostty_key = map_key(&key_str)?;
 
@@ -240,7 +241,6 @@ pub fn encode_key_event(
     // Critical for kitty keyboard protocol to encode shifted keys correctly.
     let unshifted_codepoint = compute_unshifted_codepoint(keystroke);
 
-    let mut buf = [0u8; ENCODE_BUF_SIZE];
     let n = encode_key(
         opts,
         ghostty_key,
@@ -248,14 +248,10 @@ pub fn encode_key_event(
         action,
         text.as_bytes(),
         unshifted_codepoint,
-        &mut buf,
+        buf,
     );
 
-    if n == 0 {
-        None
-    } else {
-        Some(buf[..n].to_vec())
-    }
+    if n == 0 { None } else { Some(&buf[..n]) }
 }
 
 /// Encode a bracketed paste. Wraps text with `\x1b[200~` / `\x1b[201~`
@@ -275,14 +271,14 @@ pub fn encode_paste(opts: InputOpts, text: &str) -> Vec<u8> {
 /// Encode a focus change event.
 /// Returns `Some(bytes)` if focus event mode (DEC 1004) is active in `opts`,
 /// `None` otherwise.
-pub fn encode_focus_change(opts: InputOpts, focused: bool) -> Option<Vec<u8>> {
+pub fn encode_focus_change(opts: InputOpts, focused: bool) -> Option<&'static [u8]> {
     if !opts.focus_event_mode {
         return None;
     }
     if focused {
-        Some(b"\x1b[I".to_vec())
+        Some(b"\x1b[I")
     } else {
-        Some(b"\x1b[O".to_vec())
+        Some(b"\x1b[O")
     }
 }
 
@@ -298,7 +294,7 @@ pub fn encode_focus_change(opts: InputOpts, focused: bool) -> Option<Vec<u8>> {
 ///
 /// Returns `Some(Vec<u8>)` with encoded bytes, or `None` if mouse
 /// reporting is disabled or the event produces no output.
-pub fn encode_mouse_event(
+pub fn encode_mouse_event<'a>(
     opts: InputOpts,
     button: u8,
     action: u8,
@@ -307,15 +303,11 @@ pub fn encode_mouse_event(
     ctrl: bool,
     x: u16,
     y: u16,
-) -> Option<Vec<u8>> {
+    buf: &'a mut [u8; ENCODE_BUF_SIZE],
+) -> Option<&'a [u8]> {
     let mods: u8 = (shift as u8) | ((alt as u8) << 1) | ((ctrl as u8) << 2);
-    let mut buf = [0u8; ENCODE_BUF_SIZE];
-    let n = encode_mouse(opts, button, action, mods, x, y, &mut buf);
-    if n == 0 {
-        None
-    } else {
-        Some(buf[..n].to_vec())
-    }
+    let n = encode_mouse(opts, button, action, mods, x, y, &mut buf[..]);
+    if n == 0 { None } else { Some(&buf[..n]) }
 }
 
 #[cfg(test)]

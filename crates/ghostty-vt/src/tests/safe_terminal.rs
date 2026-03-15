@@ -176,6 +176,20 @@ fn row_raw_styled() {
 }
 
 #[test]
+fn row_raw_background_styled() {
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
+    // SGR 48;5;196 (palette background) + "X"
+    term.feed(b"\x1b[48;5;196mX");
+    let frame = term.render_frame();
+    let cells = frame.row_raw(0).unwrap();
+    let styles = frame.row_styles(0).unwrap();
+    assert_eq!(cells[0].codepoint(), b'X' as u32);
+    assert!(cells[0].style_id() != 0);
+    assert_eq!(styles[0].bg.tag, 1); // palette
+    assert_eq!(styles[0].bg.r, 196); // palette index
+}
+
+#[test]
 fn row_raw_out_of_bounds_returns_none() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     let frame = term.render_frame();
@@ -272,6 +286,71 @@ fn selection_text_deref() {
     // SelectionText derefs to &str
     assert!(text.starts_with("Hel"));
     assert_eq!(text.len(), 5);
+}
+
+#[test]
+fn select_word_at_uses_ghostty_boundaries() {
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
+    term.feed(b"foo,bar baz");
+
+    assert!(term.select_word_at(1, 0));
+    assert_eq!(term.selection_text().unwrap().as_str(), "foo");
+
+    assert!(term.select_word_at(4, 0));
+    assert_eq!(term.selection_text().unwrap().as_str(), "bar");
+
+    assert!(term.select_word_at(8, 0));
+    assert_eq!(term.selection_text().unwrap().as_str(), "baz");
+}
+
+#[test]
+fn select_line_at_trims_whitespace_like_ghostty() {
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
+    term.feed(b"   hello world   \r\n\tsecond line\t");
+
+    assert!(term.select_line_at(0, 0));
+    assert_eq!(term.selection_text().unwrap().as_str(), "hello world");
+
+    assert!(term.select_line_at(0, 1));
+    assert_eq!(term.selection_text().unwrap().as_str(), "second line");
+}
+
+#[test]
+fn select_word_at_returns_false_for_unwritten_cells() {
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
+    term.feed(b"abc");
+    assert!(!term.select_word_at(10, 0));
+}
+
+#[test]
+fn select_word_drag_expands_by_word_boundaries() {
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
+    term.feed(b"foo bar baz");
+
+    assert!(term.select_word_drag(5, 0, 9, 0));
+    assert_eq!(term.selection_text().unwrap().as_str(), "bar baz");
+
+    assert!(term.select_word_drag(5, 0, 1, 0));
+    assert_eq!(term.selection_text().unwrap().as_str(), "foo bar");
+}
+
+#[test]
+fn select_line_drag_expands_by_lines() {
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
+    term.feed(b"line0\r\nline1\r\nline2");
+
+    assert!(term.select_line_drag(1, 1, 1, 2));
+    assert_eq!(term.selection_text().unwrap().as_str(), "line1\nline2");
+
+    assert!(term.select_line_drag(1, 1, 1, 0));
+    assert_eq!(term.selection_text().unwrap().as_str(), "line0\nline1");
+}
+
+#[test]
+fn select_output_at_without_semantic_markers_returns_false() {
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
+    term.feed(b"plain text");
+    assert!(!term.select_output_at(2, 0));
 }
 
 #[test]

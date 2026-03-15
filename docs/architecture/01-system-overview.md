@@ -1,5 +1,8 @@
 # System Overview
 
+> **Update:** Rendering design and ownership here are superseded by
+> [13-gpu-renderer.md](13-gpu-renderer.md).
+
 > **Update:** `portable-pty` has been replaced with a custom PTY backend
 > ported from Alacritty (ConPTY on Windows, openpty on Unix). See
 > [the migration plan](../plans/2026-02-24-pty-001-alacritty-backend.md).

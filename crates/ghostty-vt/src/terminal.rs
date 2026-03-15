@@ -222,6 +222,11 @@ impl Terminal {
         unsafe { ghostty_vt_terminal_is_alternate_screen(self.handle) != 0 }
     }
 
+    /// Whether alternate scroll mode (DEC 1007) is active.
+    pub fn mouse_alternate_scroll_enabled(&self) -> bool {
+        unsafe { ghostty_vt_terminal_is_mouse_alternate_scroll(self.handle) != 0 }
+    }
+
     /// Snapshot all input-relevant mode flags into an [`InputOpts`].
     ///
     /// Must be called under the terminal mutex. The returned value is
@@ -301,6 +306,62 @@ impl Terminal {
                 end_y,
                 rectangular as u8,
             )
+        };
+        rc == 0
+    }
+
+    /// Select the word at viewport coordinates (0-indexed) using Ghostty's
+    /// terminal-side word selection semantics.
+    /// Returns `true` if a selection was created.
+    pub fn select_word_at(&mut self, x: u16, y: u32) -> bool {
+        let rc = unsafe { ghostty_vt_terminal_select_word_at(self.handle, x, y) };
+        rc == 0
+    }
+
+    /// Select the (soft-wrapped) line at viewport coordinates (0-indexed)
+    /// using Ghostty's terminal-side line selection semantics.
+    /// Returns `true` if a selection was created.
+    pub fn select_line_at(&mut self, x: u16, y: u32) -> bool {
+        let rc = unsafe { ghostty_vt_terminal_select_line_at(self.handle, x, y) };
+        rc == 0
+    }
+
+    /// Select shell output at viewport coordinates (0-indexed) using
+    /// Ghostty's semantic prompt integration.
+    /// Returns `true` if a selection was created.
+    pub fn select_output_at(&mut self, x: u16, y: u32) -> bool {
+        let rc = unsafe { ghostty_vt_terminal_select_output_at(self.handle, x, y) };
+        rc == 0
+    }
+
+    /// Update selection during a double-click drag using Ghostty terminal
+    /// semantics (`selectWordBetween`).
+    /// Returns `true` if a selection was produced.
+    pub fn select_word_drag(
+        &mut self,
+        click_x: u16,
+        click_y: u32,
+        drag_x: u16,
+        drag_y: u32,
+    ) -> bool {
+        let rc = unsafe {
+            ghostty_vt_terminal_select_word_drag(self.handle, click_x, click_y, drag_x, drag_y)
+        };
+        rc == 0
+    }
+
+    /// Update selection during a triple-click drag using Ghostty terminal
+    /// semantics (line-wise expansion).
+    /// Returns `true` if a selection was produced.
+    pub fn select_line_drag(
+        &mut self,
+        click_x: u16,
+        click_y: u32,
+        drag_x: u16,
+        drag_y: u32,
+    ) -> bool {
+        let rc = unsafe {
+            ghostty_vt_terminal_select_line_drag(self.handle, click_x, click_y, drag_x, drag_y)
         };
         rc == 0
     }

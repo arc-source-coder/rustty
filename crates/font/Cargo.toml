@@ -1,0 +1,22 @@
+[package]
+name = "font"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = "1.0"
+rapidhash.workspace = true
+ghostty_vt = { path = "../ghostty-vt" }
+unicode-properties = "0.1.4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-core.workspace = true
+windows-numerics.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Globalization",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+] }

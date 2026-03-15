@@ -59,3 +59,10 @@ export fn ghostty_vt_terminal_is_alternate_screen(ptr: ?*anyopaque) callconv(.c)
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     return @intFromBool(handle.terminal_inst.screens.active_key == .alternate);
 }
+
+/// Returns 1 if alternate scroll mode (DEC 1007) is active, 0 otherwise.
+export fn ghostty_vt_terminal_is_mouse_alternate_scroll(ptr: ?*anyopaque) callconv(.c) u8 {
+    if (ptr == null) return 0;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
+    return @intFromBool(handle.terminal_inst.modes.get(.mouse_alternate_scroll));
+}

@@ -1,33 +1,22 @@
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 
-use ghostty_vt::{MouseMode, Terminal};
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle, ElementId, Entity,
     FocusHandle, FocusOutEvent, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
     Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Point, Render, ScrollDelta, ScrollWheelEvent, Styled, Subscription, Window, div, px,
+    Point, Render, ScrollWheelEvent, Styled, Subscription, Window, div, px,
 };
-use terminal::TerminalSession;
+use gpui::{AsyncApp, Task, WeakEntity};
+use terminal::{AppAction, TerminalSession};
 use ui::scrollbar::ScrollbarState;
 
-use crate::terminal_element::{CellMetrics, TerminalElement};
+use crate::gpu::{RendererCellMetrics, RendererTextConfig, RendererUiUpdate, TerminalRenderer};
+use crate::terminal_element::TerminalElement;
 
 /// `TerminalElement` writes the surface bounds during prepaint; `TerminalView` reads them
 /// each frame for mouse-coordinate conversion and to sync the scrollbar snapshot.
 type SurfaceBoundsCell = Rc<Cell<Option<Bounds<Pixels>>>>;
-
-/// Controls where mouse events go for the duration of a left-button drag gesture.
-/// Determined once on mouse-down and held fixed until mouse-up to prevent
-/// mode drift if modifiers change mid-gesture.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GestureTarget {
-    /// Events forwarded to the PTY (mouse reporting mode is active).
-    Pty,
-    /// Events handled as host-side selection. rectangular = Alt was held at gesture start.
-    HostSelect { rectangular: bool },
-}
 
 /// GPUI entity that owns the renderer's view of a terminal session.
 ///
@@ -35,25 +24,21 @@ enum GestureTarget {
 /// Owns the `FocusHandle` so the terminal can receive keyboard input.
 pub struct TerminalView {
     session: Entity<TerminalSession>,
-    terminal: Arc<Mutex<Terminal>>,
     element_id: ElementId,
     focus_handle: FocusHandle,
-    /// Cached cell metrics. None until first render; always Some during mouse events
-    /// (render always precedes input). Re-measured lazily if None.
-    cell_metrics: Option<CellMetrics>,
+    /// Renderer-authoritative cell metrics. None until renderer publishes them.
+    cell_metrics: Option<RendererCellMetrics>,
     /// Surface bounds written by `TerminalElement::prepaint` each frame.
     /// Used to convert window-space mouse positions to element-local positions
     /// and to sync the scrollbar geometry snapshot.
     surface_bounds: SurfaceBoundsCell,
-    /// The viewport cell where a left-drag selection started.
-    /// None after double/triple-click (those complete immediately).
-    drag_anchor: Option<(u16, u16)>,
-    /// Gesture routing, set on left mouse-down, cleared on mouse-up and focus-out.
-    gesture_target: Option<GestureTarget>,
     /// Overlay scrollbar entity. Handles its own animation and input.
     scrollbar: Entity<ScrollbarState>,
     /// Focus event subscriptions. Must be stored to keep the listeners active.
     _subscriptions: Vec<Subscription>,
+    /// GPU renderer companion. Owns the renderer thread for this tab.
+    renderer: TerminalRenderer,
+    _renderer_update_task: Task<()>,
 }
 
 impl TerminalView {
@@ -74,26 +59,69 @@ impl TerminalView {
         let focus_in_sub = cx.on_focus_in(&focus_handle, window, Self::handle_focus_in);
         let focus_out_sub = cx.on_focus_out(&focus_handle, window, Self::handle_focus_out);
 
-        let (terminal, element_id) = {
+        let element_id = {
             let s = session.read(cx);
-            let terminal = s.terminal_mutex().clone();
-            let element_id = ElementId::Name(format!("terminal-{}", s.id.as_u64()).into());
-            (terminal, element_id)
+            ElementId::Name(format!("terminal-{}", s.id.as_u64()).into())
         };
 
         let scrollbar = cx.new(|_cx| ScrollbarState::new(session.clone()));
 
+        let renderer = {
+            let terminal = session.read(cx).terminal_mutex().clone();
+            let render_config = session.read(cx).render_config().read(cx).clone();
+            let (ui_tx, ui_rx) = async_channel::bounded(8);
+            let renderer = TerminalRenderer::new(
+                window,
+                terminal,
+                RendererTextConfig {
+                    font_family: render_config.font_family,
+                    font_size: px(render_config.font_size),
+                    scale_factor: window.scale_factor(),
+                    // Renderer thread owns metric resolution; zero here means
+                    // use renderer-side defaults until authoritative metrics are sent.
+                    cell_width: px(0.0),
+                    line_height: px(0.0),
+                    baseline: px(0.0),
+                },
+                ui_tx,
+            )
+            .expect("Window::d3d11_device() returned None - D3D11 backend required");
+            session.read(cx).attach_renderer_sender(renderer.sender());
+            let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                while let Ok(update) = ui_rx.recv().await {
+                    let updated = this.update(cx, |this, cx| {
+                        match update {
+                            RendererUiUpdate::Scrollbar(info) => {
+                                this.scrollbar
+                                    .update(cx, |state, _cx| state.sync_snapshot(info));
+                            }
+                            RendererUiUpdate::Metrics(metrics) => {
+                                this.cell_metrics = Some(RendererCellMetrics {
+                                    cell_width: metrics.cell_width.max(1.0),
+                                    line_height: metrics.line_height.max(1.0),
+                                });
+                            }
+                        }
+                        cx.notify();
+                    });
+                    if updated.is_err() {
+                        break;
+                    }
+                }
+            });
+            (renderer, task)
+        };
+
         Self {
             session,
-            terminal,
             element_id,
             focus_handle,
             cell_metrics: None,
             surface_bounds: Rc::new(Cell::new(None)),
-            drag_anchor: None,
-            gesture_target: None,
             scrollbar,
             _subscriptions: vec![focus_in_sub, focus_out_sub],
+            renderer: renderer.0,
+            _renderer_update_task: renderer.1,
         }
     }
 
@@ -109,8 +137,9 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.drag_anchor = None;
-        self.gesture_target = None;
+        self.session.update(cx, |session, _cx| {
+            session.surface_focus_out();
+        });
         self.session.read(cx).send_focus_change(false);
     }
 
@@ -118,21 +147,31 @@ impl TerminalView {
         &self.session
     }
 
+    fn handle_app_action(
+        &mut self,
+        action: AppAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            AppAction::WriteClipboard(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            AppAction::ViewportScrolled => {
+                self.scrollbar
+                    .update(cx, |state, cx| state.on_scroll(window, cx));
+            }
+        }
+    }
+
     fn pixel_to_cell(
         &mut self,
         position: Point<Pixels>,
-        window: &Window,
+        _window: &Window,
         cx: &Context<Self>,
     ) -> Option<(u16, u16)> {
         // Lazily populate metrics. After first render, this is always Some.
-        let metrics = self.cell_metrics.get_or_insert_with(|| {
-            let render_config = self.session.read(cx).render_config().read(cx).clone();
-            TerminalElement::measure_cell(
-                render_config.font_family.clone(),
-                px(render_config.font_size),
-                window,
-            )
-        });
+        let metrics = self.cell_metrics?;
 
         // `event.position` is window-relative; subtract the element's origin
         // (derived from surface bounds) to get a position local to the terminal surface.
@@ -148,12 +187,12 @@ impl TerminalView {
         }
 
         let grid = self.session.read(cx).current_size();
-        let col = (x_px / f32::from(metrics.cell_width)).floor() as u16;
-        let row = (y_px / f32::from(metrics.line_height)).floor() as u16;
-        Some((
-            col.min(grid.cols.saturating_sub(1)),
-            row.min(grid.rows.saturating_sub(1)),
-        ))
+        if grid.cols == 0 || grid.rows == 0 {
+            return None;
+        }
+        let col = (x_px / metrics.cell_width).floor() as u16;
+        let row = (y_px / metrics.line_height).floor() as u16;
+        Some((col.min(grid.cols - 1), row.min(grid.rows - 1)))
     }
 
     fn handle_left_mouse_down(
@@ -174,51 +213,11 @@ impl TerminalView {
             return;
         };
 
-        // PTY consumes the gesture when mouse reporting is active AND Shift is not held.
-        // Shift always forces host-side selection override.
-        let mouse_reporting = self
-            .terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .input_opts()
-            .mouse_event
-            != MouseMode::None;
-
-        let target = if mouse_reporting && !event.modifiers.shift {
-            GestureTarget::Pty
-        } else {
-            // rectangular is captured at gesture start so Alt cannot flip mid-drag.
-            GestureTarget::HostSelect {
-                rectangular: event.modifiers.alt,
-            }
-        };
-        self.gesture_target = Some(target);
-
-        match target {
-            GestureTarget::Pty => {
-                self.session.read(cx).send_mouse_event(
-                    0,
-                    0,
-                    event.modifiers.shift,
-                    event.modifiers.alt,
-                    event.modifiers.control,
-                    x,
-                    y,
-                );
-            }
-            GestureTarget::HostSelect { .. } => {
-                match self.session.read(cx).handle_mouse_down(
-                    (x, y),
-                    event.click_count as u8,
-                    &event.modifiers,
-                ) {
-                    None => {}
-                    Some(anchor) => {
-                        self.drag_anchor = anchor;
-                        cx.notify();
-                    }
-                }
-            }
+        let needs_notify = self.session.update(cx, |session, _cx| {
+            session.handle_left_mouse_down((x, y), event.click_count as u8, &event.modifiers)
+        });
+        if needs_notify {
+            cx.notify();
         }
     }
 
@@ -229,29 +228,15 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
-        let mouse_reporting = self
-            .terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .input_opts()
-            .mouse_event
-            != MouseMode::None;
-
-        if mouse_reporting && !event.modifiers.shift {
-            let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
-                return;
-            };
-            self.session.read(cx).send_mouse_event(
-                2,
-                0,
-                event.modifiers.shift,
-                event.modifiers.alt,
-                event.modifiers.control,
-                x,
-                y,
-            );
+        let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
+            return;
+        };
+        let needs_notify = self.session.update(cx, |session, _cx| {
+            session.handle_right_mouse_down((x, y), &event.modifiers)
+        });
+        if needs_notify {
+            cx.notify();
         }
-        // Otherwise: wait for right mouse-up to copy+clear.
     }
 
     fn handle_middle_mouse_down(
@@ -264,15 +249,12 @@ impl TerminalView {
         let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
             return;
         };
-        self.session.read(cx).send_mouse_event(
-            1,
-            0,
-            event.modifiers.shift,
-            event.modifiers.alt,
-            event.modifiers.control,
-            x,
-            y,
-        );
+        let needs_notify = self.session.update(cx, |session, _cx| {
+            session.handle_middle_mouse_down((x, y), &event.modifiers)
+        });
+        if needs_notify {
+            cx.notify();
+        }
     }
 
     fn handle_left_mouse_up(
@@ -286,22 +268,13 @@ impl TerminalView {
             return;
         }
 
-        if let Some(GestureTarget::Pty) = self.gesture_target {
-            if let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) {
-                self.session.read(cx).send_mouse_event(
-                    0,
-                    1,
-                    event.modifiers.shift,
-                    event.modifiers.alt,
-                    event.modifiers.control,
-                    x,
-                    y,
-                );
-            }
+        let pos = self.pixel_to_cell(event.position, window, cx);
+        let needs_notify = self.session.update(cx, |session, _cx| {
+            session.handle_left_mouse_up(pos, &event.modifiers)
+        });
+        if needs_notify {
+            cx.notify();
         }
-        // HostSelect: selection already committed incrementally via mouse_move.
-        self.drag_anchor = None;
-        self.gesture_target = None;
     }
 
     fn handle_right_mouse_up(
@@ -310,34 +283,18 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mouse_reporting = self
-            .terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .input_opts()
-            .mouse_event
-            != MouseMode::None;
-
-        if mouse_reporting && !event.modifiers.shift {
-            if let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) {
-                self.session.read(cx).send_mouse_event(
-                    2,
-                    1,
-                    event.modifiers.shift,
-                    event.modifiers.alt,
-                    event.modifiers.control,
-                    x,
-                    y,
-                );
-            }
-            return;
+        let pos = self.pixel_to_cell(event.position, window, cx);
+        let mut action = None;
+        let mut emit = |next| action = Some(next);
+        let needs_notify = self.session.update(cx, |session, _cx| {
+            session.handle_right_mouse_up(pos, &event.modifiers, &mut emit)
+        });
+        if let Some(action) = action {
+            self.handle_app_action(action, window, cx);
         }
-        // Host-side right-click: copy selection to clipboard, then clear it.
-        if let Some(text) = self.session.read(cx).copy_selection() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        if needs_notify {
+            cx.notify();
         }
-        self.session.read(cx).clear_selection();
-        cx.notify();
     }
 
     fn handle_middle_mouse_up(
@@ -349,15 +306,12 @@ impl TerminalView {
         let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
             return;
         };
-        self.session.read(cx).send_mouse_event(
-            1,
-            1,
-            event.modifiers.shift,
-            event.modifiers.alt,
-            event.modifiers.control,
-            x,
-            y,
-        );
+        let needs_notify = self.session.update(cx, |session, _cx| {
+            session.handle_middle_mouse_up((x, y), &event.modifiers)
+        });
+        if needs_notify {
+            cx.notify();
+        }
     }
 
     fn handle_mouse_move(
@@ -379,30 +333,11 @@ impl TerminalView {
             .and_then(mouse_button_code)
             .unwrap_or(3);
 
-        match self.gesture_target {
-            Some(GestureTarget::HostSelect { rectangular }) => {
-                if let Some((ax, ay)) = self.drag_anchor {
-                    // rectangular was captured at gesture start; ignore current modifiers.
-                    self.session.read(cx).set_selection(
-                        (ax, ay as u32),
-                        (x, y as u32),
-                        rectangular,
-                    );
-                    cx.notify();
-                }
-            }
-            _ => {
-                // PTY gesture or hover — forward to PTY (no-op when reporting off)
-                self.session.read(cx).send_mouse_event(
-                    button,
-                    2,
-                    event.modifiers.shift,
-                    event.modifiers.alt,
-                    event.modifiers.control,
-                    x,
-                    y,
-                );
-            }
+        let needs_notify = self.session.update(cx, |session, _cx| {
+            session.handle_mouse_move((x, y), button, &event.modifiers)
+        });
+        if needs_notify {
+            cx.notify();
         }
     }
 
@@ -416,58 +351,17 @@ impl TerminalView {
             return;
         };
 
-        let cell_h = self
-            .cell_metrics
-            .map(|m| f32::from(m.line_height))
-            .unwrap_or(16.0);
-        let scroll_up = match event.delta {
-            ScrollDelta::Lines(d) => d.y > 0.0,
-            ScrollDelta::Pixels(d) => f32::from(d.y) > 0.0,
-        };
-        let lines = match event.delta {
-            ScrollDelta::Lines(d) => d.y.abs().ceil() as usize,
-            ScrollDelta::Pixels(d) => (f32::from(d.y).abs() / cell_h).ceil() as usize,
+        let cell_h = self.cell_metrics.map(|m| m.line_height).unwrap_or(16.0);
+
+        let mut action = None;
+        let mut emit = |next| action = Some(next);
+        let needs_notify = self.session.update(cx, |session, _cx| {
+            session.handle_scroll_wheel((x, y), event.delta, cell_h, &event.modifiers, &mut emit)
+        });
+        if let Some(action) = action {
+            self.handle_app_action(action, window, cx);
         }
-        .max(1);
-
-        // 64 = scroll up, 65 = scroll down
-        let button: u8 = if scroll_up { 64 } else { 65 };
-
-        // Try mouse reporting first. send_mouse_event returns false when
-        // mouse reporting is disabled — fall back to viewport scrolling.
-        let consumed = self.session.read(cx).send_mouse_event(
-            button,
-            0,
-            event.modifiers.shift,
-            event.modifiers.alt,
-            event.modifiers.control,
-            x,
-            y,
-        );
-
-        if consumed {
-            // Mouse reporting active — send one event per remaining line.
-            for _ in 1..lines {
-                self.session.read(cx).send_mouse_event(
-                    button,
-                    0,
-                    event.modifiers.shift,
-                    event.modifiers.alt,
-                    event.modifiers.control,
-                    x,
-                    y,
-                );
-            }
-        } else {
-            // No mouse reporting — scroll the viewport.
-            // Negative = scroll up (towards history), positive = scroll down.
-            let delta = if scroll_up {
-                -(lines as i32)
-            } else {
-                lines as i32
-            };
-            self.session.read(cx).scroll_viewport(delta);
-            self.scrollbar.update(cx, |s, cx| s.on_scroll(window, cx));
+        if needs_notify {
             cx.notify();
         }
     }
@@ -499,48 +393,23 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let key = keystroke.key.to_lowercase();
-        let mods = &keystroke.modifiers;
-        let session = self.session.read(cx);
-
-        let scroll_action = match key.as_str() {
-            "pageup" | "page_up" if mods.shift || !session.is_alternate_screen() => {
-                let page = session.current_size().rows.saturating_sub(1).max(1) as i32;
-                Some(ScrollAction::Delta(-page))
-            }
-            "pagedown" | "page_down" if mods.shift || !session.is_alternate_screen() => {
-                let page = session.current_size().rows.saturating_sub(1).max(1) as i32;
-                Some(ScrollAction::Delta(page))
-            }
-            "home" if mods.shift => Some(ScrollAction::ToTop),
-            "end" if mods.shift => Some(ScrollAction::ToBottom),
-            _ => None,
-        };
-
-        if let Some(action) = scroll_action {
-            match action {
-                ScrollAction::Delta(delta) => session.scroll_viewport(delta),
-                ScrollAction::ToTop => session.scroll_to_top(),
-                ScrollAction::ToBottom => session.scroll_to_bottom(),
-            }
-            self.scrollbar.update(cx, |s, cx| s.on_scroll(window, cx));
-            cx.notify();
-            return true;
+        let mut action = None;
+        let mut emit = |next| action = Some(next);
+        let handled = self.session.update(cx, |session, _cx| {
+            session.handle_scroll_key(keystroke, &mut emit)
+        });
+        if let Some(action) = action {
+            self.handle_app_action(action, window, cx);
         }
-        false
+        if handled {
+            cx.notify();
+        }
+        handled
     }
 
-    /// Check if there's an active selection in the terminal.
     fn has_selection(&self, cx: &Context<Self>) -> bool {
-        self.session.read(cx).copy_selection().is_some()
+        self.session.read(cx).has_selection()
     }
-}
-
-/// Scroll actions that can be triggered by keyboard shortcuts.
-enum ScrollAction {
-    Delta(i32),
-    ToTop,
-    ToBottom,
 }
 
 impl Focusable for TerminalView {
@@ -551,23 +420,18 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renderer
+            .sender()
+            .try_send(terminal::RendererMessage::Wake)
+            .ok();
+
         let terminal_element = TerminalElement::new(
             self.session.clone(),
-            self.terminal.clone(),
             self.element_id.clone(),
             Rc::clone(&self.surface_bounds),
+            self.renderer.slot(),
+            self.cell_metrics,
         );
-
-        // Sync the scrollbar snapshot. `surface_bounds` was written by `TerminalElement`
-        // during the previous prepaint; it lags one frame on first render but is always
-        // fresh once the element has painted. `ScrollbarElement::compute_layout` receives
-        // the live bounds from its own prepaint, so geometry is never stale.
-        // `last_scrollbar_info` was captured under the render mutex in prepaint
-        if self.surface_bounds.get().is_some() {
-            let info = self.session.read(cx).last_scrollbar_info();
-            self.scrollbar
-                .update(cx, |state, _cx| state.sync_snapshot(info));
-        }
 
         div()
             .size_full()
@@ -579,11 +443,7 @@ impl Render for TerminalView {
 
                 // Intercept copy: Ctrl+C (Windows, if selection exists) or Ctrl+Shift+C (all platforms)
                 let is_copy = (mods.control && mods.shift && key == "c")
-                    || (cfg!(target_os = "windows")
-                        && mods.control
-                        && !mods.shift
-                        && key == "c"
-                        && this.has_selection(cx));
+                    || (mods.control && !mods.shift && key == "c" && this.has_selection(cx));
                 if is_copy {
                     this.handle_copy(window, cx);
                     return;
@@ -598,7 +458,6 @@ impl Render for TerminalView {
                     return;
                 }
 
-                // Intercept scroll keys
                 if this.try_handle_scroll_key(&event.keystroke, window, cx) {
                     return;
                 }

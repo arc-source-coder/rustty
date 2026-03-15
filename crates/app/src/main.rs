@@ -4,7 +4,9 @@ mod shell_detection;
 mod types;
 mod workspace;
 
-use gpui::{App, AppContext, Bounds, Context, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    App, AppContext, Bounds, WindowBackgroundAppearance, WindowBounds, WindowOptions, px, size,
+};
 use gpui_platform::application;
 use terminal::RenderConfig;
 use ui::{components::theme::Theme, title_bar::TitleBar};
@@ -37,6 +39,7 @@ fn main() {
         let window_options = WindowOptions {
             titlebar: Some(TitleBar::title_bar_options()),
             window_bounds: Some(window_bounds),
+            window_background: WindowBackgroundAppearance::Transparent,
             ..Default::default()
         };
 

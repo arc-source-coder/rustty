@@ -53,6 +53,8 @@ pub struct SessionMetadata {
     pub has_unread_output: bool,
 }
 
+pub const INLINE_IO_BYTES_CAPACITY: usize = 128;
+
 /// Events sent from the IO thread to the UI thread via bounded channel.
 /// Mirrors Ghostty's surface_mailbox pattern (SPSC, capacity 64).
 #[derive(Debug)]
@@ -79,6 +81,11 @@ pub enum ScrollOp {
 /// Messages sent from GPUI main thread (and read thread for Reply) to IO thread
 /// via crossbeam_channel.
 pub enum IoMsg {
+    /// Small user input bytes stored inline in the channel message.
+    InputInline {
+        len: u8,
+        buf: [u8; INLINE_IO_BYTES_CAPACITY],
+    },
     /// User input bytes → WriteFile(conin).
     Input(Bytes),
     /// Device response bytes → WriteFile(conin).
@@ -91,6 +98,10 @@ pub enum IoMsg {
     Scroll(ScrollOp),
     /// Begin/reset the 1-second synchronized output safety timer.
     StartSyncOutput,
+    /// Attach a renderer sender for forwarding committed resizes.
+    AttachRenderer(crossbeam_channel::Sender<RendererMessage>),
+    /// Detach renderer sender. Normal during view teardown.
+    DetachRenderer,
     /// Ordered shutdown.
     Close,
 }
@@ -157,4 +168,20 @@ impl Drop for ReadThreadNotify {
             self.iocp = std::ptr::null_mut();
         }
     }
+}
+
+/// Messages sent from the terminal/IO path to the renderer thread.
+///
+/// Defined in `terminal` so that `TerminalSession` can store a sender without
+/// a circular dependency on the `renderer` crate. The `renderer` crate
+/// re-exports this type.
+///
+/// Reserve a `DeviceLost` variant for the next slice — the renderer thread
+/// must not outlive GPUI device recreation.
+#[derive(Debug)]
+pub enum RendererMessage {
+    /// A new terminal frame is ready; renderer should re-record and publish.
+    Wake,
+    /// Ordered shutdown; renderer thread should exit its loop.
+    Quit,
 }

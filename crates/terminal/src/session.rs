@@ -5,15 +5,17 @@ use std::thread::JoinHandle;
 use bytes::Bytes;
 use gpui::{AsyncApp, Context, Entity, Keystroke, Modifiers, Task, WeakEntity};
 
-use ghostty_vt::{ColorRGB, MouseMode, RawCell, ScrollbarInfo, Terminal};
+use ghostty_vt::{ColorRGB, Terminal};
 use pty::{Options, Shell, WindowSize};
 
 use crate::config::{RenderConfig, SpawnConfig};
 use crate::input::{
-    encode_focus_change, encode_key_event, encode_mouse_event, encode_paste, map_key,
+    ENCODE_BUF_SIZE, encode_focus_change, encode_key_event, encode_mouse_event, map_key,
 };
+use crate::surface::{AppAction, TerminalSurface};
 use crate::types::{
-    GridSize, IoEvent, IoMsg, ProcessState, ReadThreadNotify, ScrollOp, SessionId, SessionMetadata,
+    GridSize, INLINE_IO_BYTES_CAPACITY, IoEvent, IoMsg, ProcessState, ReadThreadNotify,
+    RendererMessage, ScrollOp, SessionId, SessionMetadata,
 };
 use crate::{io_thread, read_thread};
 
@@ -34,12 +36,7 @@ pub struct TerminalSession {
     io_tx: crossbeam_channel::Sender<IoMsg>,
     metadata: SessionMetadata,
     process_state: ProcessState,
-    /// Cached from the render lock in prepaint; avoids a separate mutex acquisition
-    /// in `try_handle_scroll_key`. Updated every frame via `set_render_state`.
-    is_alternate_screen: bool,
-    /// Cached from the render lock in prepaint; avoids a separate mutex acquisition
-    /// in `render`. Updated every frame via `set_render_state`.
-    last_scrollbar_info: ScrollbarInfo,
+    surface: TerminalSurface,
 
     read_thread: Option<JoinHandle<()>>,
     io_thread: Option<JoinHandle<()>>,
@@ -173,8 +170,7 @@ impl TerminalSession {
             io_tx,
             metadata: SessionMetadata::default(),
             process_state: ProcessState::Running,
-            is_alternate_screen: false,
-            last_scrollbar_info: ScrollbarInfo::default(),
+            surface: TerminalSurface::new(),
             read_thread: Some(read_thread),
             io_thread: Some(io_thread),
             _signal_task: signal_task,
@@ -208,6 +204,20 @@ impl TerminalSession {
         &self.terminal
     }
 
+    /// Attach a renderer-thread sender so the IO thread can wake the renderer
+    /// after committed resize events. Called by `TerminalView` after startup.
+    ///
+    /// Only the sender is stored; no renderer-owned state enters `terminal`.
+    pub fn attach_renderer_sender(&self, sender: crossbeam_channel::Sender<RendererMessage>) {
+        self.io_tx.try_send(IoMsg::AttachRenderer(sender)).ok();
+    }
+
+    /// Remove the renderer sender, for example when the view is torn down.
+    /// Send failures after detach are treated as normal shutdown races.
+    pub fn detach_renderer_sender(&self) {
+        self.io_tx.try_send(IoMsg::DetachRenderer).ok();
+    }
+
     /// Request a resize from the renderer.
     /// Sends IoMsg::Resize to the IO thread, which coalesces (25ms) then signals
     /// the read thread to call ResizePseudoConsole + terminal.resize().
@@ -236,6 +246,21 @@ impl TerminalSession {
     /// Write user input bytes to the PTY.
     pub fn write_to_pty(&self, data: Bytes) {
         self.io_tx.try_send(IoMsg::Input(data)).ok();
+    }
+
+    fn write_small_to_pty(&self, data: &[u8]) {
+        if data.len() > INLINE_IO_BYTES_CAPACITY {
+            self.write_to_pty(Bytes::copy_from_slice(data));
+            return;
+        }
+        let mut buf = [0; INLINE_IO_BYTES_CAPACITY];
+        buf[..data.len()].copy_from_slice(data);
+        self.io_tx
+            .try_send(IoMsg::InputInline {
+                len: data.len() as u8,
+                buf,
+            })
+            .ok();
     }
 
     /// Current process state.
@@ -275,8 +300,9 @@ impl TerminalSession {
             opts
         };
 
-        if let Some(bytes) = encode_key_event(opts, keystroke, is_held) {
-            self.write_to_pty(Bytes::from(bytes));
+        let mut buf = [0u8; ENCODE_BUF_SIZE];
+        if let Some(bytes) = encode_key_event(opts, keystroke, is_held, &mut buf) {
+            self.write_small_to_pty(bytes);
         }
     }
 
@@ -292,7 +318,13 @@ impl TerminalSession {
             }
             opts
         };
-        self.write_to_pty(Bytes::from(encode_paste(opts, text)));
+        if opts.bracketed_paste {
+            self.write_small_to_pty(b"\x1b[200~");
+            self.write_to_pty(Bytes::copy_from_slice(text.as_bytes()));
+            self.write_small_to_pty(b"\x1b[201~");
+        } else {
+            self.write_to_pty(Bytes::copy_from_slice(text.as_bytes()));
+        }
     }
 
     /// Encode and send a focus change to the PTY.
@@ -305,7 +337,7 @@ impl TerminalSession {
             opts
         };
         if let Some(bytes) = encode_focus_change(opts, focused) {
-            self.write_to_pty(Bytes::from(bytes));
+            self.write_small_to_pty(bytes);
         }
     }
 
@@ -331,8 +363,11 @@ impl TerminalSession {
             let opts = term.input_opts();
             opts
         };
-        if let Some(bytes) = encode_mouse_event(opts, button, action, shift, alt, ctrl, x, y) {
-            self.write_to_pty(Bytes::from(bytes));
+        let mut buf = [0u8; ENCODE_BUF_SIZE];
+        if let Some(bytes) =
+            encode_mouse_event(opts, button, action, shift, alt, ctrl, x, y, &mut buf)
+        {
+            self.write_small_to_pty(bytes);
             true
         } else {
             false
@@ -402,114 +437,100 @@ impl TerminalSession {
             .scroll_to_row(row);
     }
 
-    /// Whether the alternate screen is currently active.
-    pub fn is_alternate_screen(&self) -> bool {
-        self.is_alternate_screen
+    pub fn surface_focus_out(&mut self) {
+        self.surface.focus_out();
     }
 
-    /// Last scrollbar info captured during prepaint.
-    pub fn last_scrollbar_info(&self) -> ScrollbarInfo {
-        self.last_scrollbar_info
-    }
-
-    /// Update render-derived state captured under the render mutex in prepaint.
-    pub fn set_render_state(&mut self, is_alternate_screen: bool, scrollbar_info: ScrollbarInfo) {
-        self.is_alternate_screen = is_alternate_screen;
-        self.last_scrollbar_info = scrollbar_info;
-    }
-
-    // --- Selection gesture handling ---
-
-    /// Handle mouse down for selection. Returns None to send to PTY, Some(anchor) if handled.
-    pub fn handle_mouse_down(
-        &self,
+    pub fn handle_left_mouse_down(
+        &mut self,
         pos: (u16, u16),
         click_count: u8,
         mods: &Modifiers,
-    ) -> Option<Option<(u16, u16)>> {
-        let mut term = self.terminal.lock().expect("terminal mutex poisoned");
-
-        if term.input_opts().mouse_event != MouseMode::None && !mods.shift {
-            return None; // Let PTY handle it
-        }
-
-        match click_count {
-            1 => {
-                term.clear_selection();
-                Some(Some(pos)) // Return anchor for drag-to-select
-            }
-            2 => {
-                let (start, end) = Self::expand_word(&mut term, pos);
-                term.set_selection(start.0, start.1, end.0, end.1, false);
-                Some(None)
-            }
-            3 => {
-                let (start, end) = Self::expand_line(&mut term, pos);
-                term.set_selection(start.0, start.1, end.0, end.1, false);
-                Some(None)
-            }
-            _ => Some(None),
-        }
+    ) -> bool {
+        self.surface
+            .handle_left_mouse_down(&self.terminal, &self.io_tx, pos, click_count, mods)
     }
 
-    const WORD_DELIMITERS: &str = "/\\()\"'-.,:;<>~!@#$%^&*|+=[]{}~?\u{2502}";
-
-    fn classify_codepoint(cp: u32) -> DelimClass {
-        if cp == 0 || cp <= 0x20 {
-            return DelimClass::Control;
-        }
-        char::from_u32(cp)
-            .filter(|c| Self::WORD_DELIMITERS.contains(*c))
-            .map_or(DelimClass::Regular, |_| DelimClass::Delimiter)
+    pub fn handle_right_mouse_down(&mut self, pos: (u16, u16), mods: &Modifiers) -> bool {
+        self.surface
+            .handle_right_mouse_down(&self.terminal, &self.io_tx, pos, mods)
     }
 
-    fn effective_codepoint(cells: &[RawCell], col: u16) -> u32 {
-        let idx = col as usize;
-        cells.get(idx).map_or(0, |cell| {
-            if cell.wide() == 2 && idx > 0 {
-                cells[idx - 1].codepoint()
-            } else {
-                cell.codepoint()
-            }
-        })
+    pub fn handle_middle_mouse_down(&mut self, pos: (u16, u16), mods: &Modifiers) -> bool {
+        self.surface
+            .handle_middle_mouse_down(&self.terminal, &self.io_tx, pos, mods)
     }
 
-    fn expand_word(term: &mut Terminal, pos: (u16, u16)) -> ((u16, u32), (u16, u32)) {
-        let (col, row) = pos;
-        let frame = term.render_frame();
-
-        let cells = match frame.row_raw(row) {
-            Some(c) if !c.is_empty() => c,
-            _ => return ((col, row as u32), (col, row as u32)),
-        };
-
-        let col = col.min(cells.len().saturating_sub(1) as u16);
-        let target = Self::classify_codepoint(Self::effective_codepoint(cells, col));
-
-        // Walk left to find start
-        let mut start = col;
-        while start > 0
-            && Self::classify_codepoint(Self::effective_codepoint(cells, start - 1)) == target
-        {
-            start -= 1;
-        }
-
-        // Walk right to find end
-        let mut end = col;
-        while (end as usize) + 1 < cells.len()
-            && Self::classify_codepoint(Self::effective_codepoint(cells, end + 1)) == target
-        {
-            end += 1;
-        }
-
-        ((start, row as u32), (end, row as u32))
+    pub fn handle_left_mouse_up(&mut self, pos: Option<(u16, u16)>, mods: &Modifiers) -> bool {
+        self.surface
+            .handle_left_mouse_up(&self.terminal, &self.io_tx, pos, mods)
     }
 
-    fn expand_line(term: &mut Terminal, pos: (u16, u16)) -> ((u16, u32), (u16, u32)) {
-        let (_, row) = pos;
-        let frame = term.render_frame();
-        let last_col = frame.cols().saturating_sub(1);
-        ((0, row as u32), (last_col, row as u32))
+    pub fn handle_right_mouse_up(
+        &mut self,
+        pos: Option<(u16, u16)>,
+        mods: &Modifiers,
+        emit: &mut dyn FnMut(AppAction),
+    ) -> bool {
+        self.surface
+            .handle_right_mouse_up(&self.terminal, &self.io_tx, pos, mods, emit)
+    }
+
+    pub fn handle_middle_mouse_up(&mut self, pos: (u16, u16), mods: &Modifiers) -> bool {
+        self.surface
+            .handle_middle_mouse_up(&self.terminal, &self.io_tx, pos, mods)
+    }
+
+    pub fn handle_mouse_move(
+        &mut self,
+        pos: (u16, u16),
+        pressed_button: u8,
+        mods: &Modifiers,
+    ) -> bool {
+        self.surface
+            .handle_mouse_move(&self.terminal, &self.io_tx, pos, pressed_button, mods)
+    }
+
+    pub fn handle_scroll_wheel(
+        &mut self,
+        pos: (u16, u16),
+        delta: gpui::ScrollDelta,
+        cell_height: f32,
+        mods: &Modifiers,
+        emit: &mut dyn FnMut(AppAction),
+    ) -> bool {
+        self.surface.handle_scroll_wheel(
+            &self.terminal,
+            &self.io_tx,
+            pos,
+            delta,
+            cell_height,
+            mods,
+            emit,
+        )
+    }
+
+    pub fn handle_scroll_key(
+        &mut self,
+        keystroke: &Keystroke,
+        emit: &mut dyn FnMut(AppAction),
+    ) -> bool {
+        self.surface.handle_scroll_key(
+            &self.terminal,
+            &self.io_tx,
+            &keystroke.key.to_lowercase(),
+            &keystroke.modifiers,
+            self.size.rows,
+            emit,
+        )
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .selection_text()
+            .is_some()
     }
 }
 
@@ -535,14 +556,6 @@ impl Drop for TerminalSession {
         // io_tx drops here → io_rx disconnects (IO thread already gone).
         // PtyWriter drops inside IO thread → Conpty::drop() joins close_thread → conin drops.
     }
-}
-
-/// Delimiter classification for word selection.
-#[derive(PartialEq, Eq, Clone, Copy)]
-enum DelimClass {
-    Control,   // space / empty / wide-continuation spacer
-    Delimiter, // punctuation delimiter
-    Regular,   // word character
 }
 
 #[cfg(test)]

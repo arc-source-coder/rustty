@@ -9,7 +9,7 @@ async-channel.workspace = true
 gpui.workspace = true
 ghostty_vt = { path = "../ghostty-vt" }
 pty = { path = "../pty" }
-crossbeam-channel = "0.5.15"
+crossbeam-channel.workspace = true
 windows-sys = {
     workspace = true,
     features = [

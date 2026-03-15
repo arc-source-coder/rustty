@@ -1,5 +1,8 @@
 # Windows GPUI + Ghostty Terminal Spec
 
+> **Update:** The renderer architecture and ownership model in this spec are
+> superseded by `docs/architecture/13-gpu-renderer.md`.
+
 Date: 2026-02-17
 Status: Proposed
 Owner: ghostty-gpui

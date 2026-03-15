@@ -10,6 +10,7 @@ This directory contains implementation-facing architecture documentation for the
 - `06-ghostty-shim.md`: Ghostty API landscape, Zig shim design, RenderState, key encoding, mode flags
 - `07-future-design.md`: split panes, search, DnD, images, config reload, multi-window — how Ghostty does each, what we've prepared now
 - `08-ghostty-alignment-decisions.md`: persisted design decisions from Ghostty source verification (viewport, coordinates, dirty model, FFI lifetime, termio strategy)
+- `14-improvements-tracker.md`: concise backlog of Ghostty parity and architecture improvement items
 
 Design goals across all docs:
 

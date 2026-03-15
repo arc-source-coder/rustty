@@ -95,7 +95,6 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .size_full()
-            .bg(gpui::black())
             .child(self.titlebar.clone().into_any_element())
             .child(
                 div()

@@ -20,7 +20,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use ghostty_vt::Terminal;
 use pty::{PtyWriter, WindowSize};
 
-use crate::types::{IoMsg, ReadThreadNotify, ScrollOp};
+use crate::types::{IoMsg, ReadThreadNotify, RendererMessage, ScrollOp};
 
 // Windows APIs
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, HANDLE};
@@ -68,6 +68,7 @@ struct IoThread {
     terminal: Arc<Mutex<Terminal>>,
     notify: Arc<ReadThreadNotify>,
     signal_tx: Sender<()>,
+    renderer_tx: Option<crossbeam_channel::Sender<RendererMessage>>,
 
     /// Bytes waiting to be written to conin.
     /// Each entry owns its backing buffer for the duration of the write.
@@ -118,6 +119,7 @@ impl IoThread {
             terminal,
             notify,
             signal_tx,
+            renderer_tx: None,
             write_queue: VecDeque::new(),
             coalesce_buf: None,
             coalesce_pool: Vec::new(),
@@ -133,6 +135,10 @@ impl IoThread {
         loop {
             let timeout = self.next_timer_deadline();
             match io_rx.recv_timeout(timeout) {
+                Ok(IoMsg::InputInline { len, buf }) => {
+                    self.enqueue_bytes(Bytes::copy_from_slice(&buf[..len as usize]));
+                    self.flush_writes();
+                }
                 Ok(IoMsg::Input(bytes)) => {
                     self.enqueue_bytes(bytes);
                     self.flush_writes();
@@ -152,6 +158,12 @@ impl IoThread {
                 Ok(IoMsg::StartSyncOutput) => {
                     // Start or reset the 1-second safety timer.
                     self.sync_output_deadline = Some(Instant::now() + SYNC_OUTPUT_TIMEOUT);
+                }
+                Ok(IoMsg::AttachRenderer(sender)) => {
+                    self.renderer_tx = Some(sender);
+                }
+                Ok(IoMsg::DetachRenderer) => {
+                    self.renderer_tx = None;
                 }
                 Ok(IoMsg::Close) => {
                     self.handle_close(&io_rx);
@@ -208,6 +220,12 @@ impl IoThread {
                 if let Some(size) = self.pending_resize.take() {
                     self.notify.set_resize(size);
                     self.notify.signal();
+                    // Nudge the renderer thread after a committed resize.
+                    // Failures are normal if the renderer is not yet attached or
+                    // is shutting down.
+                    if let Some(sender) = self.renderer_tx.as_ref() {
+                        sender.try_send(RendererMessage::Wake).ok();
+                    }
                 }
             }
         }
@@ -254,6 +272,9 @@ impl IoThread {
         // 4. Drain remaining messages — flush user Input, discard the rest.
         while let Ok(msg) = io_rx.try_recv() {
             match msg {
+                IoMsg::InputInline { len, buf } => {
+                    self.enqueue_bytes(Bytes::copy_from_slice(&buf[..len as usize]));
+                }
                 IoMsg::Input(bytes) => {
                     self.enqueue_bytes(bytes);
                 }
@@ -261,6 +282,8 @@ impl IoThread {
                 IoMsg::Resize(_) => {} // discard
                 IoMsg::Scroll(_) => {} // discard — viewport state is moot at shutdown
                 IoMsg::StartSyncOutput => {} // discard
+                IoMsg::AttachRenderer(_) => {} // discard
+                IoMsg::DetachRenderer => {} // discard
                 IoMsg::Close => {}     // duplicate
             }
         }

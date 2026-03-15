@@ -1,5 +1,8 @@
 # Data Model
 
+> **Update:** Rendering-side ownership and renderer-thread design here are
+> superseded by [13-gpu-renderer.md](13-gpu-renderer.md).
+
 > **IMPORTANT:** The FFI design is superseded by the design in [12-zero-copy-ffi-rework.md](12-zero-copy-ffi-rework.md)
 
 > **Update:** The single-thread model (UI + IO on same thread)

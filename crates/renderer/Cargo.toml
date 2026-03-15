@@ -9,5 +9,25 @@ bytemuck.workspace = true
 rapidhash.workspace = true
 terminal = { path = "../terminal" }
 ghostty_vt = { path = "../ghostty-vt" }
+font = { path = "../font" }
 ui = { path = "../ui" }
 log.workspace = true
+crossbeam-channel.workspace = true
+async-channel.workspace = true
+anyhow = "1.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Imaging",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+] }
+windows-numerics.workspace = true
