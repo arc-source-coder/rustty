@@ -194,7 +194,6 @@ pub const TerminalHandle = struct {
     handler: ShimHandler,
     callbacks: Callbacks,
     render_state: terminal.RenderState,
-    grapheme_buf: []u32 = &.{},
     palette_cache: [256]color.RGB.C = std.mem.zeroes([256]color.RGB.C),
     palette_dirty: bool = true,
 
@@ -204,16 +203,6 @@ pub const TerminalHandle = struct {
     /// will be skipped until the renderer provides real values.
     cell_width_px: u16 = 0,
     cell_height_px: u16 = 0,
-
-    pub fn copyGraphemeToBuf(self: *TerminalHandle, grapheme: []const u21) !void {
-        if (self.grapheme_buf.len < grapheme.len) {
-            if (self.grapheme_buf.len > 0) self.alloc.free(self.grapheme_buf);
-            self.grapheme_buf = try self.alloc.alloc(u32, grapheme.len);
-        }
-        for (grapheme, 0..) |cp, i| {
-            self.grapheme_buf[i] = cp;
-        }
-    }
 
     pub fn init(alloc: Allocator, cols: u16, rows: u16, fg: color.RGB, bg: color.RGB) !*TerminalHandle {
         const handle = try alloc.create(TerminalHandle);
@@ -256,7 +245,6 @@ pub const TerminalHandle = struct {
 
     pub fn deinit(self: *TerminalHandle) void {
         const alloc = self.alloc;
-        if (self.grapheme_buf.len > 0) alloc.free(self.grapheme_buf);
         self.render_state.deinit(alloc);
         self.stream.deinit();
         self.terminal_inst.deinit(alloc);

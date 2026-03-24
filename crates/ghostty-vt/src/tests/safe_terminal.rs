@@ -142,6 +142,24 @@ fn row_raw_ascii() {
 }
 
 #[test]
+fn row_graphemes_zero_copy_stable_within_frame() {
+    let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
+    term.feed("x\u{0301}".as_bytes());
+    let frame = term.render_frame();
+    let cells = frame.row_raw(0).unwrap();
+    assert!(cells[0].has_grapheme());
+
+    let row_g1 = frame.row_graphemes(0).expect("expected row grapheme data");
+    let row_g2 = frame.row_graphemes(0).expect("expected row grapheme data");
+    assert_eq!(row_g1.len(), cells.len());
+
+    let g1 = unsafe { row_g1[0].as_slice() }.expect("expected grapheme data");
+    let g2 = unsafe { row_g2[0].as_slice() }.expect("expected grapheme data");
+    assert_eq!(g1, g2);
+    assert!(g1.iter().all(|cp| (*cp >> 21) == 0));
+}
+
+#[test]
 fn row_raw_styled() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     // SGR 1 (bold) + SGR 31 (red fg) + "X"
@@ -162,6 +180,7 @@ fn row_raw_out_of_bounds_returns_none() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     let frame = term.render_frame();
     assert!(frame.row_raw(100).is_none());
+    assert!(frame.row_graphemes(100).is_none());
 }
 
 #[test]

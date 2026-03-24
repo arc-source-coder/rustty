@@ -9,8 +9,8 @@ pub use terminal::{
     InputOpts, RenderFrame, SelectionText, Terminal, VtEvent, encode_key, encode_mouse,
 };
 pub use types::{
-    CellStyle, ColorRGB, ColorState, CursorState, DirtyState, MouseFormat, MouseMode, RawCell,
-    ScrollbarInfo, StyleColor,
+    CellStyle, ColorRGB, ColorState, CursorState, DirtyState, GraphemeSlice, MouseFormat,
+    MouseMode, RawCell, ScrollbarInfo, StyleColor,
 };
 
 unsafe extern "C" {
@@ -96,12 +96,11 @@ unsafe extern "C" {
 
     pub(crate) fn ghostty_vt_terminal_render_palette(terminal: *mut c_void) -> *const ColorRGB;
 
-    pub(crate) fn ghostty_vt_terminal_render_cell_grapheme(
+    pub(crate) fn ghostty_vt_terminal_render_row_graphemes(
         terminal: *mut c_void,
         row: u16,
-        col: u16,
-        out_len: *mut u8,
-    ) -> *const u32;
+        out_len: *mut u16,
+    ) -> *const GraphemeSlice;
     pub(crate) fn ghostty_vt_terminal_render_row_selection(
         terminal: *mut c_void,
         row: u16,

@@ -384,31 +384,31 @@ impl RenderFrame {
         Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
     }
 
-    /// Get grapheme codepoints for a multi-codepoint cluster cell (on-demand).
-    /// Returns a slice into the Zig-side scratch buffer (widened u21→u32).
+    /// Get grapheme codepoints for all cells of a row.
+    /// Returns a zero-copy slice into the grapheme SoA column for a row (slice of slices).
     ///
-    /// Returns `None` if the cell is not a grapheme cluster (`has_grapheme() == false`).
+    /// Each element is a Zig slice []const u21 = { ptr: [*]const u21, len: usize }.
+    /// GraphemeSlice mirrors the layout of a Zig slice, verified by comptime assertions.
     ///
-    /// SAFETY: The returned slice points into a single per-handle scratch buffer
-    /// that is overwritten on every call. This means:
-    ///   - The slice is **only valid until the next `cell_grapheme()` call**.
-    ///   - Holding two slices from two calls simultaneously is **undefined behaviour**.
+    /// Only the low 21 bits of each `u32` are meaningful. Zig stores these values as
+    /// `u21`; the FFI exposes them as `u32` with Zig comptime assertions guaranteeing
+    /// size/alignment compatibility.
     ///
-    /// This is safe within `build_row_runs` because the loop consumes
-    /// each slice (pushes chars to `cell_text`) before advancing to
-    /// the next cell, which is the only call site.
-    /// Do not refactor the call site without re-checking this invariant.
-    pub fn cell_grapheme(&self, row: u16, col: u16) -> Option<&[u32]> {
-        let mut len: u8 = 0;
-        let ptr =
-            unsafe { ghostty_vt_terminal_render_cell_grapheme(self.handle, row, col, &mut len) };
+    /// For cells without graphemes, slices are undefined - caller must check the raw
+    /// cell's content_tag before accessing a slice.
+    ///
+    /// Returns `None` for out-of-bounds rows (or if the row has zero cells).
+    ///
+    /// SAFETY: The returned slice points into RenderState memory and
+    /// is stable for the frame lifetime (until the next `render_update()`).
+    pub fn row_graphemes(&self, row: u16) -> Option<&[GraphemeSlice]> {
+        let mut len: u16 = 0;
+        let ptr = unsafe { ghostty_vt_terminal_render_row_graphemes(self.handle, row, &mut len) };
         if ptr.is_null() || len == 0 {
             return None;
         }
-        // SAFETY: Zig widens u21→u32 into `handle.grapheme_buf`, a heap-stable
-        // scratch buffer that is only mutated by this function. The caller
-        // (build_row_runs) consumes the slice in the same iteration step before
-        // issuing any further cell_grapheme() call, so no aliasing occurs.
+        // SAFETY: The returned slice points into RenderState memory and
+        // is stable for the frame lifetime (until the next `render_update()`).
         Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
     }
 

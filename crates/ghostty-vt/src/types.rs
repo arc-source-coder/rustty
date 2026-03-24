@@ -197,6 +197,27 @@ impl CellStyle {
     }
 }
 
+/// FFI-compatible mirror of Zig `[]const u21`.
+/// Since @sizeOf(u21) == @sizeOf(u32), ptr points to u32 values.
+#[repr(C)]
+pub struct GraphemeSlice {
+    pub ptr: *const u32,
+    pub len: usize,
+}
+
+impl GraphemeSlice {
+    /// Convert to a Rust slice, returning None if ptr is null or len is 0.
+    ///
+    /// SAFETY: Caller must ensure ptr is valid for len elements.
+    pub unsafe fn as_slice(&self) -> Option<&[u32]> {
+        if self.ptr.is_null() || self.len == 0 {
+            None
+        } else {
+            Some(unsafe { std::slice::from_raw_parts(self.ptr, self.len) })
+        }
+    }
+}
+
 /// Scrollbar positioning info from Ghostty's PageList.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]

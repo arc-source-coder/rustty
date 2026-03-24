@@ -34,6 +34,15 @@ comptime {
     std.debug.assert(@intFromEnum(page.Cell.Wide.spacer_tail) == 2);
     std.debug.assert(@intFromEnum(page.Cell.Wide.spacer_head) == 3);
 
+    // --- u21 grapheme ABI contract ---
+    // We rely on reinterpreting []u21 as []u32 for zero-copy grapheme access.
+    // This is only valid if layout/stride/alignment match.
+    std.debug.assert(@bitSizeOf(u21) == 21);
+    std.debug.assert(@sizeOf(u21) == @sizeOf(u32));
+    std.debug.assert(@alignOf(u21) == @alignOf(u32));
+    std.debug.assert(@sizeOf([]const u21) == @sizeOf(GraphemeSlice));
+    std.debug.assert(@alignOf([]const u21) == @alignOf(GraphemeSlice));
+
     // --- terminal.Style (CellStyle on Rust side) ---
     // CellStyle is the extern struct matching terminal.Style. These
     // assertions verify that CellStyle and terminal.Style have the same
@@ -118,6 +127,15 @@ pub const CellStyle = extern struct {
     underline_color: StyleColor,
     flags: u16,
     _pad: [2]u8 = undefined,
+};
+
+/// C-safe mirror of a Zig slice.
+/// Used to return []const []const u21 as ?[*]const GraphemeSlice.
+/// The Rust side interprets it as &[GraphemeSlice] and forms slices
+/// from ptr + len when accessing the grapheme codepoints for a cell.
+pub const GraphemeSlice = extern struct {
+    ptr: ?[*]const u32,
+    len: usize,
 };
 
 /// Update the persistent RenderState from current terminal state.
@@ -239,33 +257,6 @@ export fn ghostty_vt_terminal_render_colors(ptr: ?*anyopaque, out: ?*ColorState)
     return 0;
 }
 
-/// Get grapheme codepoints for a cell. Returns pointer to grapheme_len u32 values.
-/// Only valid for cells where grapheme_len > 0.
-export fn ghostty_vt_terminal_render_cell_grapheme(
-    ptr: ?*anyopaque,
-    row: u16,
-    col: u16,
-    out_len: ?*u8,
-) callconv(.c) ?[*]const u32 {
-    if (ptr == null) return null;
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
-    if (row >= handle.render_state.rows) return null;
-
-    const cells = handle.render_state.row_data.items(.cells)[row];
-    if (col >= cells.len) return null;
-
-    const raw = cells.items(.raw)[col];
-    if (raw.content_tag != .codepoint_grapheme) return null;
-
-    const grapheme = cells.items(.grapheme)[col];
-    if (out_len) |len| len.* = @intCast(grapheme.len);
-    // u21 and u32 have different sizes, so we need a cast.
-    // The grapheme data lives in the row's arena, valid until next update.
-    // We can't directly cast []u21 to [*]u32 — need the grapheme_buf.
-    handle.copyGraphemeToBuf(grapheme) catch return null;
-    return handle.grapheme_buf.ptr;
-}
-
 /// Get selection range for a row. Returns 1 if row has a selection, 0 otherwise.
 /// When returning 1, start_x and end_x are set to the selection column range.
 export fn ghostty_vt_terminal_render_row_selection(
@@ -326,6 +317,31 @@ export fn ghostty_vt_terminal_render_row_styles(
     // ptrCast is valid: CellStyle is an extern struct whose layout
     // is verified by comptime assertions to match terminal.Style exactly.
     return @ptrCast(styles.ptr);
+}
+
+/// Returns a direct pointer into the grapheme SoA column for a row.
+/// Each element is a Zig slice []const u21 = { ptr: [*]const u21, len: usize }.
+/// Since @sizeOf(u21) == @sizeOf(u32), ptr can be read as [*]const u32.
+///
+/// For cells without graphemes (content_tag != codepoint_grapheme), the
+/// slice is undefined — caller must check the raw cell's content_tag.
+///
+/// Zero-copy: the pointer is into persistent Zig memory.
+/// Valid until the next render_update() call.
+export fn ghostty_vt_terminal_render_row_graphemes(
+    ptr: ?*anyopaque,
+    row: u16,
+    out_len: ?*u16,
+) callconv(.c) ?[*]const GraphemeSlice {
+    if (ptr == null) return null;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
+    if (row >= handle.render_state.rows) return null;
+
+    const cells = handle.render_state.row_data.items(.cells)[row];
+    const graphemes = cells.items(.grapheme);
+    if (out_len) |len| len.* = @intCast(graphemes.len);
+    // ABI validated at comptime: u21 has same size/alignment as u32.
+    return @ptrCast(graphemes.ptr);
 }
 
 /// Returns a pointer to the 256-entry palette sidecar.

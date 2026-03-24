@@ -215,23 +215,10 @@ pub fn build_row_runs(
         let mut buf = [0u8; 32];
         let mut buf_len = ch.encode_utf8(&mut buf).len();
 
-        // Grapheme cluster: fetch on-demand via RenderFrame.
-        // cell_grapheme() returns &[u32] pointing into the Zig scratch buffer.
-        // The slice is valid only until the next cell_grapheme() call.
-        // We consume it immediately here — safe.
-        // If this call side is ever refactored, verify the invariant still holds.
         if raw.has_grapheme() {
-            if let Some(codepoints) = frame.cell_grapheme(row, col) {
-                for &cp in codepoints {
-                    if let Some(c) = char::from_u32(cp) {
-                        let rem = &mut buf[buf_len..];
-                        if rem.len() >= 4 {
-                            buf_len += c.encode_utf8(rem).len();
-                        }
-                        // else: cluster exceeds 32 bytes — truncate silently.
-                    }
-                }
-            }
+           // Silently ignore graphemes for now. The current renderer
+           // used the per-cell cell_grapheme() API.
+           // The renderer rewrite will use the new row_grapheme API.
         }
 
         // Safety: every byte was written by char::encode_utf8, which always
