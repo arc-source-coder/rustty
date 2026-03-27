@@ -4,58 +4,42 @@ This crate contains a Zig shim that directly uses Ghostty internals and a Rust w
 
 ## Zig Development
 
-Always use `zigdoc` to discover APIs for the Zig standard library and any third-party dependencies.
+Use `zigdoc` to discover current APIs for the Zig standard library and any third-party dependencies before coding.
 
 Examples:
-
 ```bash
 zigdoc std.fs
 zigdoc std.posix.getuid
-zigdoc ghostty-vt.Terminal
 zigdoc vaxis.Window
 ```
 
-Once done with zig work, run `ziglint crates/ghostty-vt/zig/*.zig` and `zig fmt crates/ghostty-vt/zig/*.zig`;
+After zig work, run `ziglint` and `zig fmt` on the changed files.
 
-## Common Zig Patterns
-
-These patterns reflect current Zig APIs and may differ from older documentation.
+## Current Zig Patterns
 
 **ArrayList:**
-
 ```zig
 var list: std.ArrayList(u32) = .empty;
 defer list.deinit(allocator);
 try list.append(allocator, 42);
 ```
 
-**HashMap/StringHashMap (unmanaged):**
-
+**HashMap/StringHashMap (default to unmanaged):**
 ```zig
 var map: std.StringHashMapUnmanaged(u32) = .empty;
 defer map.deinit(allocator);
 try map.put(allocator, "key", 42);
 ```
 
-**HashMap/StringHashMap (managed):**
-
-```zig
-var map: std.StringHashMap(u32) = std.StringHashMap(u32).init(allocator);
-defer map.deinit();
-try map.put("key", 42);
-```
-
-**stdout/stderr Writer:**
-
+**stdout/stderr writer:**
 ```zig
 var buf: [4096]u8 = undefined;
-const writer = std.fs.File.stdout().writer(&buf);
-defer writer.flush() catch {};
-try writer.print("hello {s}\n", .{"world"});
+var writer = std.fs.File.stdout().writer(&buf);
+defer writer.interface.flush() catch {};
+try writer.interface.print("hello {s}\n", .{"world"});
 ```
 
-**build.zig executable/test:**
-
+**build.zig executable:**
 ```zig
 b.addExecutable(.{
     .name = "foo",
@@ -71,54 +55,41 @@ b.addExecutable(.{
 
 Zig 0.15.2 uses `callconv(.c)`, not `callconv(.C)` (Note the lowercase .c)
 
-## Zig Code Style
 
-**Naming:**
-
-- `camelCase` for functions and methods
-- `snake_case` for variables and parameters
-- `PascalCase` for types, structs, and enums
-
-**Struct initialization:** Prefer explicit type annotation with anonymous literals:
-
+**JSON writing:**
 ```zig
-const foo: Type = .{ .field = value };  // Good
-const foo = Type{ .field = value };     // Avoid
+var buf: [4096]u8 = undefined;
+var writer = std.fs.File.stdout().writer(&buf);
+defer writer.interface.flush() catch {};
+
+var jw: std.json.Stringify = .{
+    .writer = &writer.interface,
+    .options = .{ .whitespace = .indent_2 },
+};
+try jw.write(my_struct);
 ```
 
-**File structure:**
+**Allocating writer:**
+```zig
+var writer: std.Io.Writer.Allocating = .init(allocator);
+defer writer.deinit();
+try writer.writer.print("hello {s}", .{"world"});
+const output = try writer.toOwnedSlice();
+```
 
-1. `//!` doc comment describing the module
-2. `const Self = @This();` (for self-referential types)
-3. Imports: `std` → `builtin` → project modules
-4. `const log = std.log.scoped(.module_name);`
+## Zig Style
 
-**Functions:** Order methods as `init` → `deinit` → public API → private helpers
+- `camelCase` for functions and methods
+- `snake_case` for variables, parameters, and constants
+- `PascalCase` for types, structs, and enums
+- prefer `const foo: Type = .{ .field = value };` over `const foo = Type{ .field = value };`
+- preferred file order: `//!` module doc comment, `const Self = @This();` (for self-referential types), imports, `const log = std.log.scoped(...)`
+- preferred methods order: `init` → `deinit` → public API → private helpers
+- pass allocators explicitly; use `errdefer` for cleanup on error
+- keep tests inline with the code they cover; register them in `src/main.zig`
 
-**Memory:** Pass allocators explicitly, use `errdefer` for cleanup on error
+## Safety
 
-**Documentation:** Use `///` for public API, `//` for implementation notes. Always explain _why_, not just _what_.
-
-**Tests:** Inline in the same file, register in src/main.zig test block for discoverability
-
-## Safety Conventions
-
-Inspired by [TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md).
-
-**Assertions:**
-
-- Add assertions that catch real bugs, not trivially true statements
-- Focus on API boundaries and state transitions where invariants matter
-- Good: bounds checks, null checks before dereference, state machine transitions
-- Avoid: asserting something immediately after setting it, checking internal function arguments
-
-**Function size:**
-
-- Soft limit of 70 lines per function
-- Centralize control flow (switch/if) in parent functions
-- Push pure computation to helper functions
-
-**Comments:**
-
-- Explain _why_ the code exists, not _what_ it does
-- Document non-obvious thresholds, timing values, protocol details
+- Add assertions at API boundaries and state transitions; avoid trivial assertions.
+- Keep functions small and push pure computation into helpers.
+- Comments should explain why, not what.
