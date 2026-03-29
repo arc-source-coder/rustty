@@ -230,9 +230,9 @@ impl Atlas {
     /// Ghostty reference: `Atlas.set`.
     pub fn set(&mut self, reg: Region, data: &[u8]) {
         debug_assert!(reg.x < self.size - 1);
-        debug_assert!(reg.x + reg.width <= self.size - 1);
+        debug_assert!(reg.x + reg.width < self.size);
         debug_assert!(reg.y < self.size - 1);
-        debug_assert!(reg.y + reg.height <= self.size - 1);
+        debug_assert!(reg.y + reg.height < self.size);
 
         let depth = self.format.depth();
         for row in 0..reg.height {
@@ -258,9 +258,9 @@ impl Atlas {
         src_y: u32,
     ) {
         debug_assert!(reg.x < self.size - 1);
-        debug_assert!(reg.x + reg.width <= self.size - 1);
+        debug_assert!(reg.x + reg.width < self.size);
         debug_assert!(reg.y < self.size - 1);
-        debug_assert!(reg.y + reg.height <= self.size - 1);
+        debug_assert!(reg.y + reg.height < self.size);
 
         let depth = self.format.depth();
         for row in 0..reg.height {

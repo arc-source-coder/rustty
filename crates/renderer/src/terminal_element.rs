@@ -175,6 +175,9 @@ impl Element for TerminalElement {
         };
 
         if let Some(id) = id {
+            // Closure required: with_element_state needs a specific closure signature
+            // that doesn't match build_layout's inferred types when passed directly.
+            #[allow(clippy::redundant_closure)]
             window.with_element_state(id, |prev_state, window| build_layout(prev_state, window))
         } else {
             build_layout(None, window).0

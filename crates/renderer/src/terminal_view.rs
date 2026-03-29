@@ -442,17 +442,14 @@ impl Render for TerminalView {
                 let mods = &event.keystroke.modifiers;
 
                 // Intercept copy: Ctrl+C (Windows, if selection exists) or Ctrl+Shift+C (all platforms)
-                let is_copy = (mods.control && mods.shift && key == "c")
-                    || (mods.control && !mods.shift && key == "c" && this.has_selection(cx));
+                let is_copy = mods.control && key == "c" && (mods.shift || this.has_selection(cx));
                 if is_copy {
                     this.handle_copy(window, cx);
                     return;
                 }
 
                 // Intercept paste: Ctrl+V (Windows) or Ctrl+Shift+V (Linux) or Cmd+V (macOS)
-                let is_paste = (mods.control && key == "v")
-                    || (mods.control && mods.shift && key == "v")
-                    || (mods.platform && key == "v");
+                let is_paste = (mods.control || mods.platform) && key == "v";
                 if is_paste {
                     this.handle_paste(window, cx);
                     return;

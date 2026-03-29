@@ -248,6 +248,7 @@ pub(crate) fn ui_metrics(cell_metrics: CellMetrics) -> RendererCellMetrics {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_batch(
     config: &RendererTextConfig,
     shared_grid: SharedGridPtr,
@@ -360,6 +361,7 @@ pub(crate) fn build_batch(
 /// Ghostty: `rebuildRow`
 ///
 /// Free function for borrow splitting across renderer fields.
+#[allow(clippy::too_many_arguments)]
 fn rebuild_row(
     y: u16,
     frame: &RenderFrame,
@@ -537,6 +539,7 @@ fn rebuild_row(
 /// segment carries the correct per-cell color (WT-style overlap splitting).
 /// TODO: Figure out how to cleanup this signature, as well as cleanup /
 /// deduplicate `overlap_split_glyph` and `resolve_cell_fg`.
+#[allow(clippy::too_many_arguments)]
 fn add_glyph(
     y: u16,
     raw_cells: &[RawCell],
@@ -634,6 +637,7 @@ fn add_glyph(
 /// WT reference: `BackendD3D::_drawTextOverlapSplit` in
 /// `opensrc/repos/microsoft/terminal/src/renderer/atlas/BackendD3D.cpp`.
 #[cold]
+#[allow(clippy::too_many_arguments)]
 fn overlap_split_glyph(
     y: u16,
     col: usize,

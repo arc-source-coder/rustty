@@ -113,6 +113,7 @@ impl<'a> RunIterator<'a> {
         }
     }
 
+    #[allow(clippy::should_implement_trait)] // not a standard Iterator
     pub fn next(&mut self) -> Option<TextRun> {
         let raw_cells = self.opts.cells.raw_cells;
         let styles = self.opts.cells.styles;

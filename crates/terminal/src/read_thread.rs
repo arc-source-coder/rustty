@@ -233,13 +233,13 @@ fn read_loop(
                     state.shutdown_deadline = Some(Instant::now() + SHUTDOWN_TIMEOUT);
                 }
 
-                if let Some(size) = notify.take_resize() {
-                    if !state.draining {
-                        handle_resize(
-                            size, conout, &mut state, &reader, &terminal, &notify, &io_tx,
-                            &signal_tx, &event_tx,
-                        );
-                    }
+                if let Some(size) = notify.take_resize()
+                    && !state.draining
+                {
+                    handle_resize(
+                        size, conout, &mut state, &reader, &terminal, &notify, &io_tx, &signal_tx,
+                        &event_tx,
+                    );
                 }
                 continue;
             }
@@ -249,9 +249,9 @@ fn read_loop(
                 continue;
             }
 
-            let buf_index = if overlapped == &state.bufs[0].overlapped as *const _ as *mut _ {
+            let buf_index = if std::ptr::eq(overlapped, &state.bufs[0].overlapped) {
                 0
-            } else if overlapped == &state.bufs[1].overlapped as *const _ as *mut _ {
+            } else if std::ptr::eq(overlapped, &state.bufs[1].overlapped) {
                 1
             } else {
                 continue;
@@ -312,6 +312,7 @@ fn read_loop(
 /// Feed `bytes` into the terminal, drain VT events, dispatch to channels,
 /// and signal the renderer. Called from both the hot read path and the
 /// resize-harvest path so that neither loses side effects.
+#[allow(clippy::too_many_arguments)]
 fn feed_and_dispatch(
     bytes: &[u8],
     was_synchronized: &mut bool,
@@ -368,6 +369,7 @@ fn feed_and_dispatch(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_resize(
     size: WindowSize,
     conout: HANDLE,
@@ -502,6 +504,7 @@ fn cleanup(state: &mut ReadThreadState, conout: HANDLE, iocp: HANDLE) {
     drain_iocp_for_buffers(conout, iocp, state, None, None, None, None, None);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drain_iocp_for_buffers(
     conout: HANDLE,
     iocp: HANDLE,
@@ -542,23 +545,21 @@ fn drain_iocp_for_buffers(
             if overlapped.is_null() {
                 continue;
             }
-            let buf_index = if overlapped == &state.bufs[0].overlapped as *const _ as *mut _ {
+            let buf_index = if std::ptr::eq(overlapped, &state.bufs[0].overlapped) {
                 0
-            } else if overlapped == &state.bufs[1].overlapped as *const _ as *mut _ {
+            } else if std::ptr::eq(overlapped, &state.bufs[1].overlapped) {
                 1
             } else {
                 continue;
             };
 
             state.bufs[buf_index].state = BufState::Idle;
-            let bytes = match get_overlapped_result_iocp(
+            let bytes = get_overlapped_result_iocp(
                 conout,
                 &state.bufs[buf_index].overlapped,
                 entry.dwNumberOfBytesTransferred,
-            ) {
-                Ok(n) => n,
-                Err(_) => 0,
-            };
+            )
+            .unwrap_or_default();
             if bytes == 0 {
                 continue;
             }
@@ -578,10 +579,8 @@ fn drain_iocp_for_buffers(
             }
         }
     }
-    if saw_notify {
-        if let Some(notify) = notify {
-            notify.signal();
-        }
+    if saw_notify && let Some(notify) = notify {
+        notify.signal();
     }
 }
 
@@ -621,8 +620,7 @@ fn start_read(handle: HANDLE, iocp: HANDLE, buf: &mut ReadBuf) -> ReadStart {
         }
         // Synchronous completion. We manually enqueue it to the IOCP so the
         // main loop sees a single completion path.
-        let queued =
-            unsafe { PostQueuedCompletionStatus(iocp, bytes_read, 0, &mut buf.overlapped) };
+        let queued = unsafe { PostQueuedCompletionStatus(iocp, bytes_read, 0, &buf.overlapped) };
         if queued == 0 {
             return ReadStart::Err(io::Error::last_os_error());
         }

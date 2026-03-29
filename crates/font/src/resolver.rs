@@ -95,13 +95,12 @@ impl CodepointResolver {
             return Some(idx);
         }
 
-        if style != Style::Normal {
-            if let Some(idx) =
+        if style != Style::Normal
+            && let Some(idx) =
                 self.collection
                     .get_index(codepoint, Style::Normal, Some(preferred_presentation))
-            {
-                return Some(idx);
-            }
+        {
+            return Some(idx);
         }
 
         // Ghostty compatibility: after preferred/default presentation probing,
@@ -111,10 +110,10 @@ impl CodepointResolver {
             return Some(idx);
         }
 
-        if style != Style::Normal {
-            if let Some(idx) = self.collection.get_index(codepoint, Style::Normal, None) {
-                return Some(idx);
-            }
+        if style != Style::Normal
+            && let Some(idx) = self.collection.get_index(codepoint, Style::Normal, None)
+        {
+            return Some(idx);
         }
 
         #[cfg(target_os = "windows")]
@@ -125,14 +124,12 @@ impl CodepointResolver {
                 && let Some(fallback) = self.dwrite_fallback.as_mut()
                 && let Some(face) = fallback.resolve_face(codepoint)
                 && let Ok(idx) = self.collection.get_or_insert_dwrite_face(style, &face)
-            {
-                if self
+                && (self
                     .collection
                     .has_codepoint(idx, codepoint, Some(preferred_presentation))
-                    || self.collection.has_codepoint(idx, codepoint, None)
-                {
-                    return Some(idx);
-                }
+                    || self.collection.has_codepoint(idx, codepoint, None))
+            {
+                return Some(idx);
             }
         }
 

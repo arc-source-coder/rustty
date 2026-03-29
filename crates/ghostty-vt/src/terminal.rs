@@ -62,6 +62,7 @@ unsafe extern "C" fn response_trampoline(userdata: *mut c_void, ptr: *const u8, 
 /// Use `render_frame()` to access render state.
 pub struct Terminal {
     handle: *mut c_void,
+    #[allow(clippy::box_collection)] // Zig FFI needs a stable pointer
     events: Box<Vec<VtEvent>>,
 }
 

@@ -26,6 +26,7 @@ const IO_MSG_CHANNEL_CAPACITY: usize = 64;
 /// Capacity for the IoEvent channel (read thread → GPUI event task).
 const IO_EVENT_CHANNEL_CAPACITY: usize = 64;
 
+#[allow(dead_code)] // tabs not yet implemented
 pub struct TerminalSession {
     pub id: SessionId,
     terminal: Arc<Mutex<Terminal>>,
@@ -132,31 +133,21 @@ impl TerminalSession {
 
         // Signal task: awaits render wakeup from read/IO thread, calls cx.notify().
         let signal_task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            loop {
-                match signal_rx.recv().await {
-                    Ok(()) => {
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
-                            break; // Entity dropped
-                        }
-                    }
-                    Err(_) => break, // Channel closed
+            while let Ok(()) = signal_rx.recv().await {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break; // Entity dropped
                 }
             }
         });
 
         // Event task: processes IoEvents (Bell, TitleChanged, Exited, Error).
         let event_task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            loop {
-                match event_rx.recv().await {
-                    Ok(event) => {
-                        let result = this.update(cx, |session, cx| {
-                            session.handle_io_event(event, cx);
-                        });
-                        if result.is_err() {
-                            break; // Entity dropped
-                        }
-                    }
-                    Err(_) => break, // Channel closed
+            while let Ok(event) = event_rx.recv().await {
+                let result = this.update(cx, |session, cx| {
+                    session.handle_io_event(event, cx);
+                });
+                if result.is_err() {
+                    break; // Entity dropped
                 }
             }
         });
@@ -333,8 +324,7 @@ impl TerminalSession {
     pub fn send_focus_change(&self, focused: bool) {
         let opts = {
             let term = self.terminal.lock().expect("terminal mutex poisoned");
-            let opts = term.input_opts();
-            opts
+            term.input_opts()
         };
         if let Some(bytes) = encode_focus_change(opts, focused) {
             self.write_small_to_pty(bytes);
@@ -348,6 +338,7 @@ impl TerminalSession {
     ///
     /// Returns `true` if the terminal consumed the event (mouse reporting
     /// is active), `false` if the caller should handle it (e.g. scroll viewport).
+    #[allow(clippy::too_many_arguments)]
     pub fn send_mouse_event(
         &self,
         button: u8,
@@ -360,8 +351,7 @@ impl TerminalSession {
     ) -> bool {
         let opts = {
             let term = self.terminal.lock().expect("terminal mutex poisoned");
-            let opts = term.input_opts();
-            opts
+            term.input_opts()
         };
         let mut buf = [0u8; ENCODE_BUF_SIZE];
         if let Some(bytes) =

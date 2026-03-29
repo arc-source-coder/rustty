@@ -680,6 +680,7 @@ impl GlyphPipeline {
         self.shader_resources_dirty = true;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw(
         &mut self,
         device: &ID3D11Device,

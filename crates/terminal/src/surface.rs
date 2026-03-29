@@ -221,6 +221,7 @@ impl TerminalSurface {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn handle_scroll_wheel(
         &mut self,
         terminal: &Arc<Mutex<Terminal>>,
@@ -261,13 +262,12 @@ impl TerminalSurface {
             let mouse_alternate_scroll = term.mouse_alternate_scroll_enabled();
             let mut selection_cleared = false;
 
-            if opts.mouse_event != MouseMode::None
-                || (is_alternate_screen && mouse_alternate_scroll)
+            if (opts.mouse_event != MouseMode::None
+                || (is_alternate_screen && mouse_alternate_scroll))
+                && term.selection_text().is_some()
             {
-                if term.selection_text().is_some() {
-                    term.clear_selection();
-                    selection_cleared = true;
-                }
+                term.clear_selection();
+                selection_cleared = true;
             }
 
             ScrollContext {

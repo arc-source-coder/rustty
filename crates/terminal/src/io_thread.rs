@@ -214,30 +214,27 @@ impl IoThread {
     fn fire_timers(&mut self) {
         let now = Instant::now();
 
-        if let Some(deadline) = self.resize_deadline {
-            if now >= deadline {
-                self.resize_deadline = None;
-                if let Some(size) = self.pending_resize.take() {
-                    self.notify.set_resize(size);
-                    self.notify.signal();
-                    // Nudge the renderer thread after a committed resize.
-                    // Failures are normal if the renderer is not yet attached or
-                    // is shutting down.
-                    if let Some(sender) = self.renderer_tx.as_ref() {
-                        sender.try_send(RendererMessage::Wake).ok();
-                    }
+        if let Some(deadline) = self.resize_deadline
+            && now >= deadline
+        {
+            self.resize_deadline = None;
+            if let Some(size) = self.pending_resize.take() {
+                self.notify.set_resize(size);
+                self.notify.signal();
+                if let Some(sender) = self.renderer_tx.as_ref() {
+                    sender.try_send(RendererMessage::Wake).ok();
                 }
             }
         }
 
-        if let Some(deadline) = self.sync_output_deadline {
-            if now >= deadline {
-                self.sync_output_deadline = None;
-                let mut term = self.terminal.lock().expect("terminal mutex poisoned");
-                term.reset_synchronized_output();
-                drop(term);
-                self.signal_tx.try_send(()).ok();
-            }
+        if let Some(deadline) = self.sync_output_deadline
+            && now >= deadline
+        {
+            self.sync_output_deadline = None;
+            let mut term = self.terminal.lock().expect("terminal mutex poisoned");
+            term.reset_synchronized_output();
+            drop(term);
+            self.signal_tx.try_send(()).ok();
         }
     }
 
@@ -349,11 +346,11 @@ impl IoThread {
         if bytes.len() > WRITE_CHUNK {
             return;
         }
-        if let Ok(mut buf) = bytes.try_into_mut() {
-            if buf.capacity() <= WRITE_CHUNK * 2 {
-                buf.clear();
-                self.coalesce_pool.push(buf);
-            }
+        if let Ok(mut buf) = bytes.try_into_mut()
+            && buf.capacity() <= WRITE_CHUNK * 2
+        {
+            buf.clear();
+            self.coalesce_pool.push(buf);
         }
     }
 

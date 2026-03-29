@@ -149,8 +149,7 @@ impl RendererThread {
             cell_width: cell_metrics.cell_width.round().max(1.0) as u16,
             cell_height: cell_metrics.line_height.round().max(1.0) as u16,
         });
-        let shape_options =
-            build_shape_options(&text_config, &cell_metrics, &locale, &feature_spec);
+        let shape_options = build_shape_options(&text_config, &cell_metrics, locale, &feature_spec);
         let shaper = Shaper::new(analyzer, shape_options);
         let metrics = ui_metrics(cell_metrics);
         ui_tx.try_send(RendererUiUpdate::Metrics(metrics)).ok();

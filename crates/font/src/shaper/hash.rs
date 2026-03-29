@@ -31,6 +31,12 @@ pub struct RunHasher {
     inner: RapidHasher<'static>,
 }
 
+impl Default for RunHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RunHasher {
     /// Create a new hasher seeded with 0 (matches Ghostty `Wyhash.init(0)`).
     #[inline]

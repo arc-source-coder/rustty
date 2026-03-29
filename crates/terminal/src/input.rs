@@ -172,33 +172,31 @@ fn compute_unshifted_codepoint(keystroke: &gpui::Keystroke) -> u32 {
     let key = &keystroke.key;
 
     // For single ASCII letters (a-z), the unshifted is always lowercase
-    if key.len() == 1 {
-        if let Some(c) = key.chars().next() {
-            if c.is_ascii_lowercase() {
-                return c as u32;
-            }
-        }
+    if key.len() == 1
+        && let Some(c) = key.chars().next()
+        && c.is_ascii_lowercase()
+    {
+        return c as u32;
     }
 
     // For ASCII digits and symbols, unshifted is the key itself (lowercased for letters)
-    if key.len() == 1 {
-        if let Some(c) = key.chars().next() {
-            if c.is_ascii_digit() || c.is_ascii_punctuation() || c == ' ' {
-                return c as u32;
-            }
-        }
+    if key.len() == 1
+        && let Some(c) = key.chars().next()
+        && (c.is_ascii_digit() || c.is_ascii_punctuation() || c == ' ')
+    {
+        return c as u32;
     }
 
     // For other keys, try to derive from key_char
-    if let Some(ref kc) = keystroke.key_char {
-        if let Some(c) = kc.chars().next() {
-            // If shift is held, unshifted is lowercase; otherwise use as-is
-            return if shift {
-                c.to_ascii_lowercase() as u32
-            } else {
-                c as u32
-            };
-        }
+    if let Some(ref kc) = keystroke.key_char
+        && let Some(c) = kc.chars().next()
+    {
+        // If shift is held, unshifted is lowercase; otherwise use as-is
+        return if shift {
+            c.to_ascii_lowercase() as u32
+        } else {
+            c as u32
+        };
     }
 
     0
@@ -294,7 +292,8 @@ pub fn encode_focus_change(opts: InputOpts, focused: bool) -> Option<&'static [u
 ///
 /// Returns `Some(Vec<u8>)` with encoded bytes, or `None` if mouse
 /// reporting is disabled or the event produces no output.
-pub fn encode_mouse_event<'a>(
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mouse_event(
     opts: InputOpts,
     button: u8,
     action: u8,
@@ -303,8 +302,8 @@ pub fn encode_mouse_event<'a>(
     ctrl: bool,
     x: u16,
     y: u16,
-    buf: &'a mut [u8; ENCODE_BUF_SIZE],
-) -> Option<&'a [u8]> {
+    buf: &mut [u8; ENCODE_BUF_SIZE],
+) -> Option<&[u8]> {
     let mods: u8 = (shift as u8) | ((alt as u8) << 1) | ((ctrl as u8) << 2);
     let n = encode_mouse(opts, button, action, mods, x, y, &mut buf[..]);
     if n == 0 { None } else { Some(&buf[..n]) }

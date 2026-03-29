@@ -208,7 +208,10 @@ pub struct GraphemeSlice {
 impl GraphemeSlice {
     /// Convert to a Rust slice, returning None if ptr is null or len is 0.
     ///
-    /// SAFETY: Caller must ensure ptr is valid for len elements.
+    /// # Safety
+    ///
+    /// Caller must ensure `ptr` is valid for `len` elements and that the
+    /// resulting slice does not outlive the backing storage.
     pub unsafe fn as_slice(&self) -> Option<&[u32]> {
         if self.ptr.is_null() || self.len == 0 {
             None

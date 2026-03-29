@@ -60,14 +60,12 @@ fn find_fxc_compiler() -> String {
 
     if let Ok(output) = Command::new("where.exe").arg("fxc.exe").output()
         && output.status.success()
-    {
-        if let Some(path) = String::from_utf8_lossy(&output.stdout)
+        && let Some(path) = String::from_utf8_lossy(&output.stdout)
             .lines()
             .map(str::trim)
             .find(|line| !line.is_empty())
-        {
-            return path.to_owned();
-        }
+    {
+        return path.to_owned();
     }
 
     if let Some(path) = find_windows_sdk_binary("fxc.exe") {
@@ -108,6 +106,7 @@ fn find_windows_sdk_binary(binary: &str) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
 fn compile_shader(
     fxc_path: &str,
     shader_path: &str,

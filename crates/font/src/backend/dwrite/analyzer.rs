@@ -234,7 +234,7 @@ impl DWriteAnalyzer {
             text_slice,
             options.font_size,
             analysis,
-            &face,
+            face,
             locale_pcw,
             features_arg,
             feature_range_arg,
@@ -243,6 +243,7 @@ impl DWriteAnalyzer {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn shape_complex_segment(
         &mut self,
         codepoints: &[Codepoint],
@@ -388,7 +389,7 @@ impl DWriteAnalyzer {
             let mut cluster_glyph_start = *src_cluster as usize;
             let mut cluster_min_x = cluster_to_cell_x(*codepoints);
             for glyph_index in 0..glyph_len {
-                while glyph_cluster + 1 <= text_len
+                while glyph_cluster < text_len
                     && *src_cluster.add(glyph_cluster + 1) as usize <= glyph_index
                 {
                     glyph_cluster += 1;
