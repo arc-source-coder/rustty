@@ -1,6 +1,8 @@
 # PTY Threading v2: Inline-Feed Three-Thread Architecture
 
 > Supersedes the threading model in [04-pty-threading.md](04-pty-threading.md).
+> **IMPORTANT:** IO and signaling model superseded by [15-ntdll-io-rework.md](15-ntdll-io-rework.md).
+> Thread structure, PTY split, shutdown sequence, and HPCON serialization remain valid.
 
 ## Goal
 

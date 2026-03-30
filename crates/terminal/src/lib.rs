@@ -1,6 +1,7 @@
 mod config;
 mod input;
 mod io_thread;
+mod platform;
 mod read_thread;
 mod session;
 mod surface;

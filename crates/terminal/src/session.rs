@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 
 use bytes::Bytes;
+use crossbeam_queue::ArrayQueue;
 use gpui::{AsyncApp, Context, Entity, Keystroke, Modifiers, Task, WeakEntity};
 
 use ghostty_vt::{ColorRGB, Terminal};
@@ -12,10 +12,11 @@ use crate::config::{RenderConfig, SpawnConfig};
 use crate::input::{
     ENCODE_BUF_SIZE, encode_focus_change, encode_key_event, encode_mouse_event, map_key,
 };
+use crate::platform::windows::thread::PlatformThread;
 use crate::surface::{AppAction, TerminalSurface};
 use crate::types::{
-    GridSize, INLINE_IO_BYTES_CAPACITY, IoEvent, IoMsg, ProcessState, ReadThreadNotify,
-    RendererMessage, ScrollOp, SessionId, SessionMetadata,
+    GridSize, IoEvent, IoMsg, IoThreadNotify, ProcessState, ReadThreadNotify, RendererMessage,
+    ScrollOp, SessionId, SessionMetadata,
 };
 use crate::{io_thread, read_thread};
 
@@ -34,13 +35,13 @@ pub struct TerminalSession {
     spawn_config: SpawnConfig,
     render_config: Entity<RenderConfig>,
     /// Sender for user input and resize commands to the IO thread.
-    io_tx: crossbeam_channel::Sender<IoMsg>,
+    io_notify: Arc<IoThreadNotify>,
     metadata: SessionMetadata,
     process_state: ProcessState,
     surface: TerminalSurface,
 
-    read_thread: Option<JoinHandle<()>>,
-    io_thread: Option<JoinHandle<()>>,
+    read_thread: Option<PlatformThread>,
+    io_thread: Option<PlatformThread>,
     _signal_task: Task<()>,
     _event_task: Task<()>,
 }
@@ -83,45 +84,47 @@ impl TerminalSession {
         let pty = pty::new(&pty_options, window_size).expect("failed to spawn PTY");
         let (reader, writer) = pty.split();
 
-        // ReadThreadNotify: shared signal from IO thread → read thread.
-        // Create the IOCP handle here so session owns the lifetime.
-        let notify_iocp = unsafe {
-            windows_sys::Win32::System::IO::CreateIoCompletionPort(
-                windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
-                std::ptr::null_mut(),
-                0,
-                0,
-            )
-        };
-        assert!(
-            !notify_iocp.is_null(),
-            "CreateIoCompletionPort failed for ReadThreadNotify"
-        );
-        let notify = Arc::new(ReadThreadNotify::new(notify_iocp));
+        let notify = Arc::new(ReadThreadNotify::new());
 
         // Channels:
-        //   io_tx/io_rx:     crossbeam bounded 64  — GPUI + read thread → IO thread
+        //   io_notify.queue: bounded 64 lock-free — GPUI + read thread → IO thread
         //   signal_tx/rx:    async_channel bounded 1  — read/IO thread → GPUI signal task
         //   event_tx/rx:     async_channel bounded 64 — read thread → GPUI event task
-        let (io_tx, io_rx) = crossbeam_channel::bounded::<IoMsg>(IO_MSG_CHANNEL_CAPACITY);
+        let io_queue = Arc::new(ArrayQueue::new(IO_MSG_CHANNEL_CAPACITY));
+        let io_notify = Arc::new(IoThreadNotify::new(io_queue));
         let (signal_tx, signal_rx) = async_channel::bounded::<()>(1);
         let (event_tx, event_rx) = async_channel::bounded::<IoEvent>(IO_EVENT_CHANNEL_CAPACITY);
 
-        // Read thread gets its own io_tx clone for device replies.
-        let io_tx_for_read = io_tx.clone();
-
-        // Spawn read thread (hot path: conout reads + terminal.feed()).
-        let read_thread = read_thread::spawn(
+        let read_thread = read_thread::spawn_suspended(
             reader,
             terminal.clone(),
             notify.clone(),
-            io_tx_for_read,
+            io_notify.clone(),
             signal_tx.clone(),
             event_tx,
+        )
+        .expect("failed to spawn read thread");
+
+        let io_thread = io_thread::spawn_suspended(
+            writer,
+            terminal.clone(),
+            notify.clone(),
+            io_notify.clone(),
+            signal_tx,
+        )
+        .expect("failed to spawn IO thread");
+
+        notify.set_read_thread(read_thread.handle());
+        io_notify.set_io_thread(io_thread.handle());
+
+        log::debug!(
+            "terminal session threads spawned: read_tid={}, io_tid={}",
+            read_thread.id(),
+            io_thread.id()
         );
 
-        // Spawn IO thread (cold path: writes, resize coalescing, sync-output timer).
-        let io_thread = io_thread::spawn(writer, terminal.clone(), notify, io_rx, signal_tx);
+        read_thread.resume().expect("failed to resume read thread");
+        io_thread.resume().expect("failed to resume IO thread");
 
         // Signal task: awaits render wakeup from read/IO thread, calls cx.notify().
         let signal_task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -150,7 +153,7 @@ impl TerminalSession {
             size,
             spawn_config,
             render_config,
-            io_tx,
+            io_notify,
             metadata: SessionMetadata::default(),
             process_state: ProcessState::Running,
             surface: TerminalSurface::new(),
@@ -192,13 +195,13 @@ impl TerminalSession {
     ///
     /// Only the sender is stored; no renderer-owned state enters `terminal`.
     pub fn attach_renderer_sender(&self, sender: crossbeam_channel::Sender<RendererMessage>) {
-        self.io_tx.try_send(IoMsg::AttachRenderer(sender)).ok();
+        let _ = self.io_notify.try_send(IoMsg::AttachRenderer(sender));
     }
 
     /// Remove the renderer sender, for example when the view is torn down.
     /// Send failures after detach are treated as normal shutdown races.
     pub fn detach_renderer_sender(&self) {
-        self.io_tx.try_send(IoMsg::DetachRenderer).ok();
+        let _ = self.io_notify.try_send(IoMsg::DetachRenderer);
     }
 
     /// Request a resize from the renderer.
@@ -218,7 +221,7 @@ impl TerminalSession {
             cell_width,
             cell_height,
         };
-        self.io_tx.try_send(IoMsg::Resize(window_size)).ok();
+        let _ = self.io_notify.try_send(IoMsg::Resize(window_size));
     }
 
     /// Current grid size.
@@ -228,22 +231,11 @@ impl TerminalSession {
 
     /// Write user input bytes to the PTY.
     pub fn write_to_pty(&self, data: Bytes) {
-        self.io_tx.try_send(IoMsg::Input(data)).ok();
+        let _ = self.io_notify.try_send(IoMsg::Input(data));
     }
 
     fn write_small_to_pty(&self, data: &[u8]) {
-        if data.len() > INLINE_IO_BYTES_CAPACITY {
-            self.write_to_pty(Bytes::copy_from_slice(data));
-            return;
-        }
-        let mut buf = [0; INLINE_IO_BYTES_CAPACITY];
-        buf[..data.len()].copy_from_slice(data);
-        self.io_tx
-            .try_send(IoMsg::InputInline {
-                len: data.len() as u8,
-                buf,
-            })
-            .ok();
+        self.io_notify.try_send_input_small(data);
     }
 
     /// Current process state.
@@ -267,9 +259,8 @@ impl TerminalSession {
     /// Encoding and the PTY write both happen outside the lock.
     pub fn send_key_event(&self, keystroke: &Keystroke, is_held: bool) {
         // Resolve key first — pure hash-map lookup, no lock needed.
-        // Returns early for modifier-only keys and other unrecognised inputs.
-        let key_str = keystroke.key.to_lowercase();
-        if map_key(&key_str).is_none() {
+        // Returns early for modifier-only keys and other unrecognized inputs.
+        if map_key(&keystroke.key).is_none() {
             return;
         }
 
@@ -391,19 +382,19 @@ impl TerminalSession {
 
     /// Scroll the viewport by delta rows. Negative = up (towards history).
     pub fn scroll_viewport(&self, delta: i32) {
-        self.io_tx
-            .try_send(IoMsg::Scroll(ScrollOp::Delta(delta)))
-            .ok();
+        let _ = self
+            .io_notify
+            .try_send(IoMsg::Scroll(ScrollOp::Delta(delta)));
     }
 
     /// Scroll to the top of scrollback.
     pub fn scroll_to_top(&self) {
-        self.io_tx.try_send(IoMsg::Scroll(ScrollOp::Top)).ok();
+        let _ = self.io_notify.try_send(IoMsg::Scroll(ScrollOp::Top));
     }
 
     /// Scroll to the bottom (active area).
     pub fn scroll_to_bottom(&self) {
-        self.io_tx.try_send(IoMsg::Scroll(ScrollOp::Bottom)).ok();
+        let _ = self.io_notify.try_send(IoMsg::Scroll(ScrollOp::Bottom));
     }
 
     /// Scroll to an absolute row offset (for scrollbar thumb drag).
@@ -430,22 +421,22 @@ impl TerminalSession {
         mods: &Modifiers,
     ) -> bool {
         self.surface
-            .handle_left_mouse_down(&self.terminal, &self.io_tx, pos, click_count, mods)
+            .handle_left_mouse_down(&self.terminal, &self.io_notify, pos, click_count, mods)
     }
 
     pub fn handle_right_mouse_down(&mut self, pos: (u16, u16), mods: &Modifiers) -> bool {
         self.surface
-            .handle_right_mouse_down(&self.terminal, &self.io_tx, pos, mods)
+            .handle_right_mouse_down(&self.terminal, &self.io_notify, pos, mods)
     }
 
     pub fn handle_middle_mouse_down(&mut self, pos: (u16, u16), mods: &Modifiers) -> bool {
         self.surface
-            .handle_middle_mouse_down(&self.terminal, &self.io_tx, pos, mods)
+            .handle_middle_mouse_down(&self.terminal, &self.io_notify, pos, mods)
     }
 
     pub fn handle_left_mouse_up(&mut self, pos: Option<(u16, u16)>, mods: &Modifiers) -> bool {
         self.surface
-            .handle_left_mouse_up(&self.terminal, &self.io_tx, pos, mods)
+            .handle_left_mouse_up(&self.terminal, &self.io_notify, pos, mods)
     }
 
     pub fn handle_right_mouse_up(
@@ -455,12 +446,12 @@ impl TerminalSession {
         emit: &mut dyn FnMut(AppAction),
     ) -> bool {
         self.surface
-            .handle_right_mouse_up(&self.terminal, &self.io_tx, pos, mods, emit)
+            .handle_right_mouse_up(&self.terminal, &self.io_notify, pos, mods, emit)
     }
 
     pub fn handle_middle_mouse_up(&mut self, pos: (u16, u16), mods: &Modifiers) -> bool {
         self.surface
-            .handle_middle_mouse_up(&self.terminal, &self.io_tx, pos, mods)
+            .handle_middle_mouse_up(&self.terminal, &self.io_notify, pos, mods)
     }
 
     pub fn handle_mouse_move(
@@ -470,7 +461,7 @@ impl TerminalSession {
         mods: &Modifiers,
     ) -> bool {
         self.surface
-            .handle_mouse_move(&self.terminal, &self.io_tx, pos, pressed_button, mods)
+            .handle_mouse_move(&self.terminal, &self.io_notify, pos, pressed_button, mods)
     }
 
     pub fn handle_scroll_wheel(
@@ -483,7 +474,7 @@ impl TerminalSession {
     ) -> bool {
         self.surface.handle_scroll_wheel(
             &self.terminal,
-            &self.io_tx,
+            &self.io_notify,
             pos,
             delta,
             cell_height,
@@ -499,8 +490,8 @@ impl TerminalSession {
     ) -> bool {
         self.surface.handle_scroll_key(
             &self.terminal,
-            &self.io_tx,
-            &keystroke.key.to_lowercase(),
+            &self.io_notify,
+            &keystroke.key,
             &keystroke.modifiers,
             self.size.rows,
             emit,
@@ -521,21 +512,22 @@ impl Drop for TerminalSession {
         // 1. Send Close (blocking — must not be lost).
         //    IO thread receives Close, signals read thread, drains input, calls
         //    close_async on HPCON, then exits.
-        let _ = self.io_tx.send(IoMsg::Close);
+        self.io_notify.send_lossless(IoMsg::Close);
 
         // 2. Join read thread FIRST — it may still be draining conout or sending
-        //    device replies via io_tx. After this join, no more reads will arrive.
+        //    device replies through io_notify. After this join, no more reads arrive.
         if let Some(handle) = self.read_thread.take() {
-            let _ = handle.join();
+            let _ = handle.alert();
+            handle.join();
         }
 
-        // 3. Join IO thread. io_tx (our copy) is still live here, so io_rx won't
-        //    disconnect prematurely. IO thread already exited from Close handler.
+        // 3. Join IO thread. IO thread already exited from Close handling.
         if let Some(handle) = self.io_thread.take() {
-            let _ = handle.join();
+            let _ = handle.alert();
+            handle.join();
         }
 
-        // io_tx drops here → io_rx disconnects (IO thread already gone).
+        // io_notify drops here (IO thread already gone).
         // PtyWriter drops inside IO thread → Conpty::drop() joins close_thread → conin drops.
     }
 }

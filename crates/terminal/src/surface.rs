@@ -4,7 +4,7 @@ use ghostty_vt::{MouseMode, Terminal};
 use gpui::{Modifiers, ScrollDelta};
 
 use crate::input::{ENCODE_BUF_SIZE, encode_mouse_event};
-use crate::types::{INLINE_IO_BYTES_CAPACITY, IoMsg, ScrollOp};
+use crate::types::{IoMsg, IoThreadNotify, ScrollOp};
 
 #[derive(Debug, Clone)]
 pub enum AppAction {
@@ -44,7 +44,7 @@ impl TerminalSurface {
     pub fn handle_left_mouse_down(
         &mut self,
         terminal: &Arc<Mutex<Terminal>>,
-        io_tx: &crossbeam_channel::Sender<IoMsg>,
+        io_notify: &Arc<IoThreadNotify>,
         pos: (u16, u16),
         click_count: u8,
         mods: &Modifiers,
@@ -68,7 +68,7 @@ impl TerminalSurface {
             GestureTarget::Pty => {
                 self.drag_anchor = None;
                 self.left_click_count = 0;
-                Self::send_mouse_event(terminal, io_tx, 0, 0, mods, pos)
+                Self::send_mouse_event(terminal, io_notify, 0, 0, mods, pos)
             }
             GestureTarget::HostSelect { .. } => {
                 self.left_click_count = click_count;
@@ -103,7 +103,7 @@ impl TerminalSurface {
     pub fn handle_right_mouse_down(
         &mut self,
         terminal: &Arc<Mutex<Terminal>>,
-        io_tx: &crossbeam_channel::Sender<IoMsg>,
+        io_notify: &Arc<IoThreadNotify>,
         pos: (u16, u16),
         mods: &Modifiers,
     ) -> bool {
@@ -112,7 +112,7 @@ impl TerminalSurface {
             term.input_opts().mouse_event != MouseMode::None
         };
         if mouse_reporting && !mods.shift {
-            return Self::send_mouse_event(terminal, io_tx, 2, 0, mods, pos);
+            return Self::send_mouse_event(terminal, io_notify, 2, 0, mods, pos);
         }
         false
     }
@@ -120,23 +120,23 @@ impl TerminalSurface {
     pub fn handle_middle_mouse_down(
         &mut self,
         terminal: &Arc<Mutex<Terminal>>,
-        io_tx: &crossbeam_channel::Sender<IoMsg>,
+        io_notify: &Arc<IoThreadNotify>,
         pos: (u16, u16),
         mods: &Modifiers,
     ) -> bool {
-        Self::send_mouse_event(terminal, io_tx, 1, 0, mods, pos)
+        Self::send_mouse_event(terminal, io_notify, 1, 0, mods, pos)
     }
 
     pub fn handle_left_mouse_up(
         &mut self,
         terminal: &Arc<Mutex<Terminal>>,
-        io_tx: &crossbeam_channel::Sender<IoMsg>,
+        io_notify: &Arc<IoThreadNotify>,
         pos: Option<(u16, u16)>,
         mods: &Modifiers,
     ) -> bool {
         let consumed = match (self.gesture_target, pos) {
             (Some(GestureTarget::Pty), Some(pos)) => {
-                Self::send_mouse_event(terminal, io_tx, 0, 1, mods, pos)
+                Self::send_mouse_event(terminal, io_notify, 0, 1, mods, pos)
             }
             _ => false,
         };
@@ -149,7 +149,7 @@ impl TerminalSurface {
     pub fn handle_right_mouse_up(
         &mut self,
         terminal: &Arc<Mutex<Terminal>>,
-        io_tx: &crossbeam_channel::Sender<IoMsg>,
+        io_notify: &Arc<IoThreadNotify>,
         pos: Option<(u16, u16)>,
         mods: &Modifiers,
         emit: &mut dyn FnMut(AppAction),
@@ -160,7 +160,7 @@ impl TerminalSurface {
         };
 
         if mouse_reporting && !mods.shift {
-            return pos.is_some_and(|p| Self::send_mouse_event(terminal, io_tx, 2, 1, mods, p));
+            return pos.is_some_and(|p| Self::send_mouse_event(terminal, io_notify, 2, 1, mods, p));
         }
 
         let copied = {
@@ -183,17 +183,17 @@ impl TerminalSurface {
     pub fn handle_middle_mouse_up(
         &mut self,
         terminal: &Arc<Mutex<Terminal>>,
-        io_tx: &crossbeam_channel::Sender<IoMsg>,
+        io_notify: &Arc<IoThreadNotify>,
         pos: (u16, u16),
         mods: &Modifiers,
     ) -> bool {
-        Self::send_mouse_event(terminal, io_tx, 1, 1, mods, pos)
+        Self::send_mouse_event(terminal, io_notify, 1, 1, mods, pos)
     }
 
     pub fn handle_mouse_move(
         &mut self,
         terminal: &Arc<Mutex<Terminal>>,
-        io_tx: &crossbeam_channel::Sender<IoMsg>,
+        io_notify: &Arc<IoThreadNotify>,
         pos: (u16, u16),
         pressed_button: u8,
         mods: &Modifiers,
@@ -217,7 +217,7 @@ impl TerminalSurface {
                 }
                 false
             }
-            _ => Self::send_mouse_event(terminal, io_tx, pressed_button, 2, mods, pos),
+            _ => Self::send_mouse_event(terminal, io_notify, pressed_button, 2, mods, pos),
         }
     }
 
@@ -225,7 +225,7 @@ impl TerminalSurface {
     pub fn handle_scroll_wheel(
         &mut self,
         terminal: &Arc<Mutex<Terminal>>,
-        io_tx: &crossbeam_channel::Sender<IoMsg>,
+        io_notify: &Arc<IoThreadNotify>,
         pos: (u16, u16),
         delta: ScrollDelta,
         cell_height: f32,
@@ -283,7 +283,7 @@ impl TerminalSurface {
 
         if context.opts.mouse_event != MouseMode::None {
             for _ in 0..rows {
-                Self::send_mouse_event_with_opts(io_tx, context.opts, button, 0, mods, pos);
+                Self::send_mouse_event_with_opts(io_notify, context.opts, button, 0, mods, pos);
             }
             return notify;
         }
@@ -302,12 +302,15 @@ impl TerminalSurface {
             };
 
             for _ in 0..rows {
-                write_small_to_pty(io_tx, seq);
+                write_small_to_pty(io_notify, seq);
             }
             return true;
         }
 
-        queue_scroll(io_tx, ScrollOp::Delta(if scroll_up { -rows } else { rows }));
+        queue_scroll(
+            io_notify,
+            ScrollOp::Delta(if scroll_up { -rows } else { rows }),
+        );
         emit(AppAction::ViewportScrolled);
         notify = true;
         notify
@@ -316,7 +319,7 @@ impl TerminalSurface {
     pub fn handle_scroll_key(
         &mut self,
         terminal: &Arc<Mutex<Terminal>>,
-        io_tx: &crossbeam_channel::Sender<IoMsg>,
+        io_notify: &Arc<IoThreadNotify>,
         key: &str,
         mods: &Modifiers,
         page_rows: u16,
@@ -327,19 +330,25 @@ impl TerminalSurface {
             term.is_alternate_screen()
         };
         let scroll_op = match key {
-            "pageup" | "page_up" if mods.shift || !is_alternate_screen => Some(ScrollOp::Delta(
-                -(page_rows.saturating_sub(1).max(1) as i32),
-            )),
-            "pagedown" | "page_down" if mods.shift || !is_alternate_screen => {
+            k if (k.eq_ignore_ascii_case("pageup") || k.eq_ignore_ascii_case("page_up"))
+                && (mods.shift || !is_alternate_screen) =>
+            {
+                Some(ScrollOp::Delta(
+                    -(page_rows.saturating_sub(1).max(1) as i32),
+                ))
+            }
+            k if (k.eq_ignore_ascii_case("pagedown") || k.eq_ignore_ascii_case("page_down"))
+                && (mods.shift || !is_alternate_screen) =>
+            {
                 Some(ScrollOp::Delta(page_rows.saturating_sub(1).max(1) as i32))
             }
-            "home" if mods.shift => Some(ScrollOp::Top),
-            "end" if mods.shift => Some(ScrollOp::Bottom),
+            k if k.eq_ignore_ascii_case("home") && mods.shift => Some(ScrollOp::Top),
+            k if k.eq_ignore_ascii_case("end") && mods.shift => Some(ScrollOp::Bottom),
             _ => None,
         };
 
         if let Some(op) = scroll_op {
-            queue_scroll(io_tx, op);
+            queue_scroll(io_notify, op);
             emit(AppAction::ViewportScrolled);
             return true;
         }
@@ -349,7 +358,7 @@ impl TerminalSurface {
 
     fn send_mouse_event(
         terminal: &Arc<Mutex<Terminal>>,
-        io_tx: &crossbeam_channel::Sender<IoMsg>,
+        io_notify: &Arc<IoThreadNotify>,
         button: u8,
         action: u8,
         mods: &Modifiers,
@@ -359,11 +368,11 @@ impl TerminalSurface {
             let term = lock_terminal(terminal);
             term.input_opts()
         };
-        Self::send_mouse_event_with_opts(io_tx, opts, button, action, mods, pos)
+        Self::send_mouse_event_with_opts(io_notify, opts, button, action, mods, pos)
     }
 
     fn send_mouse_event_with_opts(
-        io_tx: &crossbeam_channel::Sender<IoMsg>,
+        io_notify: &Arc<IoThreadNotify>,
         opts: ghostty_vt::InputOpts,
         button: u8,
         action: u8,
@@ -382,7 +391,7 @@ impl TerminalSurface {
             pos.1,
             &mut buf,
         ) {
-            write_small_to_pty(io_tx, bytes);
+            write_small_to_pty(io_notify, bytes);
             true
         } else {
             false
@@ -401,25 +410,12 @@ fn lock_terminal(terminal: &Arc<Mutex<Terminal>>) -> MutexGuard<'_, Terminal> {
     terminal.lock().expect("terminal mutex poisoned")
 }
 
-fn write_small_to_pty(io_tx: &crossbeam_channel::Sender<IoMsg>, data: &[u8]) {
-    if data.len() > INLINE_IO_BYTES_CAPACITY {
-        io_tx
-            .try_send(IoMsg::Input(bytes::Bytes::copy_from_slice(data)))
-            .ok();
-        return;
-    }
-    let mut buf = [0; INLINE_IO_BYTES_CAPACITY];
-    buf[..data.len()].copy_from_slice(data);
-    io_tx
-        .try_send(IoMsg::InputInline {
-            len: data.len() as u8,
-            buf,
-        })
-        .ok();
+fn write_small_to_pty(io_notify: &Arc<IoThreadNotify>, data: &[u8]) {
+    io_notify.try_send_input_small(data);
 }
 
-fn queue_scroll(io_tx: &crossbeam_channel::Sender<IoMsg>, op: ScrollOp) {
-    io_tx.try_send(IoMsg::Scroll(op)).ok();
+fn queue_scroll(io_notify: &Arc<IoThreadNotify>, op: ScrollOp) {
+    let _ = io_notify.try_send(IoMsg::Scroll(op));
 }
 
 fn normalize_click_count(click_count: u8) -> u8 {

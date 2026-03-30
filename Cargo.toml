@@ -18,6 +18,7 @@ edition = "2024"
 log = "0.4.29"
 async-channel = "2.5.0"
 crossbeam-channel = "0.5.15"
+crossbeam-queue = "0.3.12"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 rapidhash = "4.4.0"
 

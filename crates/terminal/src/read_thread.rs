@@ -1,317 +1,553 @@
-/// Read thread — the hot path.
+/// Read thread — hot output path.
 ///
-/// Owns `conout`, the child process handle, and the raw HPCON (for resize).
-/// Issues double-buffered overlapped reads and calls `terminal.feed()` inline,
-/// eliminating the channel crossing + allocation that the v1 architecture paid
-/// on every byte of PTY output.
+/// Owns `conout`, child process handle, and raw HPCON resize access.
+/// Uses `NtReadFile` + APC completion with a 4-buffer pipeline.
 ///
-/// Architecture mirrors Ghostty's `Exec.zig` / Windows Terminal's
-/// `ConptyConnection` overlapped loop.
+/// Main loop shape:
+/// 1) arm idle read buffers,
+/// 2) alertable wait (`NtDelayExecution`),
+/// 3) harvest completed buffers,
+/// 4) process resize/close signals from IO thread.
 use std::io;
 use std::os::windows::process::ExitStatusExt;
 use std::process::ExitStatus;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use async_channel::Sender;
-
 use bytes::Bytes;
 use ghostty_vt::{Terminal, VtEvent};
 use pty::{PtyReader, WindowSize};
+use windows_sys::Win32::Foundation::HANDLE;
 
-use crate::types::{IoEvent, IoMsg, READ_NOTIFY_KEY, ReadThreadNotify};
-
-// Windows APIs
-use windows_sys::Win32::Foundation::{
-    ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED, HANDLE, WAIT_TIMEOUT,
+use crate::platform::windows::io::{AsyncIo, alertable_wait, async_read, cancel_io};
+use crate::platform::windows::ntdll::{
+    NtQueryInformationProcess, PROCESS_INFORMATION_CLASS_BASIC_INFORMATION,
+    ProcessBasicInformation, STATUS_ALERTED, STATUS_CANCELLED, STATUS_END_OF_FILE, STATUS_PENDING,
+    STATUS_PIPE_BROKEN, STATUS_SUCCESS, STATUS_USER_APC,
 };
-use windows_sys::Win32::System::IO::{
-    CancelIoEx, CreateIoCompletionPort, GetOverlappedResult, GetQueuedCompletionStatusEx,
-    OVERLAPPED, OVERLAPPED_ENTRY, PostQueuedCompletionStatus,
-};
-use windows_sys::Win32::System::Threading::{GetExitCodeProcess, INFINITE};
+use crate::platform::windows::thread::{PlatformThread, set_current_thread_name};
+use crate::types::{IoEvent, IoMsg, IoThreadNotify, ReadThreadNotify};
 
-const FILE_SKIP_COMPLETION_PORT_ON_SUCCESS: u8 = 0x1;
-
-#[link(name = "Kernel32")]
-unsafe extern "system" {
-    fn SetFileCompletionNotificationModes(handle: HANDLE, flags: u8) -> i32;
-}
-
-// Two 64 KiB read buffers — heap-allocated, alternating roles.
-// Windows Terminal uses the same size; large enough to amortize per-read
-// overhead without wasting too much stack/heap on each session.
+const NUM_READ_BUFS: usize = 4;
 const READ_BUF_SIZE: usize = 64 * 1024;
-
-/// Maximum number of IOCP completions to drain per poll.
-const IOCP_BATCH_SIZE: usize = 128;
-const IOCP_DRAIN_BATCH: usize = 8;
-
-// Graceful shutdown timeout: if conout doesn't reach EOF within this
-// duration after `closing` is set, force-terminate the child.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Buffer state machine
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// State for one read buffer in the APC pipeline.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum BufState {
     Idle,
-    Pending,
+    InFlight,
 }
 
 struct ReadBuf {
     data: Box<[u8; READ_BUF_SIZE]>,
-    overlapped: OVERLAPPED,
+    io: AsyncIo,
     state: BufState,
+    seq: u64,
 }
 
 impl ReadBuf {
     fn new() -> Self {
-        let overlapped = unsafe { std::mem::zeroed::<OVERLAPPED>() };
         Self {
             data: Box::new([0u8; READ_BUF_SIZE]),
-            overlapped,
+            io: AsyncIo::new(),
             state: BufState::Idle,
+            seq: 0,
         }
     }
 }
 
-/// Outcome of issuing a `ReadFile` call.
-///
-/// `ReadFile` on an overlapped pipe can complete synchronously — the kernel
-/// may return the data immediately but still post a completion to IOCP.
-enum ReadStart {
-    /// IO posted; completion will arrive via IOCP.
-    Pending,
-    /// Pipe closed / EOF.
-    Eof,
-    /// Unrecoverable IO error.
-    Err(io::Error),
-}
-
 struct ReadThreadState {
-    bufs: [ReadBuf; 2],
-    /// `true` once the IO thread has signaled shutdown via `notify.closing`.
+    bufs: [ReadBuf; NUM_READ_BUFS],
     draining: bool,
-    /// Deadline for graceful drain-to-EOF; if expired, force-terminate child.
     shutdown_deadline: Option<Instant>,
-    /// Sync-output state cached from the previous iteration.
-    /// Used to detect the `false → true` edge (triggers `StartSyncOutput`).
     was_synchronized: bool,
-    /// Exit status captured when EOF is observed.
     exit_status: Option<ExitStatus>,
-    /// Reusable buffer for `drain_events()` — avoids per-read allocation.
     vt_event_buf: Vec<VtEvent>,
+    next_issue_seq: u64,
+    next_harvest_seq: u64,
+    saw_eof: bool,
+    forced_terminate: bool,
 }
 
-pub fn spawn(
+/// Context passed through `NtCreateThreadEx` start routine.
+struct ReadThreadContext {
     reader: PtyReader,
     terminal: Arc<Mutex<Terminal>>,
     notify: Arc<ReadThreadNotify>,
-    io_tx: crossbeam_channel::Sender<IoMsg>,
+    io_notify: Arc<IoThreadNotify>,
     signal_tx: Sender<()>,
     event_tx: Sender<IoEvent>,
-) -> JoinHandle<()> {
-    std::thread::Builder::new()
-        .name("pty-read".into())
-        .spawn(move || {
-            read_loop(reader, terminal, notify, io_tx, signal_tx, event_tx);
-        })
-        .expect("failed to spawn read thread")
 }
 
-/// The Main Read loop
+pub fn spawn_suspended(
+    reader: PtyReader,
+    terminal: Arc<Mutex<Terminal>>,
+    notify: Arc<ReadThreadNotify>,
+    io_notify: Arc<IoThreadNotify>,
+    signal_tx: Sender<()>,
+    event_tx: Sender<IoEvent>,
+) -> io::Result<PlatformThread> {
+    let ctx = Box::new(ReadThreadContext {
+        reader,
+        terminal,
+        notify,
+        io_notify,
+        signal_tx,
+        event_tx,
+    });
+    let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
+    match PlatformThread::spawn_suspended(read_thread_entry, ctx_ptr) {
+        Ok(thread) => Ok(thread),
+        Err(err) => {
+            // SAFETY: ctx_ptr was produced by Box::into_raw above.
+            unsafe {
+                drop(Box::from_raw(ctx_ptr as *mut ReadThreadContext));
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Ntdll thread entry trampoline.
+unsafe extern "system" fn read_thread_entry(context: *mut std::ffi::c_void) -> u32 {
+    set_current_thread_name("pty-read");
+    // SAFETY: context comes from Box::into_raw in spawn_suspended.
+    let ctx = unsafe { Box::from_raw(context as *mut ReadThreadContext) };
+    read_loop(
+        ctx.reader,
+        ctx.terminal,
+        ctx.notify,
+        ctx.io_notify,
+        ctx.signal_tx,
+        ctx.event_tx,
+    );
+    0
+}
+
+/// Main read loop.
+///
+/// Keeps multiple reads in flight and dispatches VT side effects inline to
+/// avoid extra allocations and cross-thread copies on terminal output.
 fn read_loop(
     reader: PtyReader,
     terminal: Arc<Mutex<Terminal>>,
     notify: Arc<ReadThreadNotify>,
-    io_tx: crossbeam_channel::Sender<IoMsg>,
+    io_notify: Arc<IoThreadNotify>,
     signal_tx: Sender<()>,
     event_tx: Sender<IoEvent>,
 ) {
     let conout = reader.conout.raw();
     let child_handle = reader.child.handle();
 
-    // Associate conout with the session IOCP.
-    let assoc = unsafe { CreateIoCompletionPort(conout, notify.iocp, 0, 0) };
-    if assoc.is_null() {
-        let err = io::Error::last_os_error();
-        log::error!("read_thread: CreateIoCompletionPort failed: {err}");
-        let _ = event_tx.send_blocking(IoEvent::Error(err.to_string()));
-        return;
-    }
-    // Ensure synchronous ReadFile completions do NOT post to IOCP; we manually
-    // enqueue those so the main loop has a single completion path.
-    let sfnm_ok =
-        unsafe { SetFileCompletionNotificationModes(conout, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) }
-            != 0;
-    if !sfnm_ok {
-        let err = io::Error::last_os_error();
-        log::warn!("read_thread: SetFileCompletionNotificationModes failed: {err}");
-    }
-
     let mut state = ReadThreadState {
-        bufs: [ReadBuf::new(), ReadBuf::new()],
+        bufs: std::array::from_fn(|_| ReadBuf::new()),
         draining: false,
         shutdown_deadline: None,
         was_synchronized: false,
         exit_status: None,
         vt_event_buf: Vec::new(),
+        next_issue_seq: 0,
+        next_harvest_seq: 0,
+        saw_eof: false,
+        forced_terminate: false,
     };
 
-    // Issue initial reads on both buffers.
-    // Invariant: we keep two reads in flight at all times (when not draining),
-    // so IO and terminal processing stay overlapped.
-    for buf in &mut state.bufs {
-        match start_read(conout, notify.iocp, buf) {
-            ReadStart::Pending => {}
-            ReadStart::Eof => {
-                emit_exit(&mut state, child_handle, &event_tx, &signal_tx);
-                cleanup(&mut state, conout, notify.iocp);
-                return;
-            }
-            ReadStart::Err(e) => {
-                log::error!("read_thread: initial ReadFile failed: {e}");
-                let _ = event_tx.send_blocking(IoEvent::Error(e.to_string()));
-                cleanup(&mut state, conout, notify.iocp);
-                return;
+    loop {
+        if !state.saw_eof {
+            match arm_idle_reads(conout, &mut state, &event_tx) {
+                ArmResult::Continue => {}
+                ArmResult::Eof => state.saw_eof = true,
+                ArmResult::Error => break,
             }
         }
-    }
 
-    let mut entries: [OVERLAPPED_ENTRY; IOCP_BATCH_SIZE] = unsafe { std::mem::zeroed() };
+        // Fast path: if any completion APC already ran while arming reads,
+        // harvest before entering the next alertable wait.
+        if handle_harvest_result(
+            harvest_done_buffers(&mut state, &terminal, &io_notify, &signal_tx, &event_tx),
+            &mut state,
+            child_handle,
+            &event_tx,
+            &signal_tx,
+        ) {
+            break;
+        }
 
-    // ── Main IOCP loop ────────────────────────────────────────────────────────
-    'main: loop {
-        // Compute timeout for graceful-shutdown deadline.
-        let timeout_ms: u32 = match state.shutdown_deadline {
-            Some(deadline) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                // Clamp to u32::MAX ms (≈ 49 days) — practically never hit.
-                remaining.as_millis().min(u32::MAX as u128) as u32
+        if state.saw_eof && count_inflight(&state) == 0 {
+            emit_exit(&mut state, child_handle, &event_tx, &signal_tx);
+            break;
+        }
+
+        if let Some(deadline) = state.shutdown_deadline
+            && Instant::now() >= deadline
+        {
+            if !state.forced_terminate {
+                log::warn!("read_thread: shutdown deadline expired, force-terminating child");
+                reader.child.terminate();
+                state.forced_terminate = true;
             }
-            None => INFINITE,
-        };
+            state.shutdown_deadline = None;
+        }
 
-        let mut count: u32 = 0;
-        let ok = unsafe {
-            GetQueuedCompletionStatusEx(
-                notify.iocp,
-                entries.as_mut_ptr(),
-                IOCP_BATCH_SIZE as u32,
-                &mut count,
-                timeout_ms,
-                0,
+        let wake_status = alertable_wait(timeout_100ns(state.shutdown_deadline));
+        if wake_status != STATUS_SUCCESS
+            && wake_status != STATUS_ALERTED
+            && wake_status != STATUS_USER_APC
+        {
+            log::warn!("read_thread: unexpected NtDelayExecution status=0x{wake_status:08X}");
+        }
+
+        if handle_harvest_result(
+            harvest_done_buffers(&mut state, &terminal, &io_notify, &signal_tx, &event_tx),
+            &mut state,
+            child_handle,
+            &event_tx,
+            &signal_tx,
+        ) {
+            break;
+        }
+
+        if notify.closing.load(std::sync::atomic::Ordering::Acquire) && !state.draining {
+            state.draining = true;
+            state.shutdown_deadline = Some(Instant::now() + SHUTDOWN_TIMEOUT);
+        }
+
+        if let Some(size) = notify.take_resize()
+            && !state.draining
+            && handle_harvest_result(
+                handle_resize(
+                    size, conout, &reader, &mut state, &terminal, &notify, &io_notify, &signal_tx,
+                    &event_tx,
+                ),
+                &mut state,
+                child_handle,
+                &event_tx,
+                &signal_tx,
             )
-        };
-
-        if ok == 0 {
-            let err = io::Error::last_os_error();
-            if err
-                .raw_os_error()
-                .map(|c| c as u32)
-                .is_some_and(|c| c == WAIT_TIMEOUT)
-            {
-                if state.draining {
-                    log::warn!("read_thread: shutdown deadline expired, force-terminating child");
-                    reader.child.terminate();
-                    state.shutdown_deadline = None; // stop re-firing the timeout
-                }
-                continue;
-            }
-            log::error!("read_thread: GetQueuedCompletionStatusEx failed: {err}");
-            let _ = event_tx.send_blocking(IoEvent::Error(err.to_string()));
-            break 'main;
-        }
-
-        for i in 0..count {
-            let entry = entries[i as usize];
-            if entry.lpCompletionKey == READ_NOTIFY_KEY {
-                if notify.closing.load(Ordering::Acquire) && !state.draining {
-                    state.draining = true;
-                    state.shutdown_deadline = Some(Instant::now() + SHUTDOWN_TIMEOUT);
-                }
-
-                if let Some(size) = notify.take_resize()
-                    && !state.draining
-                {
-                    handle_resize(
-                        size, conout, &mut state, &reader, &terminal, &notify, &io_tx, &signal_tx,
-                        &event_tx,
-                    );
-                }
-                continue;
-            }
-
-            let overlapped = entry.lpOverlapped;
-            if overlapped.is_null() {
-                continue;
-            }
-
-            let buf_index = if std::ptr::eq(overlapped, &state.bufs[0].overlapped) {
-                0
-            } else if std::ptr::eq(overlapped, &state.bufs[1].overlapped) {
-                1
-            } else {
-                continue;
-            };
-
-            state.bufs[buf_index].state = BufState::Idle;
-            match get_overlapped_result_iocp(
-                conout,
-                &state.bufs[buf_index].overlapped,
-                entry.dwNumberOfBytesTransferred,
-            ) {
-                Ok(0) => {
-                    emit_exit(&mut state, child_handle, &event_tx, &signal_tx);
-                    break 'main;
-                }
-                Ok(n) => {
-                    feed_and_dispatch(
-                        &state.bufs[buf_index].data[..n as usize],
-                        &mut state.was_synchronized,
-                        state.draining,
-                        &mut state.vt_event_buf,
-                        &terminal,
-                        &io_tx,
-                        &signal_tx,
-                        &event_tx,
-                    );
-                }
-                Err(e) if is_broken_pipe(&e) => {
-                    emit_exit(&mut state, child_handle, &event_tx, &signal_tx);
-                    break 'main;
-                }
-                Err(e) => {
-                    log::error!("read_thread: read completion failed: {e}");
-                    let _ = event_tx.send_blocking(IoEvent::Error(e.to_string()));
-                    break 'main;
-                }
-            }
-
-            match start_read(conout, notify.iocp, &mut state.bufs[buf_index]) {
-                ReadStart::Pending => {}
-                ReadStart::Eof => {
-                    emit_exit(&mut state, child_handle, &event_tx, &signal_tx);
-                    break 'main;
-                }
-                ReadStart::Err(e) => {
-                    log::error!("read_thread: ReadFile failed: {e}");
-                    let _ = event_tx.send_blocking(IoEvent::Error(e.to_string()));
-                    break 'main;
-                }
-            }
+        {
+            break;
         }
     }
 
-    cleanup(&mut state, conout, notify.iocp);
-    // `reader` drops here — OwnedHandle(conout) and child handle are closed.
+    cleanup(&mut state, conout);
 }
 
-/// Feed `bytes` into the terminal, drain VT events, dispatch to channels,
-/// and signal the renderer. Called from both the hot read path and the
-/// resize-harvest path so that neither loses side effects.
+// ─── Arm / Harvest ───────────────────────────────────────────────────────────
+
+/// Start reads on all idle buffers.
+///
+/// For stream correctness we attach a monotonic sequence number to each
+/// issued buffer and harvest completions strictly in sequence order.
+enum ArmResult {
+    Continue,
+    Eof,
+    Error,
+}
+
+fn arm_idle_reads(
+    conout: HANDLE,
+    state: &mut ReadThreadState,
+    event_tx: &Sender<IoEvent>,
+) -> ArmResult {
+    for buf in state.bufs.iter_mut() {
+        if buf.state != BufState::Idle {
+            continue;
+        }
+        let status = unsafe {
+            async_read(
+                conout,
+                &mut buf.io,
+                buf.data.as_mut_ptr(),
+                READ_BUF_SIZE as u32,
+            )
+        };
+        match status {
+            STATUS_SUCCESS | STATUS_PENDING => {
+                buf.state = BufState::InFlight;
+                buf.seq = state.next_issue_seq;
+                state.next_issue_seq = state.next_issue_seq.wrapping_add(1);
+            }
+            STATUS_END_OF_FILE | STATUS_PIPE_BROKEN => return ArmResult::Eof,
+            _ => {
+                log::error!("read_thread: NtReadFile failed: 0x{status:08X}");
+                let _ = event_tx
+                    .send_blocking(IoEvent::Error(format!("NtReadFile failed: 0x{status:08X}")));
+                return ArmResult::Error;
+            }
+        }
+    }
+    ArmResult::Continue
+}
+
+enum Harvest {
+    Continue,
+    Eof,
+    Error,
+}
+
+enum DrainMode<'a> {
+    Dispatch {
+        terminal: &'a Arc<Mutex<Terminal>>,
+        io_notify: &'a Arc<IoThreadNotify>,
+        signal_tx: &'a Sender<()>,
+        event_tx: &'a Sender<IoEvent>,
+    },
+    Silent,
+}
+
+/// Consume completed buffers in stream order.
+///
+/// Finds the buffer with `seq == next_harvest_seq` and checks its `done`
+/// flag (set by the APC callback). With 4 buffers the scan is trivial.
+#[allow(clippy::too_many_arguments)]
+fn harvest_done_buffers(
+    state: &mut ReadThreadState,
+    terminal: &Arc<Mutex<Terminal>>,
+    io_notify: &Arc<IoThreadNotify>,
+    signal_tx: &Sender<()>,
+    event_tx: &Sender<IoEvent>,
+) -> Harvest {
+    harvest_buffers(state, terminal, io_notify, signal_tx, event_tx, |buf| {
+        buf.io.done
+    })
+}
+
+/// Consume completed buffers in stream order for cancellation-drain paths.
+///
+/// During cancellation we accept either APC completion (`io.done`) or
+/// IOSB transition away from `STATUS_PENDING` to avoid deadlock when APC
+/// delivery races with cancellation.
+#[allow(clippy::too_many_arguments)]
+fn harvest_cancel_visible_buffers(
+    state: &mut ReadThreadState,
+    terminal: &Arc<Mutex<Terminal>>,
+    io_notify: &Arc<IoThreadNotify>,
+    signal_tx: &Sender<()>,
+    event_tx: &Sender<IoEvent>,
+) -> Harvest {
+    harvest_buffers(
+        state,
+        terminal,
+        io_notify,
+        signal_tx,
+        event_tx,
+        is_completion_visible,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn harvest_buffers(
+    state: &mut ReadThreadState,
+    terminal: &Arc<Mutex<Terminal>>,
+    io_notify: &Arc<IoThreadNotify>,
+    signal_tx: &Sender<()>,
+    event_tx: &Sender<IoEvent>,
+    is_ready: fn(&ReadBuf) -> bool,
+) -> Harvest {
+    loop {
+        let idx = state
+            .bufs
+            .iter()
+            .position(|buf| buf.state == BufState::InFlight && buf.seq == state.next_harvest_seq);
+        let Some(idx) = idx else { break };
+
+        if !is_ready(&state.bufs[idx]) {
+            break;
+        }
+
+        let status = state.bufs[idx].io.iosb.status();
+        let bytes = state.bufs[idx].io.iosb.information;
+
+        match status {
+            STATUS_SUCCESS if bytes > 0 => {
+                if bytes > READ_BUF_SIZE {
+                    log::error!("read_thread: invalid byte count from IOSB: {bytes}");
+                    let _ = event_tx.send_blocking(IoEvent::Error(format!(
+                        "invalid NtReadFile byte count: {bytes}"
+                    )));
+                    return Harvest::Error;
+                }
+                feed_and_dispatch(
+                    &state.bufs[idx].data[..bytes],
+                    &mut state.was_synchronized,
+                    state.draining,
+                    &mut state.vt_event_buf,
+                    terminal,
+                    io_notify,
+                    signal_tx,
+                    event_tx,
+                );
+            }
+            STATUS_SUCCESS => {}
+            STATUS_END_OF_FILE | STATUS_PIPE_BROKEN => return Harvest::Eof,
+            STATUS_CANCELLED => {}
+            _ => {
+                log::error!("read_thread: read completion failed: 0x{status:08X}");
+                let _ = event_tx.send_blocking(IoEvent::Error(format!(
+                    "NtReadFile completion failed: 0x{status:08X}"
+                )));
+                return Harvest::Error;
+            }
+        }
+
+        state.bufs[idx].state = BufState::Idle;
+        state.bufs[idx].seq = 0;
+        state.next_harvest_seq = state.next_harvest_seq.wrapping_add(1);
+    }
+
+    Harvest::Continue
+}
+
+// ─── Resize / Cleanup ────────────────────────────────────────────────────────
+
+/// Resize path:
+/// Cancel in-flight reads, drain completions, resize ConPTY + terminal grid.
+#[allow(clippy::too_many_arguments)]
+fn handle_resize(
+    size: WindowSize,
+    conout: HANDLE,
+    reader: &PtyReader,
+    state: &mut ReadThreadState,
+    terminal: &Arc<Mutex<Terminal>>,
+    notify: &Arc<ReadThreadNotify>,
+    io_notify: &Arc<IoThreadNotify>,
+    signal_tx: &Sender<()>,
+    event_tx: &Sender<IoEvent>,
+) -> Harvest {
+    cancel_inflight(state, conout);
+    match drain_cancelled(
+        state,
+        DrainMode::Dispatch {
+            terminal,
+            io_notify,
+            signal_tx,
+            event_tx,
+        },
+    ) {
+        Harvest::Continue => {}
+        other => return other,
+    }
+
+    {
+        let _guard = notify.hpcon_op.lock().unwrap();
+        if !notify.closing.load(std::sync::atomic::Ordering::Acquire) {
+            let coord = windows_sys::Win32::System::Console::COORD {
+                X: size.num_cols as i16,
+                Y: size.num_lines as i16,
+            };
+            let _ = unsafe { (reader.resize_fn)(reader.hpcon, coord) };
+        }
+    }
+
+    {
+        let mut term = terminal.lock().expect("terminal mutex poisoned");
+        term.set_cell_size(size.cell_width, size.cell_height);
+        term.resize(size.num_cols, size.num_lines);
+    }
+    signal_tx.try_send(()).ok();
+    Harvest::Continue
+}
+
+/// Cancel all in-flight reads.
+fn cancel_inflight(state: &mut ReadThreadState, conout: HANDLE) {
+    for buf in &mut state.bufs {
+        if buf.state == BufState::InFlight {
+            let _ = unsafe { cancel_io(conout, &buf.io.iosb) };
+        }
+    }
+}
+
+/// Cancel all in-flight reads and wait for their APC completions.
+fn cleanup(state: &mut ReadThreadState, conout: HANDLE) {
+    cancel_inflight(state, conout);
+    let _ = drain_cancelled(state, DrainMode::Silent);
+}
+
+/// Drain cancelled in-flight reads, feeding any data that arrived before
+/// cancellation took effect through the normal harvest pipeline.
+fn drain_cancelled(state: &mut ReadThreadState, mode: DrainMode<'_>) -> Harvest {
+    loop {
+        let before = count_inflight(state);
+        if before == 0 {
+            return Harvest::Continue;
+        }
+
+        let result = match &mode {
+            DrainMode::Dispatch {
+                terminal,
+                io_notify,
+                signal_tx,
+                event_tx,
+            } => harvest_cancel_visible_buffers(state, terminal, io_notify, signal_tx, event_tx),
+            DrainMode::Silent => {
+                retire_cancel_visible_inflight(state);
+                Harvest::Continue
+            }
+        };
+
+        match result {
+            Harvest::Continue => {}
+            other => return other,
+        }
+
+        let after = count_inflight(state);
+        if after == 0 {
+            return Harvest::Continue;
+        }
+
+        if after == before {
+            let _ = alertable_wait(-100_000); // 10ms
+        }
+    }
+}
+
+/// Retire cancellation-visible in-flight buffers without terminal dispatch.
+fn retire_cancel_visible_inflight(state: &mut ReadThreadState) {
+    for buf in &mut state.bufs {
+        if buf.state == BufState::InFlight && is_completion_visible(buf) {
+            buf.state = BufState::Idle;
+            buf.seq = 0;
+        }
+    }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fn count_inflight(state: &ReadThreadState) -> usize {
+    state
+        .bufs
+        .iter()
+        .filter(|buf| buf.state == BufState::InFlight)
+        .count()
+}
+
+/// A buffer's completion is visible if the APC callback set `done`,
+/// or if the IOSB has transitioned away from `STATUS_PENDING` (which
+/// can happen during cancellation when the APC delivery is lost).
+fn is_completion_visible(buf: &ReadBuf) -> bool {
+    buf.io.done || buf.io.iosb.status() != STATUS_PENDING
+}
+
+fn handle_harvest_result(
+    result: Harvest,
+    state: &mut ReadThreadState,
+    child_handle: HANDLE,
+    event_tx: &Sender<IoEvent>,
+    signal_tx: &Sender<()>,
+) -> bool {
+    match result {
+        Harvest::Continue => false,
+        Harvest::Eof => {
+            emit_exit(state, child_handle, event_tx, signal_tx);
+            true
+        }
+        Harvest::Error => true,
+    }
+}
+
+/// Feed bytes into terminal, dispatch VT side effects, and wake renderer.
 #[allow(clippy::too_many_arguments)]
 fn feed_and_dispatch(
     bytes: &[u8],
@@ -319,31 +555,26 @@ fn feed_and_dispatch(
     draining: bool,
     vt_event_buf: &mut Vec<VtEvent>,
     terminal: &Arc<Mutex<Terminal>>,
-    io_tx: &crossbeam_channel::Sender<IoMsg>,
+    io_notify: &Arc<IoThreadNotify>,
     signal_tx: &Sender<()>,
     event_tx: &Sender<IoEvent>,
 ) {
-    // ── Lock terminal, feed, drain ────────────────────────────────────────────
     let (sync_before, sync_after) = {
         let mut term = terminal.lock().expect("terminal mutex poisoned");
         let sync_before = *was_synchronized;
         term.feed(bytes);
-        let sync_after = term.is_synchronized_output();
         term.drain_events(vt_event_buf);
+        let sync_after = term.is_synchronized_output();
         (sync_before, sync_after)
     };
+
     *was_synchronized = sync_after;
 
-    // ── Dispatch VT events ────────────────────────────────────────────────────
-    // drain(..) moves owned values out of the vec, avoiding extra clones while
-    // preserving the backing allocation for reuse on the next call.
     for event in vt_event_buf.drain(..) {
         match event {
             VtEvent::DeviceResponse(bytes) => {
-                // Blocking send: device responses are protocol-critical and must
-                // not be dropped. Suppress only when draining (IO thread may be gone).
                 if !draining {
-                    io_tx.send(IoMsg::Reply(Bytes::from(bytes))).ok();
+                    io_notify.send_lossless(IoMsg::Reply(Bytes::from(bytes)));
                 }
             }
             VtEvent::Bell => {
@@ -355,325 +586,41 @@ fn feed_and_dispatch(
         }
     }
 
-    // ── Sync-output edge detection ────────────────────────────────────────────
-    // false → true edge: tell IO thread to arm the 1-second safety timer.
-    // Blocking send: missing StartSyncOutput can permanently freeze the terminal.
     if !sync_before && sync_after && !draining {
-        io_tx.send(IoMsg::StartSyncOutput).ok();
+        io_notify.send_lossless(IoMsg::StartSyncOutput);
     }
 
-    // ── Signal renderer ───────────────────────────────────────────────────────
-    // Skip while synchronized (don't render partial frames).
     if !sync_after {
         signal_tx.try_send(()).ok();
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_resize(
-    size: WindowSize,
-    conout: HANDLE,
-    state: &mut ReadThreadState,
-    reader: &PtyReader,
-    terminal: &Arc<Mutex<Terminal>>,
-    notify: &Arc<ReadThreadNotify>,
-    io_tx: &crossbeam_channel::Sender<IoMsg>,
-    signal_tx: &Sender<()>,
-    event_tx: &Sender<IoEvent>,
-) {
-    // Cancel all in-flight overlapped reads.
-    for buf in &mut state.bufs {
-        if buf.state == BufState::Pending {
-            // ERROR_NOT_FOUND is expected if the IO already completed inline.
-            unsafe { CancelIoEx(conout, &buf.overlapped as *const _ as *mut _) };
-        }
-    }
-
-    // Non-blocking harvest: do NOT wait here. Blocking can deadlock if the IOCP
-    // completion is still queued but not yet delivered.
-    for i in 0..state.bufs.len() {
-        if state.bufs[i].state != BufState::Pending {
-            continue;
-        }
-        let mut bytes: u32 = 0;
-        let ok = unsafe {
-            GetOverlappedResult(
-                conout,
-                &state.bufs[i].overlapped as *const _ as *mut _,
-                &mut bytes,
-                0, // bWait = FALSE
-            )
-        };
-        if ok != 0 {
-            if bytes > 0 {
-                // Data arrived before the cancel took effect — feed through the
-                // full pipeline so Bell/Title/Reply/sync state are not lost.
-                feed_and_dispatch(
-                    &state.bufs[i].data[..bytes as usize],
-                    &mut state.was_synchronized,
-                    state.draining,
-                    &mut state.vt_event_buf,
-                    terminal,
-                    io_tx,
-                    signal_tx,
-                    event_tx,
-                );
-            }
-            // bytes == 0: EOF during harvest — ignore, the main loop will see it.
-        } else {
-            let e = io::Error::last_os_error();
-            let code = e.raw_os_error().unwrap_or(0) as u32;
-            if code != ERROR_OPERATION_ABORTED
-                && code != windows_sys::Win32::Foundation::ERROR_IO_INCOMPLETE
-                && !is_broken_pipe(&e)
-            {
-                log::warn!("read_thread: harvest after cancel: {e}");
-            }
-        }
-        state.bufs[i].state = BufState::Idle;
-    }
-
-    // Drain queued completions before reusing the OVERLAPPED structs.
-    drain_iocp_for_buffers(
-        conout,
-        notify.iocp,
-        state,
-        Some(notify),
-        Some(terminal),
-        Some(io_tx),
-        Some(signal_tx),
-        Some(event_tx),
-    );
-
-    // Resize ConPTY under hpcon_op to serialize with the IO thread's close path.
-    {
-        let _guard = notify.hpcon_op.lock().unwrap();
-        if !notify.closing.load(Ordering::Acquire) {
-            let coord = windows_sys::Win32::System::Console::COORD {
-                X: size.num_cols as i16,
-                Y: size.num_lines as i16,
-            };
-            // SAFETY: resize_fn and hpcon are valid for the lifetime of PtyReader.
-            // hpcon_op serializes this against ClosePseudoConsole.
-            let _ = unsafe { (reader.resize_fn)(reader.hpcon, coord) };
-        }
-    }
-
-    // Update terminal grid dimensions.
-    {
-        let mut term = terminal.lock().expect("terminal mutex poisoned");
-        term.set_cell_size(size.cell_width, size.cell_height);
-        term.resize(size.num_cols, size.num_lines);
-    }
-
-    signal_tx.try_send(()).ok();
-
-    // Re-arm reads on both buffers. Both bufs are Idle here (harvested above).
-    for buf in &mut state.bufs {
-        match start_read(conout, notify.iocp, buf) {
-            ReadStart::Pending => {}
-            ReadStart::Eof => {
-                // EOF will be handled by the main loop once completion arrives.
-            }
-            ReadStart::Err(e) => {
-                log::error!("read_thread: handle_resize ReadFile failed: {e}");
-                let _ = event_tx.send_blocking(IoEvent::Error(e.to_string()));
-            }
-        }
-    }
-}
-
-fn cleanup(state: &mut ReadThreadState, conout: HANDLE, iocp: HANDLE) {
-    // Cancel any still-pending reads and drain queued completions. We must not drop
-    // the OVERLAPPED structs while IO is in flight.
-    for buf in &mut state.bufs {
-        if buf.state == BufState::Pending {
-            unsafe { CancelIoEx(conout, &buf.overlapped as *const _ as *mut _) };
-            let mut bytes: u32 = 0;
-            unsafe {
-                GetOverlappedResult(
-                    conout,
-                    &buf.overlapped as *const _ as *mut _,
-                    &mut bytes,
-                    0, // bWait = FALSE
-                )
-            };
-            buf.state = BufState::Idle;
-        }
-    }
-    drain_iocp_for_buffers(conout, iocp, state, None, None, None, None, None);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn drain_iocp_for_buffers(
-    conout: HANDLE,
-    iocp: HANDLE,
-    state: &mut ReadThreadState,
-    notify: Option<&ReadThreadNotify>,
-    terminal: Option<&Arc<Mutex<Terminal>>>,
-    io_tx: Option<&crossbeam_channel::Sender<IoMsg>>,
-    signal_tx: Option<&Sender<()>>,
-    event_tx: Option<&Sender<IoEvent>>,
-) {
-    let mut entries: [OVERLAPPED_ENTRY; IOCP_DRAIN_BATCH] = unsafe { std::mem::zeroed() };
-    let track_notify = notify.is_some();
-    let mut saw_notify = false;
-    loop {
-        let mut count: u32 = 0;
-        let ok = unsafe {
-            GetQueuedCompletionStatusEx(
-                iocp,
-                entries.as_mut_ptr(),
-                entries.len() as u32,
-                &mut count,
-                0, // timeout = 0 (poll)
-                0,
-            )
-        };
-        if ok == 0 || count == 0 {
-            break;
-        }
-        for i in 0..count {
-            let entry = entries[i as usize];
-            if entry.lpCompletionKey == READ_NOTIFY_KEY {
-                if track_notify {
-                    saw_notify = true;
-                }
-                continue;
-            }
-            let overlapped = entry.lpOverlapped;
-            if overlapped.is_null() {
-                continue;
-            }
-            let buf_index = if std::ptr::eq(overlapped, &state.bufs[0].overlapped) {
-                0
-            } else if std::ptr::eq(overlapped, &state.bufs[1].overlapped) {
-                1
-            } else {
-                continue;
-            };
-
-            state.bufs[buf_index].state = BufState::Idle;
-            let bytes = get_overlapped_result_iocp(
-                conout,
-                &state.bufs[buf_index].overlapped,
-                entry.dwNumberOfBytesTransferred,
-            )
-            .unwrap_or_default();
-            if bytes == 0 {
-                continue;
-            }
-            if let (Some(terminal), Some(io_tx), Some(signal_tx), Some(event_tx)) =
-                (terminal, io_tx, signal_tx, event_tx)
-            {
-                feed_and_dispatch(
-                    &state.bufs[buf_index].data[..bytes as usize],
-                    &mut state.was_synchronized,
-                    state.draining,
-                    &mut state.vt_event_buf,
-                    terminal,
-                    io_tx,
-                    signal_tx,
-                    event_tx,
-                );
-            }
-        }
-    }
-    if saw_notify && let Some(notify) = notify {
-        notify.signal();
-    }
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/// Issue a `ReadFile` on an overlapped pipe handle.
-///
-/// Returns `Pending` when ERROR_IO_PENDING, `Ready(n)` for synchronous
-/// completions, `Eof` for 0 bytes / broken pipe, and `Err` for other errors.
-///
-/// On `Pending`, sets `buf.state = BufState::Pending`.
-fn start_read(handle: HANDLE, iocp: HANDLE, buf: &mut ReadBuf) -> ReadStart {
-    debug_assert_eq!(buf.state, BufState::Idle);
-
-    // Zero-out offset fields — named pipes don't use them, but zeroing
-    // prevents OVERLAPPED reuse from confusing the kernel.
-    buf.overlapped.Anonymous.Anonymous.Offset = 0;
-    buf.overlapped.Anonymous.Anonymous.OffsetHigh = 0;
-    // Reset internal fields so IOCP sees a clean OVERLAPPED.
-    buf.overlapped.Internal = 0;
-    buf.overlapped.InternalHigh = 0;
-
-    let mut bytes_read: u32 = 0;
-    let ok = unsafe {
-        windows_sys::Win32::Storage::FileSystem::ReadFile(
-            handle,
-            buf.data.as_mut_ptr(),
-            READ_BUF_SIZE as u32,
-            &mut bytes_read,
-            &mut buf.overlapped,
-        )
-    };
-
-    if ok != 0 {
-        if bytes_read == 0 {
-            return ReadStart::Eof;
-        }
-        // Synchronous completion. We manually enqueue it to the IOCP so the
-        // main loop sees a single completion path.
-        let queued = unsafe { PostQueuedCompletionStatus(iocp, bytes_read, 0, &buf.overlapped) };
-        if queued == 0 {
-            return ReadStart::Err(io::Error::last_os_error());
-        }
-        buf.state = BufState::Pending;
-        return ReadStart::Pending;
-    }
-
-    let err = io::Error::last_os_error();
-    let code = err.raw_os_error().unwrap_or(0) as u32;
-
-    if code == windows_sys::Win32::Foundation::ERROR_IO_PENDING {
-        buf.state = BufState::Pending;
-        return ReadStart::Pending;
-    }
-    if is_broken_pipe(&err) {
-        return ReadStart::Eof;
-    }
-    ReadStart::Err(err)
-}
-
-/// Translate an IOCP completion into a byte count or error.
-fn get_overlapped_result_iocp(
-    handle: HANDLE,
-    overlapped: &OVERLAPPED,
-    bytes_transferred: u32,
-) -> io::Result<u32> {
-    if bytes_transferred > 0 {
-        return Ok(bytes_transferred);
-    }
-    let mut bytes: u32 = 0;
-    let ok = unsafe {
-        GetOverlappedResult(
-            handle,
-            overlapped as *const _ as *mut _,
-            &mut bytes,
-            0, // bWait = FALSE
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(bytes)
-}
-
+/// Read process exit code from child process handle.
 fn capture_exit_status(child_handle: HANDLE) -> Option<ExitStatus> {
-    let mut exit_code: u32 = 0;
-    let ok = unsafe { GetExitCodeProcess(child_handle, &mut exit_code) };
-    if ok == 0 || exit_code == 259 {
+    let mut pbi = ProcessBasicInformation {
+        exit_status: STATUS_PENDING,
+        peb_base_address: std::ptr::null_mut(),
+        affinity_mask: 0,
+        base_priority: 0,
+        unique_process_id: 0,
+        inherited_from_unique_process_id: 0,
+    };
+    let status = unsafe {
+        NtQueryInformationProcess(
+            child_handle,
+            PROCESS_INFORMATION_CLASS_BASIC_INFORMATION,
+            &mut pbi as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of::<ProcessBasicInformation>() as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != STATUS_SUCCESS || pbi.exit_status == STATUS_PENDING {
         return None;
     }
-    Some(ExitStatus::from_raw(exit_code))
+    Some(ExitStatus::from_raw(pbi.exit_status as u32))
 }
 
+/// Emit `IoEvent::Exited` once.
 fn emit_exit(
     state: &mut ReadThreadState,
     child_handle: HANDLE,
@@ -683,24 +630,22 @@ fn emit_exit(
     if state.exit_status.is_none() {
         state.exit_status = capture_exit_status(child_handle);
     }
-    emit_exited(state.exit_status, event_tx, signal_tx);
-}
-
-/// Emit a process-exit event to both channels, then wake the renderer.
-fn emit_exited(
-    exit_status: Option<ExitStatus>,
-    event_tx: &Sender<IoEvent>,
-    signal_tx: &Sender<()>,
-) {
-    // send_blocking: Exited must not be lost even if the channel is momentarily full.
-    let _ = event_tx.send_blocking(IoEvent::Exited(exit_status));
+    let _ = event_tx.send_blocking(IoEvent::Exited(state.exit_status));
     signal_tx.try_send(()).ok();
 }
 
-/// Returns `true` when the error represents a closed/EOF pipe.
-fn is_broken_pipe(e: &io::Error) -> bool {
-    matches!(
-        e.raw_os_error().map(|c| c as u32),
-        Some(ERROR_BROKEN_PIPE) | Some(232) // ERROR_NO_DATA (pipe closing)
-    )
+/// Convert an absolute deadline to a relative NT interval (100ns units, 64-bit).
+fn timeout_100ns(deadline: Option<Instant>) -> i64 {
+    match deadline {
+        None => i64::MIN,
+        Some(deadline) => {
+            let d = deadline.saturating_duration_since(Instant::now());
+            let ticks = d
+                .as_secs()
+                .saturating_mul(10_000_000)
+                .saturating_add((d.subsec_nanos() / 100) as u64)
+                .min(i64::MAX as u64) as i64;
+            if ticks == 0 { 0 } else { -ticks }
+        }
+    }
 }

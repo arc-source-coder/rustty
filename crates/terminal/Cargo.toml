@@ -10,13 +10,11 @@ gpui.workspace = true
 ghostty_vt = { path = "../ghostty-vt" }
 pty = { path = "../pty" }
 crossbeam-channel.workspace = true
+crossbeam-queue.workspace = true
 windows-sys = {
     workspace = true,
     features = [
         "Win32_Foundation",
-        "Win32_Storage_FileSystem",
-        "Win32_System_IO",
-        "Win32_System_Threading",
         "Win32_System_Console",
     ]
 }

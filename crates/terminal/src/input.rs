@@ -162,7 +162,16 @@ fn key_map() -> &'static HashMap<String, i32> {
 /// Returns `None` for keys we don't handle (modifier-only keys,
 /// media keys, etc.).
 pub(crate) fn map_key(key: &str) -> Option<i32> {
-    key_map().get(key).copied()
+    if let Some(value) = key_map().get(key) {
+        return Some(*value);
+    }
+
+    if key.as_bytes().iter().any(|b| b.is_ascii_uppercase()) {
+        let lower = key.to_ascii_lowercase();
+        return key_map().get(lower.as_str()).copied();
+    }
+
+    None
 }
 
 /// Compute the unshifted codepoint from a keystroke.
@@ -215,8 +224,8 @@ pub fn encode_key_event<'a>(
     is_held: bool,
     buf: &'a mut [u8; ENCODE_BUF_SIZE],
 ) -> Option<&'a [u8]> {
-    let key_str = keystroke.key.to_lowercase();
-    let ghostty_key = map_key(&key_str)?;
+    let key = keystroke.key.as_str();
+    let ghostty_key = map_key(key)?;
 
     let mods = pack_mods(
         keystroke.modifiers.shift,
@@ -233,7 +242,7 @@ pub fn encode_key_event<'a>(
     let text = keystroke
         .key_char
         .as_deref()
-        .unwrap_or_else(|| if key_str.len() == 1 { &key_str } else { "" });
+        .unwrap_or(if key.len() == 1 { key } else { "" });
 
     // Unshifted codepoint: the key as if shift wasn't pressed.
     // Critical for kitty keyboard protocol to encode shifted keys correctly.

@@ -1,11 +1,14 @@
 use bytes::Bytes;
+use crossbeam_queue::ArrayQueue;
 use pty::WindowSize;
 use std::path::PathBuf;
 use std::process::ExitStatus;
+use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-use windows_sys::Win32::System::IO::PostQueuedCompletionStatus;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+
+use crate::platform::windows::io::sleep_100ns;
+use crate::platform::windows::ntdll::{Handle, NtAlertThread};
 
 // Stable Identity
 fn next_id() -> u64 {
@@ -84,8 +87,7 @@ pub enum ScrollOp {
     Bottom,
 }
 
-/// Messages sent from GPUI main thread (and read thread for Reply) to IO thread
-/// via crossbeam_channel.
+/// Messages sent from GPUI main thread (and read thread for Reply) to IO thread.
 pub enum IoMsg {
     /// Small user input bytes stored inline in the channel message.
     InputInline {
@@ -112,16 +114,11 @@ pub enum IoMsg {
     Close,
 }
 
-/// Completion key used to signal the read thread via IOCP.
-pub const READ_NOTIFY_KEY: usize = 1;
-
 /// Lightweight signaling mechanism from IO thread → read thread.
-/// Integrates with IOCP via PostQueuedCompletionStatus.
 pub struct ReadThreadNotify {
-    /// IOCP handle used to post wakeups to the read thread.
-    pub iocp: HANDLE,
+    /// Read thread handle (set once before thread resume).
+    read_thread: AtomicPtr<std::ffi::c_void>,
     /// Pending resize. Written by IO thread, read by read thread.
-    /// Mutex is uncontended in practice — only touched on resize (rare).
     pub pending_resize: Mutex<Option<WindowSize>>,
     /// Shutdown flag.
     pub closing: AtomicBool,
@@ -129,21 +126,21 @@ pub struct ReadThreadNotify {
     pub hpcon_op: Mutex<()>,
 }
 
-// SAFETY: `iocp` is a Win32 IO completion port handle. It is only used via
-// Win32 APIs (PostQueuedCompletionStatus, GetQueuedCompletionStatusEx), which
-// are safe to call from any thread. The Mutex/AtomicBool fields are already
-// Send+Sync. Sharing the HANDLE across threads is the normal Win32 pattern.
 unsafe impl Send for ReadThreadNotify {}
 unsafe impl Sync for ReadThreadNotify {}
 
 impl ReadThreadNotify {
-    pub fn new(iocp: HANDLE) -> Self {
+    pub fn new() -> Self {
         Self {
-            iocp,
+            read_thread: AtomicPtr::new(std::ptr::null_mut()),
             pending_resize: Mutex::new(None),
             closing: AtomicBool::new(false),
             hpcon_op: Mutex::new(()),
         }
+    }
+
+    pub fn set_read_thread(&self, handle: Handle) {
+        self.read_thread.store(handle, Ordering::Release);
     }
 
     /// Store a pending resize (IO thread side).
@@ -158,21 +155,97 @@ impl ReadThreadNotify {
 
     /// Signal the read thread to wake and process resize/close.
     pub fn signal(&self) {
-        // SAFETY: iocp is a valid IOCP handle for this session.
-        unsafe {
-            PostQueuedCompletionStatus(self.iocp, 0, READ_NOTIFY_KEY, std::ptr::null_mut());
+        let thread = self.read_thread.load(Ordering::Acquire) as Handle;
+        if !thread.is_null() {
+            unsafe {
+                NtAlertThread(thread);
+            }
         }
     }
 }
 
-impl Drop for ReadThreadNotify {
-    fn drop(&mut self) {
-        if !self.iocp.is_null() {
-            unsafe {
-                CloseHandle(self.iocp);
-            }
-            self.iocp = std::ptr::null_mut();
+pub struct IoThreadNotify {
+    /// IO thread handle (set once before thread resume).
+    io_thread: AtomicPtr<std::ffi::c_void>,
+    /// Lock-free bounded mailbox.
+    pub queue: Arc<ArrayQueue<IoMsg>>,
+    /// Wakeup coalescing guard.
+    pub wake_armed: AtomicBool,
+}
+
+unsafe impl Send for IoThreadNotify {}
+unsafe impl Sync for IoThreadNotify {}
+
+impl IoThreadNotify {
+    pub fn new(queue: Arc<ArrayQueue<IoMsg>>) -> Self {
+        Self {
+            io_thread: AtomicPtr::new(std::ptr::null_mut()),
+            queue,
+            wake_armed: AtomicBool::new(false),
         }
+    }
+
+    pub fn set_io_thread(&self, handle: Handle) {
+        self.io_thread.store(handle, Ordering::Release);
+    }
+
+    fn alert_io_thread(&self) {
+        let thread = self.io_thread.load(Ordering::Acquire) as Handle;
+        if !thread.is_null()
+            && self
+                .wake_armed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            unsafe {
+                NtAlertThread(thread);
+            }
+        }
+    }
+
+    /// Lossless path for protocol-critical messages.
+    pub fn send_lossless(&self, msg: IoMsg) {
+        let mut msg = msg;
+        loop {
+            match self.queue.push(msg) {
+                Ok(()) => {
+                    self.alert_io_thread();
+                    return;
+                }
+                Err(returned) => {
+                    msg = returned;
+                    sleep_100ns(-1_000);
+                }
+            }
+        }
+    }
+
+    /// Best-effort enqueue for UI-driven traffic.
+    ///
+    /// Returns `true` if enqueued, `false` when queue is full.
+    pub fn try_send(&self, msg: IoMsg) -> bool {
+        match self.queue.push(msg) {
+            Ok(()) => {
+                self.alert_io_thread();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Best-effort input send with inline fast path for tiny payloads.
+    pub fn try_send_input_small(&self, data: &[u8]) {
+        if data.len() > INLINE_IO_BYTES_CAPACITY {
+            let _ = self.try_send(IoMsg::Input(Bytes::copy_from_slice(data)));
+            return;
+        }
+
+        let mut buf = [0u8; INLINE_IO_BYTES_CAPACITY];
+        buf[..data.len()].copy_from_slice(data);
+        let _ = self.try_send(IoMsg::InputInline {
+            len: data.len() as u8,
+            buf,
+        });
     }
 }
 
