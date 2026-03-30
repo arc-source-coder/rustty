@@ -5,6 +5,28 @@ const color = terminal.color;
 
 const TerminalHandle = handle_mod.TerminalHandle;
 
+/// C/Rust mirror for `?color.RGB`.
+///
+/// Layout is validated against Zig's optional representation in comptime
+/// assertions below. Tag values are also asserted: 0 = null, 1 = present.
+const OptionalColorRGB = extern struct {
+    rgb: u32,
+    tag: u8,
+    _pad: [3]u8,
+};
+
+/// C/Rust mirror for `terminal.RenderState.Colors`.
+///
+/// This type is pointer-cast over `state.colors` (zero-copy), so
+/// all offsets, alignment, optional layout and palette
+/// representation are asserted at comptime.
+const RenderColors = extern struct {
+    background: u32,
+    foreground: u32,
+    cursor: OptionalColorRGB,
+    palette: [256]u32,
+};
+
 // === ABI STABILITY ASSERTIONS ===
 // These verify that Ghostty's internal type layouts match what the Rust
 // side expects. If any of these assertions fail after a Ghostty update,
@@ -66,10 +88,25 @@ comptime {
     std.debug.assert(std.mem.eql(u8, @tagName(pal_color), "palette"));
     std.debug.assert(std.mem.eql(u8, @tagName(rgb_color), "rgb"));
 
-    // --- color.RGB (verifies why we need the sidecar) ---
-    std.debug.assert(@sizeOf(color.RGB) == 4); // packed(u24) with 1 byte padding
-    std.debug.assert(@sizeOf(color.RGB.C) == 3); // C-compatible version is 3 bytes
-    std.debug.assert(@alignOf(color.RGB.C) == 1); // No alignment padding
+    // --- color.RGB zero-copy palette ABI contract ---
+    // color.RGB is packed struct(u24): 4 bytes in memory (padded to u32).
+    // Rust reads [256]color.RGB as [256]u32 via zero-copy pointer.
+    std.debug.assert(@bitSizeOf(color.RGB) == 24);
+    std.debug.assert(@sizeOf(color.RGB) == @sizeOf(u32));
+    std.debug.assert(@alignOf(color.RGB) == @alignOf(u32));
+    std.debug.assert(@sizeOf(color.Palette) == 256 * @sizeOf(u32));
+
+    // --- terminal.RenderState.Colors ABI contract ---
+    std.debug.assert(@sizeOf(terminal.RenderState.Colors) == @sizeOf(RenderColors));
+    std.debug.assert(@alignOf(terminal.RenderState.Colors) == @alignOf(RenderColors));
+    std.debug.assert(@offsetOf(terminal.RenderState.Colors, "background") == @offsetOf(RenderColors, "background"));
+    std.debug.assert(@offsetOf(terminal.RenderState.Colors, "foreground") == @offsetOf(RenderColors, "foreground"));
+    std.debug.assert(@offsetOf(terminal.RenderState.Colors, "cursor") == @offsetOf(RenderColors, "cursor"));
+    std.debug.assert(@offsetOf(terminal.RenderState.Colors, "palette") == @offsetOf(RenderColors, "palette"));
+
+    // --- optional color.RGB ABI contract (?color.RGB) ---
+    std.debug.assert(@sizeOf(?color.RGB) == @sizeOf(OptionalColorRGB));
+    std.debug.assert(@alignOf(?color.RGB) == @alignOf(OptionalColorRGB));
 }
 
 /// C-safe cursor state
@@ -86,22 +123,6 @@ const CursorState = extern struct {
     password_input: u8,
     /// 1 if cursor is on the tail half of a wide char
     wide_tail: u8,
-};
-
-/// C-safe color triplet
-const ColorRGB = extern struct {
-    r: u8,
-    g: u8,
-    b: u8,
-};
-
-/// C-safe terminal color state
-const ColorState = extern struct {
-    background: ColorRGB,
-    foreground: ColorRGB,
-    /// Cursor color; if has_cursor_color is 0, cursor_color is undefined
-    cursor_color: ColorRGB,
-    has_cursor_color: u8,
 };
 
 /// C-safe mirror of terminal.Style.Color tagged union.
@@ -144,19 +165,6 @@ export fn ghostty_vt_terminal_render_update(ptr: ?*anyopaque) callconv(.c) c_int
     if (ptr == null) return 1;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     handle.render_state.update(handle.alloc, &handle.terminal_inst) catch return 2;
-
-    // Repopulate palette sidecar only when dirty.
-    // The check itself is free (one bool read). The loop (256 × 3-byte copy)
-    // only runs when colors actually change — rare in normal use.
-    // We cannot memcpy because color.RGB is packed struct(u24) with @sizeOf == 4.
-    // Use .cval() to convert to C-compatible 3-byte RGB.
-    if (handle.palette_dirty) {
-        const palette = handle.render_state.colors.palette;
-        for (palette, 0..) |rgb, i| {
-            handle.palette_cache[i] = rgb.cval();
-        }
-        handle.palette_dirty = false;
-    }
 
     return 0;
 }
@@ -236,25 +244,13 @@ export fn ghostty_vt_terminal_render_cursor(ptr: ?*anyopaque, out: ?*CursorState
     return 0;
 }
 
-/// Get terminal colors from the current render state.
-/// Palette access is separate (256 entries is too large for a return struct).
-export fn ghostty_vt_terminal_render_colors(ptr: ?*anyopaque, out: ?*ColorState) callconv(.c) c_int {
-    if (ptr == null or out == null) return 1;
+/// Returns a direct pointer to `RenderState.colors` (zero-copy).
+///
+/// Valid until next `render_update()` call.
+export fn ghostty_vt_terminal_render_colors(ptr: ?*anyopaque) callconv(.c) ?*const RenderColors {
+    if (ptr == null) return null;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
-    const colors = &handle.render_state.colors;
-    const result = out.?;
-
-    result.background = .{ .r = colors.background.r, .g = colors.background.g, .b = colors.background.b };
-    result.foreground = .{ .r = colors.foreground.r, .g = colors.foreground.g, .b = colors.foreground.b };
-
-    if (colors.cursor) |cc| {
-        result.cursor_color = .{ .r = cc.r, .g = cc.g, .b = cc.b };
-        result.has_cursor_color = 1;
-    } else {
-        result.has_cursor_color = 0;
-    }
-
-    return 0;
+    return @ptrCast(&handle.render_state.colors);
 }
 
 /// Get selection range for a row. Returns 1 if row has a selection, 0 otherwise.
@@ -342,15 +338,4 @@ export fn ghostty_vt_terminal_render_row_graphemes(
     if (out_len) |len| len.* = @intCast(graphemes.len);
     // ABI validated at comptime: u21 has same size/alignment as u32.
     return @ptrCast(graphemes.ptr);
-}
-
-/// Returns a pointer to the 256-entry palette sidecar.
-/// Each entry is a 3-byte color.RGB.C (r, g, b — no padding).
-/// The sidecar is refreshed during render_update() when palette is dirty.
-export fn ghostty_vt_terminal_render_palette(
-    ptr: ?*anyopaque,
-) callconv(.c) ?[*]const color.RGB.C {
-    if (ptr == null) return null;
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
-    return &handle.palette_cache;
 }

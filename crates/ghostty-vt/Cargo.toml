@@ -2,6 +2,3 @@
 name = "ghostty_vt"
 version.workspace = true
 edition.workspace = true
-
-[dependencies]
-bytemuck.workspace = true

@@ -136,17 +136,9 @@ mod windows_tests {
         let factory6 = factory2.cast::<IDWriteFactory6>().expect("factory6 cast");
         let grid = integration_grid(&factory6);
 
-        let mut terminal = Terminal::new(
-            80,
-            4,
-            ColorRGB {
-                r: 255,
-                g: 255,
-                b: 255,
-            },
-            ColorRGB { r: 0, g: 0, b: 0 },
-        )
-        .expect("create terminal");
+        let mut terminal =
+            Terminal::new(80, 4, ColorRGB::new(255, 255, 255), ColorRGB::new(0, 0, 0))
+                .expect("create terminal");
         terminal.feed("🍎🌶❤️🔥🌈🏴‍☠️".as_bytes());
         let frame = terminal.render_frame();
         let raw_cells = frame.row_raw(0).expect("row cells");
@@ -188,17 +180,9 @@ mod windows_tests {
         let factory6 = factory2.cast::<IDWriteFactory6>().expect("factory6 cast");
         let grid = integration_grid(&factory6);
 
-        let mut terminal = Terminal::new(
-            80,
-            4,
-            ColorRGB {
-                r: 255,
-                g: 255,
-                b: 255,
-            },
-            ColorRGB { r: 0, g: 0, b: 0 },
-        )
-        .expect("create terminal");
+        let mut terminal =
+            Terminal::new(80, 4, ColorRGB::new(255, 255, 255), ColorRGB::new(0, 0, 0))
+                .expect("create terminal");
         terminal.feed("🍎 🌶 ❤️ 🔥 🌈 🏴‍☠️ 🇺🇸".as_bytes());
         let frame = terminal.render_frame();
         let raw_cells = frame.row_raw(0).expect("row cells");

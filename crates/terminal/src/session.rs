@@ -53,16 +53,8 @@ impl TerminalSession {
     ) -> Self {
         let size = GridSize::new(spawn_config.initial_cols, spawn_config.initial_rows);
 
-        let default_fg = ColorRGB {
-            r: 0xDD,
-            g: 0xDD,
-            b: 0xDD,
-        };
-        let default_bg = ColorRGB {
-            r: 0x1E,
-            g: 0x1E,
-            b: 0x2E,
-        };
+        let default_fg = ColorRGB::new(0xDD, 0xDD, 0xDD);
+        let default_bg = ColorRGB::new(0x1E, 0x1E, 0x2E);
         let terminal = Terminal::new(size.cols, size.rows, default_fg, default_bg)
             .expect("failed to allocate ghostty terminal");
         let terminal = Arc::new(Mutex::new(terminal));

@@ -1,15 +1,7 @@
 use crate::{ColorRGB, Terminal, VtEvent};
 
-const DEFAULT_FG: ColorRGB = ColorRGB {
-    r: 0xDD,
-    g: 0xDD,
-    b: 0xDD,
-};
-const DEFAULT_BG: ColorRGB = ColorRGB {
-    r: 0x1E,
-    g: 0x1E,
-    b: 0x2E,
-};
+const DEFAULT_FG: ColorRGB = ColorRGB::new(0xDD, 0xDD, 0xDD);
+const DEFAULT_BG: ColorRGB = ColorRGB::new(0x1E, 0x1E, 0x2E);
 
 #[test]
 fn da1_primary_response() {

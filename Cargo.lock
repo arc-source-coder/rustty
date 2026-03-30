@@ -1935,9 +1935,6 @@ dependencies = [
 [[package]]
 name = "ghostty_vt"
 version = "0.1.0"
-dependencies = [
- "bytemuck",
-]
 
 [[package]]
 name = "gif"

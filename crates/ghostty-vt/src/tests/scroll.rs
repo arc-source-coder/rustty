@@ -1,15 +1,7 @@
 use crate::*;
 
-const DEFAULT_FG: ColorRGB = ColorRGB {
-    r: 0xDD,
-    g: 0xDD,
-    b: 0xDD,
-};
-const DEFAULT_BG: ColorRGB = ColorRGB {
-    r: 0x1E,
-    g: 0x1E,
-    b: 0x2E,
-};
+const DEFAULT_FG: ColorRGB = ColorRGB::new(0xDD, 0xDD, 0xDD);
+const DEFAULT_BG: ColorRGB = ColorRGB::new(0x1E, 0x1E, 0x2E);
 
 #[test]
 fn test_scroll_viewport() {
@@ -17,12 +9,12 @@ fn test_scroll_viewport() {
         ghostty_vt_terminal_new(
             80,
             24,
-            DEFAULT_FG.r,
-            DEFAULT_FG.g,
-            DEFAULT_FG.b,
-            DEFAULT_BG.r,
-            DEFAULT_BG.g,
-            DEFAULT_BG.b,
+            DEFAULT_FG.r(),
+            DEFAULT_FG.g(),
+            DEFAULT_FG.b(),
+            DEFAULT_BG.r(),
+            DEFAULT_BG.g(),
+            DEFAULT_BG.b(),
         )
     };
     // Generate scrollback: 50 newlines pushes content above viewport

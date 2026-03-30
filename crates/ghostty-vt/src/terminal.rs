@@ -78,8 +78,9 @@ impl Terminal {
     /// Create a new terminal with the given dimensions and default colors.
     /// Returns `None` if allocation fails.
     pub fn new(cols: u16, rows: u16, fg: ColorRGB, bg: ColorRGB) -> Option<Self> {
-        let handle =
-            unsafe { ghostty_vt_terminal_new(cols, rows, fg.r, fg.g, fg.b, bg.r, bg.g, bg.b) };
+        let handle = unsafe {
+            ghostty_vt_terminal_new(cols, rows, fg.r(), fg.g(), fg.b(), bg.r(), bg.g(), bg.b())
+        };
         if handle.is_null() {
             return None;
         }
@@ -474,15 +475,6 @@ impl RenderFrame {
         Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
     }
 
-    /// Get the full 256-entry palette (zero-copy pointer into sidecar).
-    /// The sidecar is refreshed during render_update().
-    pub fn palette(&self) -> &[ColorRGB; 256] {
-        let ptr = unsafe { ghostty_vt_terminal_render_palette(self.handle) };
-        // Safety: palette_cache is always initialized after render_update().
-        // 256 × ColorRGB (3 bytes each) = 768 bytes.
-        unsafe { &*(ptr as *const [ColorRGB; 256]) }
-    }
-
     /// Current dirty state of the render data.
     #[inline(always)]
     pub fn dirty(&self) -> DirtyState {
@@ -531,10 +523,10 @@ impl RenderFrame {
     }
 
     /// Current terminal colors (foreground, background, cursor).
-    pub fn colors(&self) -> ColorState {
-        let mut out = ColorState::default();
-        unsafe { ghostty_vt_terminal_render_colors(self.handle, &mut out) };
-        out
+    pub fn colors(&self) -> &RenderColors {
+        let ptr = unsafe { ghostty_vt_terminal_render_colors(self.handle) };
+        // Safety: pointer is into RenderState memory, stable until next render_update().
+        unsafe { &*ptr }
     }
 }
 

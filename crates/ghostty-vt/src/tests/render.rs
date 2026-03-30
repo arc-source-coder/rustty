@@ -97,9 +97,8 @@ fn test_render_colors() {
         )
     };
     unsafe { ghostty_vt_terminal_render_update(ptr) };
-    let mut colors = ColorState::default();
-    let rc = unsafe { ghostty_vt_terminal_render_colors(ptr, &mut colors) };
-    assert_eq!(rc, 0);
+    let colors = unsafe { ghostty_vt_terminal_render_colors(ptr) };
+    assert!(!colors.is_null());
     // Default colors should be set (exact values depend on Ghostty defaults)
     unsafe { ghostty_vt_terminal_free(ptr) };
 }
@@ -193,14 +192,14 @@ fn test_render_palette_batch() {
     };
     unsafe { ghostty_vt_terminal_render_update(ptr) };
 
-    let palette_ptr = unsafe { ghostty_vt_terminal_render_palette(ptr) };
-    assert!(!palette_ptr.is_null());
+    let colors_ptr = unsafe { ghostty_vt_terminal_render_colors(ptr) };
+    assert!(!colors_ptr.is_null());
 
-    let palette = unsafe { &*(palette_ptr as *const [ColorRGB; 256]) };
+    let colors = unsafe { &*colors_ptr };
     // Palette index 1 is red in Ghostty's default palette (#cc6666)
-    assert_eq!(palette[1].r, 204);
-    assert_eq!(palette[1].g, 102);
-    assert_eq!(palette[1].b, 102);
+    assert_eq!(colors.palette[1].r(), 204);
+    assert_eq!(colors.palette[1].g(), 102);
+    assert_eq!(colors.palette[1].b(), 102);
 
     unsafe { ghostty_vt_terminal_free(ptr) };
 }

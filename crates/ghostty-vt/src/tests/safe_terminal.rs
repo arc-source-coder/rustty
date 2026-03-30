@@ -1,15 +1,7 @@
 use crate::*;
 
-const DEFAULT_FG: ColorRGB = ColorRGB {
-    r: 0xDD,
-    g: 0xDD,
-    b: 0xDD,
-};
-const DEFAULT_BG: ColorRGB = ColorRGB {
-    r: 0x1E,
-    g: 0x1E,
-    b: 0x2E,
-};
+const DEFAULT_FG: ColorRGB = ColorRGB::new(0xDD, 0xDD, 0xDD);
+const DEFAULT_BG: ColorRGB = ColorRGB::new(0x1E, 0x1E, 0x2E);
 
 #[test]
 fn new_and_drop() {
@@ -119,12 +111,12 @@ fn render_frame_cursor() {
 fn render_frame_colors_and_palette() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
     let frame = term.render_frame();
-    let _colors = frame.colors();
+    let colors = frame.colors();
     // Palette index 1 is red (#cc6666 in Ghostty defaults)
-    let red = frame.palette()[1];
-    assert_eq!(red.r, 204);
-    assert_eq!(red.g, 102);
-    assert_eq!(red.b, 102);
+    let red = colors.palette[1];
+    assert_eq!(red.r(), 204);
+    assert_eq!(red.g(), 102);
+    assert_eq!(red.b(), 102);
 }
 
 #[test]

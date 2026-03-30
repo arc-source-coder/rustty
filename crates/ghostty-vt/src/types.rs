@@ -1,4 +1,3 @@
-use bytemuck::{Pod, Zeroable};
 use core::ffi::c_void;
 
 pub(crate) type BellCallback = unsafe extern "C" fn(userdata: *mut c_void);
@@ -20,21 +19,100 @@ pub struct CursorState {
     pub wide_tail: u8,
 }
 
+/// Zero-copy view into Ghostty's `color.RGB` (`packed struct(u24)`).
+///
+/// Zig's `packed struct(u24)` occupies 4 bytes in memory (padded to u32).
+/// Bit layout (little-endian): `[7:0] r`, `[15:8] g`, `[23:16] b`, `[31:24] padding`.
+/// This lets us read `[256]color.RGB` as `[256]ColorRGB` via pointer cast.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColorRGB(u32);
+
+impl ColorRGB {
+    /// Construct from individual components.
+    #[inline]
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self(r as u32 | (g as u32) << 8 | (b as u32) << 16)
+    }
+
+    #[inline]
+    pub const fn r(self) -> u8 {
+        (self.0 & 0xFF) as u8
+    }
+
+    #[inline]
+    pub const fn g(self) -> u8 {
+        ((self.0 >> 8) & 0xFF) as u8
+    }
+
+    #[inline]
+    pub const fn b(self) -> u8 {
+        ((self.0 >> 16) & 0xFF) as u8
+    }
+
+    /// Pack as `[r, g, b, 0xFF]` in little-endian u32 — GPU-ready RGBA.
+    #[inline]
+    pub const fn to_rgba_u32(self) -> u32 {
+        (self.0 & 0x00FF_FFFF) | 0xFF00_0000
+    }
+
+    /// Pack as `[r, g, b, a]` in little-endian u32.
+    #[inline]
+    pub const fn to_rgba_u32_with_alpha(self, a: u8) -> u32 {
+        (self.0 & 0x00FF_FFFF) | (a as u32) << 24
+    }
+
+    #[inline]
+    pub fn to_float4(self) -> [f32; 4] {
+        [self.r() as f32 / 255.0, self.g() as f32 / 255.0, self.b() as f32 / 255.0, 1.0]
+    }
+}
+
+impl std::fmt::Debug for ColorRGB {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ColorRGB")
+            .field("r", &self.r())
+            .field("g", &self.g())
+            .field("b", &self.b())
+            .finish()
+    }
+}
+
+/// Mirrors Zig's RenderState.Colors tagged union layout.
+/// Layout verified by Zig comptime assertions.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
-pub struct ColorRGB {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
+#[derive(Clone, Copy)]
+pub struct OptionalColorRGB {
+    rgb: ColorRGB,
+    tag: u8,
+    _pad: [u8; 3],
+}
+
+impl OptionalColorRGB {
+    #[inline]
+    pub fn into_option(self) -> Option<ColorRGB> {
+        match self.tag {
+            0 => None,
+            1 => Some(self.rgb),
+            _ => None,
+        }
+    }
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ColorState {
+#[derive(Clone, Copy)]
+pub struct RenderColors {
     pub background: ColorRGB,
     pub foreground: ColorRGB,
-    pub cursor_color: ColorRGB,
-    pub has_cursor_color: u8,
+    cursor: OptionalColorRGB,
+    pub palette: [ColorRGB; 256],
+}
+
+impl RenderColors {
+    #[inline]
+    pub fn cursor_color(&self) -> Option<ColorRGB> {
+        self.cursor.into_option()
+    }
 }
 
 /// Zero-copy view into Ghostty's page.Cell packed struct(u64).
