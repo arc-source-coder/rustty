@@ -1,8 +1,17 @@
 const std = @import("std");
 const TerminalBuildOptions = @import("ghostty/src/terminal/build_options.zig").Options;
 
-pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+pub fn build(b: *std.Build) !void {
+    const target = blk: {
+        var result = b.standardTargetOptions(.{});
+        // Set the target to MSVC unless a override is provided
+        if (result.result.os.tag == .windows and result.query.abi == null) {
+            var query = result.query;
+            query.abi = .msvc;
+            result = b.resolveTargetQuery(query);
+        }
+        break :blk result;
+    };
     const optimize = b.standardOptimizeOption(.{});
 
     const terminal_options: TerminalBuildOptions = .{
@@ -66,14 +75,15 @@ pub fn build(b: *std.Build) void {
 
     const lib = b.addLibrary(.{
         .name = "ghostty_shim",
-        .linkage = .dynamic,
+        .linkage = .static,
         .root_module = b.createModule(.{
             .root_source_file = b.path("lib.zig"),
             .target = target,
             .optimize = optimize,
             // SIMD requires libc and libcpp
+            // Skip linking libcpp because the MSVC SDK include directories
+            // (added via linkLibC) contain both C and C++ headers.
             .link_libc = terminal_options.simd,
-            .link_libcpp = terminal_options.simd,
         }),
     });
 
@@ -119,7 +129,18 @@ pub fn build(b: *std.Build) void {
         const HWY_AVX3: c_int = 1 << 8;
         const HWY_DISABLED_TARGETS: c_int = HWY_AVX10_2 | HWY_AVX3_SPR | HWY_AVX3_ZEN4 | HWY_AVX3_DL | HWY_AVX3;
 
-        // Add SIMD C++ source files with the disabled-targets flag
+        // MSVC requires explicit std specification otherwise SIMD C++17
+        // features are guarded. Doing it unconditionally is harmless.
+        var simd_flags: std.ArrayList([]const u8) = .empty;
+        defer simd_flags.deinit(b.allocator);
+        try simd_flags.append(b.allocator, "-std=c++17");
+        if (target.result.cpu.arch == .x86_64) {
+            try simd_flags.append(
+                b.allocator,
+                b.fmt("-DHWY_DISABLED_TARGETS={}", .{HWY_DISABLED_TARGETS}),
+            );
+        }
+
         lib.root_module.addCSourceFiles(.{
             .files = &.{
                 "ghostty/src/simd/base64.cpp",
@@ -127,30 +148,34 @@ pub fn build(b: *std.Build) void {
                 "ghostty/src/simd/index_of.cpp",
                 "ghostty/src/simd/vt.cpp",
             },
-            .flags = if (target.result.cpu.arch == .x86_64) &.{
-                b.fmt("-DHWY_DISABLED_TARGETS={}", .{HWY_DISABLED_TARGETS}),
-            } else &.{},
+            .flags = simd_flags.items,
         });
 
         if (b.lazyDependency("simdutf", .{
             .target = target,
             .optimize = optimize,
         })) |dep| {
-            lib.root_module.linkLibrary(dep.artifact("simdutf"));
+            const artifact = dep.artifact("simdutf");
+            lib.root_module.linkLibrary(artifact);
+            b.installArtifact(artifact);
         }
 
         if (b.lazyDependency("highway", .{
             .target = target,
             .optimize = optimize,
         })) |dep| {
-            lib.root_module.linkLibrary(dep.artifact("highway"));
+            const artifact = dep.artifact("highway");
+            lib.root_module.linkLibrary(artifact);
+            b.installArtifact(artifact);
         }
 
         if (b.lazyDependency("utfcpp", .{
             .target = target,
             .optimize = optimize,
         })) |dep| {
-            lib.root_module.linkLibrary(dep.artifact("utfcpp"));
+            const artifact = dep.artifact("utfcpp");
+            lib.root_module.linkLibrary(artifact);
+            b.installArtifact(artifact);
         }
     }
 
@@ -164,9 +189,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("lib.zig"),
             .target = target,
             .optimize = optimize,
-            // SIMD requires libc and libcpp (same as main library)
+            // SIMD requires libc and libcpp
+            // Skip libcpp since we use MSVC (same as main library)
             .link_libc = terminal_options.simd,
-            .link_libcpp = terminal_options.simd,
         }),
     });
     test_step.dependOn(&b.addRunArtifact(lib_tests).step);
