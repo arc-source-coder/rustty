@@ -10,7 +10,7 @@ use font::backend::dwrite::fallback::FontFallbackContext;
 use font::cache::shaped_run_cache::ShapedRunCache;
 use font::shaper::Shaper;
 use font::shared_grid_set::{DWriteGridConfig, DWriteGridKey, SharedGridPtr, SharedGridSet};
-use ghostty_vt::{RenderFrame, ScrollbarInfo, Terminal};
+use ghostty::{RenderFrame, ScrollbarInfo, Terminal};
 use gpui::CompositionSlotEvent;
 use terminal::RendererMessage;
 use windows::Win32::Graphics::Direct3D11::{D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION, ID3D11Device};

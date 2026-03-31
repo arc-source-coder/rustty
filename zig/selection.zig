@@ -40,7 +40,7 @@ fn viewportPin(screen: *Screen, x: u16, y: u32) ?terminal.Pin {
 /// Set a selection on the terminal. Coordinates are in viewport space (0-indexed).
 /// rectangular: 1 for block/rectangle selection, 0 for normal.
 /// Returns 0 on success, 1 if null, 2 if coordinates can't be pinned.
-export fn ghostty_vt_terminal_set_selection(
+export fn ghostty_terminal_set_selection(
     ptr: ?*anyopaque,
     start_x: u16,
     start_y: u32,
@@ -70,7 +70,7 @@ export fn ghostty_vt_terminal_set_selection(
 /// Select the word at viewport coordinates (0-indexed) using Ghostty's
 /// `Screen.selectWord` with default boundary semantics.
 /// Returns 0 on success, non-zero if no selectable word or invalid point.
-export fn ghostty_vt_terminal_select_word_at(
+export fn ghostty_terminal_select_word_at(
     ptr: ?*anyopaque,
     x: u16,
     y: u32,
@@ -88,7 +88,7 @@ export fn ghostty_vt_terminal_select_word_at(
 /// Select the (soft-wrapped) line at viewport coordinates (0-indexed) using
 /// Ghostty's `Screen.selectLine` default semantics.
 /// Returns 0 on success, non-zero if no selectable line or invalid point.
-export fn ghostty_vt_terminal_select_line_at(
+export fn ghostty_terminal_select_line_at(
     ptr: ?*anyopaque,
     x: u16,
     y: u32,
@@ -106,7 +106,7 @@ export fn ghostty_vt_terminal_select_line_at(
 /// Select shell output at viewport coordinates (0-indexed) using Ghostty's
 /// semantic-prompt-aware `Screen.selectOutput` semantics.
 /// Returns 0 on success, non-zero if no selectable output or invalid point.
-export fn ghostty_vt_terminal_select_output_at(
+export fn ghostty_terminal_select_output_at(
     ptr: ?*anyopaque,
     x: u16,
     y: u32,
@@ -124,7 +124,7 @@ export fn ghostty_vt_terminal_select_output_at(
 /// Update selection during a double-click drag using Ghostty semantics:
 /// expand by whole words nearest the click and drag endpoints.
 /// Returns 0 on success, non-zero on invalid points or no selectable words.
-export fn ghostty_vt_terminal_select_word_drag(
+export fn ghostty_terminal_select_word_drag(
     ptr: ?*anyopaque,
     click_x: u16,
     click_y: u32,
@@ -178,7 +178,7 @@ export fn ghostty_vt_terminal_select_word_drag(
 /// Update selection during a triple-click drag using Ghostty semantics:
 /// expand by whole wrapped lines nearest the click and drag endpoints.
 /// Returns 0 on success, non-zero on invalid points or non-selectable lines.
-export fn ghostty_vt_terminal_select_line_drag(
+export fn ghostty_terminal_select_line_drag(
     ptr: ?*anyopaque,
     click_x: u16,
     click_y: u32,
@@ -208,7 +208,7 @@ export fn ghostty_vt_terminal_select_line_drag(
 }
 
 /// Clear any active selection.
-export fn ghostty_vt_terminal_clear_selection(ptr: ?*anyopaque) callconv(.c) void {
+export fn ghostty_terminal_clear_selection(ptr: ?*anyopaque) callconv(.c) void {
     if (ptr == null) return;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     handle.terminal_inst.screens.active.clearSelection();
@@ -216,8 +216,8 @@ export fn ghostty_vt_terminal_clear_selection(ptr: ?*anyopaque) callconv(.c) voi
 
 /// Get the selected text as a UTF-8 null-terminated string.
 /// Returns a pointer to the string, or null if no selection or error.
-/// The caller must free the returned pointer with ghostty_vt_bytes_free().
-export fn ghostty_vt_terminal_get_selection_text(
+/// The caller must free the returned pointer with ghostty_terminal_bytes_free().
+export fn ghostty_terminal_get_selection_text(
     ptr: ?*anyopaque,
     out_len: ?*usize,
 ) callconv(.c) ?[*]const u8 {
@@ -233,7 +233,7 @@ export fn ghostty_vt_terminal_get_selection_text(
 }
 
 /// Free a byte buffer returned by get_selection_text.
-export fn ghostty_vt_bytes_free(bytes: ?[*]const u8, len: usize) callconv(.c) void {
+export fn ghostty_terminal_bytes_free(bytes: ?[*]const u8, len: usize) callconv(.c) void {
     if (bytes == null) return;
     const alloc = std.heap.smp_allocator;
     // selectionString returns a [:0]const u8, so actual allocation is len+1

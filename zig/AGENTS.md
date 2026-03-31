@@ -1,6 +1,6 @@
-# ghostty-vt - AGENTS.md
+# ghostty - AGENTS.md
 
-This crate contains a Zig shim that directly uses Ghostty internals and a Rust wrapper around the Zig shim. The Ghostty source is vendored in `zig/ghostty/`
+This directory contains a Zig shim that directly uses Ghostty internals. The Ghostty source is vendored in `ghostty/`.
 
 ## Zig Development
 

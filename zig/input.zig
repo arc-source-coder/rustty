@@ -1,7 +1,7 @@
 //! Input encoding: key events, mouse events, and mode flag snapshots.
 //!
-//! API: ghostty_vt_terminal_get_input_opts to snapshot all mode flags under
-//! the lock, then ghostty_vt_encode_key / ghostty_vt_encode_mouse to encode
+//! API: ghostty_terminal_get_input_opts to snapshot all mode flags under
+//! the lock, then ghostty_terminal_encode_key / ghostty_terminal_encode_mouse to encode
 //! without a terminal reference. This confines the lock to a single cheap
 //! flag-read FFI call.
 
@@ -17,7 +17,7 @@ const Terminal = @import("ghostty/src/terminal/Terminal.zig");
 
 /// C-compatible snapshot of all terminal input mode flags.
 ///
-/// Captured once under the terminal mutex via ghostty_vt_terminal_get_input_opts.
+/// Captured once under the terminal mutex via ghostty_terminal_get_input_opts.
 /// All encode functions below take this struct instead of a terminal handle,
 /// so encoding runs entirely outside the mutex.
 ///
@@ -43,8 +43,8 @@ pub const InputOptsC = extern struct {
 ///
 /// Must be called with the terminal mutex held. The returned struct is a
 /// plain-data copy — no terminal reference is retained, so encoding can
-/// proceed lock-free using ghostty_vt_encode_key_opts / ghostty_vt_encode_mouse_opts.
-export fn ghostty_vt_terminal_get_input_opts(ptr: ?*anyopaque) callconv(.c) InputOptsC {
+/// proceed lock-free using ghostty_terminal_encode_key_opts / ghostty_terminal_encode_mouse_opts.
+export fn ghostty_terminal_get_input_opts(ptr: ?*anyopaque) callconv(.c) InputOptsC {
     // Return safe defaults (no special modes) when handle is null.
     if (ptr == null) return .{
         .cursor_key_application = 0,
@@ -78,7 +78,7 @@ export fn ghostty_vt_terminal_get_input_opts(ptr: ?*anyopaque) callconv(.c) Inpu
 }
 
 /// Encode a key event using pre-captured input opts. No terminal handle needed.
-export fn ghostty_vt_encode_key(
+export fn ghostty_terminal_encode_key(
     opts: InputOptsC,
     key_val: c_int,
     mods: u16,
@@ -115,7 +115,7 @@ export fn ghostty_vt_encode_key(
 }
 
 /// Encode a mouse event using pre-captured input opts. No terminal handle needed.
-export fn ghostty_vt_encode_mouse(
+export fn ghostty_terminal_encode_mouse(
     opts: InputOptsC,
     button: u8,
     action: u8,
@@ -205,7 +205,7 @@ export fn ghostty_vt_encode_mouse(
 /// Example W3C codes: "KeyA", "Enter", "ArrowLeft", "F1", "Digit0",
 ///                    "Space", "Tab", "Escape", "Backspace", "Delete"
 /// See: https://www.w3.org/TR/uievents-code
-export fn ghostty_vt_key_from_w3c(
+export fn ghostty_terminal_key_from_w3c(
     code_ptr: ?[*]const u8,
     code_len: usize,
 ) callconv(.c) c_int {

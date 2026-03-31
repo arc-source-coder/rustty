@@ -83,7 +83,7 @@ mod windows_tests {
     use crate::shaper::run_iter::{RowCells, RunOptions};
     use crate::shared_grid::{GridMetrics, SharedGrid};
     use crate::types::{FontFeatureSpec, Style};
-    use ghostty_vt::{ColorRGB, Terminal};
+    use ghostty::{ColorRGB, Terminal};
     use windows::Win32::Graphics::DirectWrite::{
         DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC, DWriteCreateFactory,
         IDWriteFactory2, IDWriteFactory6,

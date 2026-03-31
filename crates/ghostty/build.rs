@@ -3,22 +3,24 @@ use std::process::Command;
 
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // zig/ lives at the workspace root, two levels above crates/ghostty/
+    let zig_dir = manifest_dir.join("../../zig");
 
     println!(
         "cargo:rerun-if-changed={}",
-        manifest_dir.join("zig/build.zig").display()
+        zig_dir.join("build.zig").display()
     );
     println!(
         "cargo:rerun-if-changed={}",
-        manifest_dir.join("zig/build.zig.zon").display()
+        zig_dir.join("build.zig.zon").display()
     );
     println!(
         "cargo:rerun-if-changed={}",
-        manifest_dir.join("zig/lib.zig").display()
+        zig_dir.join("lib.zig").display()
     );
-    emit_rerun_for_zig_sources(&manifest_dir.join("zig"));
+    emit_rerun_for_zig_sources(&zig_dir);
 
-    let ghostty_dir = manifest_dir.join("zig/ghostty");
+    let ghostty_dir = zig_dir.join("ghostty");
     if !ghostty_dir.exists() {
         panic!("zig/ghostty is missing; run `git submodule update --init --recursive` and retry");
     }
@@ -32,7 +34,7 @@ fn main() {
     let prefix = out_dir.join("zig-out");
 
     let status = Command::new("zig")
-        .current_dir(manifest_dir.join("zig"))
+        .current_dir(&zig_dir)
         .arg("build")
         .arg("-Doptimize=ReleaseFast")
         .arg("--prefix")

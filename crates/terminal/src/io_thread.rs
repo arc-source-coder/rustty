@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use async_channel::Sender;
 use bytes::{Bytes, BytesMut};
-use ghostty_vt::Terminal;
+use ghostty::Terminal;
 use pty::{PtyWriter, WindowSize};
 
 use crate::platform::windows::io::{AsyncIo, alertable_wait, async_write};

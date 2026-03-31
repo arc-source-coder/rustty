@@ -7,7 +7,7 @@ edition.workspace = true
 log.workspace = true
 async-channel.workspace = true
 gpui.workspace = true
-ghostty_vt = { path = "../ghostty-vt" }
+ghostty = { path = "../ghostty" }
 pty = { path = "../pty" }
 crossbeam-channel.workspace = true
 crossbeam-queue.workspace = true

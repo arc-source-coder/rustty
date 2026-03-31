@@ -10,7 +10,7 @@ use font::shaper::run_iter::{RowCells, RunOptions};
 use font::shared_grid::{GridMetrics, SharedGrid};
 use font::shared_grid_set::SharedGridPtr;
 use font::types::{Cell, FontFeatureSpec, FontIndex, ShapeOptions, Style, TextRun};
-use ghostty_vt::{CellStyle, ColorRGB, CursorState, DirtyState, RawCell, RenderFrame};
+use ghostty::{CellStyle, ColorRGB, CursorState, DirtyState, RawCell, RenderFrame};
 
 /// Bright palette offset — Ghostty's `color.Name.bright_black` == 8.
 const BRIGHT_PALETTE_OFFSET: usize = 8;

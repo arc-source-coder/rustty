@@ -43,7 +43,7 @@
 /// never be read or dropped.
 ///
 /// Ghostty reference:
-///   `crates/ghostty-vt/zig/ghostty/src/datastruct/cache_table.zig`
+///   `zig/ghostty/src/datastruct/cache_table.zig`
 use std::mem::MaybeUninit;
 use std::ptr;
 

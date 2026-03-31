@@ -14,7 +14,7 @@
 /// semantics — cached cell arrays are never mutated after insertion.
 ///
 /// Ghostty reference:
-///   `crates/ghostty-vt/zig/ghostty/src/font/shaper/Cache.zig`
+///   `zig/ghostty/src/font/shaper/Cache.zig`
 ///
 /// Sizing (from Ghostty source comments):
 ///   256 buckets — "an average of 256 frequently cached runs is a safe

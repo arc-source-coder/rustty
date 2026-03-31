@@ -79,7 +79,7 @@ impl Terminal {
     /// Returns `None` if allocation fails.
     pub fn new(cols: u16, rows: u16, fg: ColorRGB, bg: ColorRGB) -> Option<Self> {
         let handle = unsafe {
-            ghostty_vt_terminal_new(cols, rows, fg.r(), fg.g(), fg.b(), bg.r(), bg.g(), bg.b())
+            ghostty_terminal_new(cols, rows, fg.r(), fg.g(), fg.b(), bg.r(), bg.g(), bg.b())
         };
         if handle.is_null() {
             return None;
@@ -92,7 +92,7 @@ impl Terminal {
         // even if Terminal is moved.
         let userdata = &mut *events as *mut Vec<VtEvent> as *mut c_void;
         unsafe {
-            ghostty_vt_terminal_set_callbacks(
+            ghostty_terminal_set_callbacks(
                 handle,
                 userdata,
                 Some(bell_trampoline as BellCallback),
@@ -112,14 +112,14 @@ impl Terminal {
             return;
         }
         unsafe {
-            ghostty_vt_terminal_feed(self.handle, bytes.as_ptr(), bytes.len());
+            ghostty_terminal_feed(self.handle, bytes.as_ptr(), bytes.len());
         }
     }
 
     /// Resize the terminal grid.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         unsafe {
-            ghostty_vt_terminal_resize(self.handle, cols, rows);
+            ghostty_terminal_resize(self.handle, cols, rows);
         }
     }
 
@@ -127,7 +127,7 @@ impl Terminal {
     /// font metrics change. Needed for size report responses (CSI 14t, 16t).
     pub fn set_cell_size(&mut self, width_px: u16, height_px: u16) {
         unsafe {
-            ghostty_vt_terminal_set_cell_size(self.handle, width_px, height_px);
+            ghostty_terminal_set_cell_size(self.handle, width_px, height_px);
         }
     }
 
@@ -174,7 +174,7 @@ impl Terminal {
         // skipping the frame. The dirty flags are unchanged, so the next
         // successful update will re-render the affected rows.
         unsafe {
-            ghostty_vt_terminal_render_update(self.handle);
+            ghostty_terminal_render_update(self.handle);
         }
         RenderFrame {
             handle: self.handle,
@@ -185,48 +185,48 @@ impl Terminal {
 
     /// Current mouse event reporting mode.
     pub fn mouse_mode(&self) -> MouseMode {
-        MouseMode::from_raw(unsafe { ghostty_vt_terminal_get_mouse_mode(self.handle) })
+        MouseMode::from_raw(unsafe { ghostty_terminal_get_mouse_mode(self.handle) })
     }
 
     /// Current mouse coordinate format.
     pub fn mouse_format(&self) -> MouseFormat {
-        MouseFormat::from_raw(unsafe { ghostty_vt_terminal_get_mouse_format(self.handle) })
+        MouseFormat::from_raw(unsafe { ghostty_terminal_get_mouse_format(self.handle) })
     }
 
     /// Whether bracketed paste mode is active.
     pub fn is_bracketed_paste(&self) -> bool {
-        unsafe { ghostty_vt_terminal_is_bracketed_paste(self.handle) != 0 }
+        unsafe { ghostty_terminal_is_bracketed_paste(self.handle) != 0 }
     }
 
     /// Kitty keyboard protocol flags (5-bit bitfield).
     pub fn kitty_keyboard_flags(&self) -> u8 {
-        unsafe { ghostty_vt_terminal_get_kitty_keyboard_flags(self.handle) }
+        unsafe { ghostty_terminal_get_kitty_keyboard_flags(self.handle) }
     }
 
     /// Whether synchronized output mode (DEC 2026) is active.
     pub fn is_synchronized_output(&self) -> bool {
-        unsafe { ghostty_vt_terminal_is_synchronized_output(self.handle) != 0 }
+        unsafe { ghostty_terminal_is_synchronized_output(self.handle) != 0 }
     }
 
     /// Reset synchronized output mode (DEC 2026).
     /// Used by the sync-output safety timer to unfreeze misbehaving programs.
     pub fn reset_synchronized_output(&mut self) {
-        unsafe { ghostty_vt_terminal_reset_synchronized_output(self.handle) }
+        unsafe { ghostty_terminal_reset_synchronized_output(self.handle) }
     }
 
     /// Whether focus event mode (DEC 1004) is active.
     pub fn is_focus_event_mode(&self) -> bool {
-        unsafe { ghostty_vt_terminal_is_focus_event_mode(self.handle) != 0 }
+        unsafe { ghostty_terminal_is_focus_event_mode(self.handle) != 0 }
     }
 
     /// Whether the alternate screen is active.
     pub fn is_alternate_screen(&self) -> bool {
-        unsafe { ghostty_vt_terminal_is_alternate_screen(self.handle) != 0 }
+        unsafe { ghostty_terminal_is_alternate_screen(self.handle) != 0 }
     }
 
     /// Whether alternate scroll mode (DEC 1007) is active.
     pub fn mouse_alternate_scroll_enabled(&self) -> bool {
-        unsafe { ghostty_vt_terminal_is_mouse_alternate_scroll(self.handle) != 0 }
+        unsafe { ghostty_terminal_is_mouse_alternate_scroll(self.handle) != 0 }
     }
 
     /// Snapshot all input-relevant mode flags into an [`InputOpts`].
@@ -236,7 +236,7 @@ impl Terminal {
     /// the lock immediately after this call and encode outside the lock
     /// using [`encode_key`] / [`encode_mouse`].
     pub fn input_opts(&self) -> InputOpts {
-        let raw = unsafe { ghostty_vt_terminal_get_input_opts(self.handle) };
+        let raw = unsafe { ghostty_terminal_get_input_opts(self.handle) };
         InputOpts {
             cursor_key_application: raw.cursor_key_application != 0,
             keypad_key_application: raw.keypad_key_application != 0,
@@ -256,34 +256,34 @@ impl Terminal {
     /// Scroll the viewport by delta rows.
     /// Negative = up (towards history), positive = down.
     pub fn scroll_viewport(&mut self, delta: i32) {
-        unsafe { ghostty_vt_terminal_scroll_viewport(self.handle, delta) }
+        unsafe { ghostty_terminal_scroll_viewport(self.handle, delta) }
     }
 
     /// Scroll the viewport to the top of scrollback.
     pub fn scroll_to_top(&mut self) {
-        unsafe { ghostty_vt_terminal_scroll_viewport_top(self.handle) }
+        unsafe { ghostty_terminal_scroll_viewport_top(self.handle) }
     }
 
     /// Scroll the viewport to the bottom (active area).
     pub fn scroll_to_bottom(&mut self) {
-        unsafe { ghostty_vt_terminal_scroll_viewport_bottom(self.handle) }
+        unsafe { ghostty_terminal_scroll_viewport_bottom(self.handle) }
     }
 
     /// Scroll viewport to an absolute row offset from the top of scrollback.
     pub fn scroll_to_row(&mut self, row: u64) {
-        unsafe { ghostty_vt_terminal_scroll_to_row(self.handle, row) }
+        unsafe { ghostty_terminal_scroll_to_row(self.handle, row) }
     }
 
     /// Read-only - Whether the viewport is at the bottom (active area).
     pub fn viewport_is_bottom(&self) -> bool {
-        unsafe { ghostty_vt_terminal_viewport_is_bottom(self.handle) != 0 }
+        unsafe { ghostty_terminal_viewport_is_bottom(self.handle) != 0 }
     }
 
     /// Query scrollbar positioning info (total rows, viewport offset, viewport size).
     /// Read-only - Can be called under the mutex for snapshot coherence.
     pub fn scrollbar_info(&self) -> ScrollbarInfo {
         let mut out = ScrollbarInfo::default();
-        unsafe { ghostty_vt_terminal_scrollbar_info(self.handle, &mut out) };
+        unsafe { ghostty_terminal_scrollbar_info(self.handle, &mut out) };
         out
     }
 
@@ -300,7 +300,7 @@ impl Terminal {
         rectangular: bool,
     ) -> bool {
         let rc = unsafe {
-            ghostty_vt_terminal_set_selection(
+            ghostty_terminal_set_selection(
                 self.handle,
                 start_x,
                 start_y,
@@ -316,7 +316,7 @@ impl Terminal {
     /// terminal-side word selection semantics.
     /// Returns `true` if a selection was created.
     pub fn select_word_at(&mut self, x: u16, y: u32) -> bool {
-        let rc = unsafe { ghostty_vt_terminal_select_word_at(self.handle, x, y) };
+        let rc = unsafe { ghostty_terminal_select_word_at(self.handle, x, y) };
         rc == 0
     }
 
@@ -324,7 +324,7 @@ impl Terminal {
     /// using Ghostty's terminal-side line selection semantics.
     /// Returns `true` if a selection was created.
     pub fn select_line_at(&mut self, x: u16, y: u32) -> bool {
-        let rc = unsafe { ghostty_vt_terminal_select_line_at(self.handle, x, y) };
+        let rc = unsafe { ghostty_terminal_select_line_at(self.handle, x, y) };
         rc == 0
     }
 
@@ -332,7 +332,7 @@ impl Terminal {
     /// Ghostty's semantic prompt integration.
     /// Returns `true` if a selection was created.
     pub fn select_output_at(&mut self, x: u16, y: u32) -> bool {
-        let rc = unsafe { ghostty_vt_terminal_select_output_at(self.handle, x, y) };
+        let rc = unsafe { ghostty_terminal_select_output_at(self.handle, x, y) };
         rc == 0
     }
 
@@ -347,7 +347,7 @@ impl Terminal {
         drag_y: u32,
     ) -> bool {
         let rc = unsafe {
-            ghostty_vt_terminal_select_word_drag(self.handle, click_x, click_y, drag_x, drag_y)
+            ghostty_terminal_select_word_drag(self.handle, click_x, click_y, drag_x, drag_y)
         };
         rc == 0
     }
@@ -363,21 +363,21 @@ impl Terminal {
         drag_y: u32,
     ) -> bool {
         let rc = unsafe {
-            ghostty_vt_terminal_select_line_drag(self.handle, click_x, click_y, drag_x, drag_y)
+            ghostty_terminal_select_line_drag(self.handle, click_x, click_y, drag_x, drag_y)
         };
         rc == 0
     }
 
     /// Clear any active selection.
     pub fn clear_selection(&mut self) {
-        unsafe { ghostty_vt_terminal_clear_selection(self.handle) }
+        unsafe { ghostty_terminal_clear_selection(self.handle) }
     }
 
     /// Get the currently selected text. Returns `None` if no selection.
     /// The returned `SelectionText` frees its memory on drop.
     pub fn selection_text(&self) -> Option<SelectionText> {
         let mut len: usize = 0;
-        let ptr = unsafe { ghostty_vt_terminal_get_selection_text(self.handle, &mut len) };
+        let ptr = unsafe { ghostty_terminal_get_selection_text(self.handle, &mut len) };
         if ptr.is_null() {
             return None;
         }
@@ -388,7 +388,7 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         unsafe {
-            ghostty_vt_terminal_free(self.handle);
+            ghostty_terminal_free(self.handle);
         }
     }
 }
@@ -419,7 +419,7 @@ impl RenderFrame {
     /// that is stable for the lifetime of this RenderFrame.
     pub fn row_raw(&self, y: u16) -> Option<&[RawCell]> {
         let mut len: u16 = 0;
-        let ptr = unsafe { ghostty_vt_terminal_render_row_raw(self.handle, y, &mut len) };
+        let ptr = unsafe { ghostty_terminal_render_row_raw(self.handle, y, &mut len) };
         if ptr.is_null() || len == 0 {
             return None;
         }
@@ -436,7 +436,7 @@ impl RenderFrame {
     /// RawCell's style_id != 0 or content_tag is bg_color_*.
     pub fn row_styles(&self, y: u16) -> Option<&[CellStyle]> {
         let mut len: u16 = 0;
-        let ptr = unsafe { ghostty_vt_terminal_render_row_styles(self.handle, y, &mut len) };
+        let ptr = unsafe { ghostty_terminal_render_row_styles(self.handle, y, &mut len) };
         if ptr.is_null() || len == 0 {
             return None;
         }
@@ -466,7 +466,7 @@ impl RenderFrame {
     /// is stable for the frame lifetime (until the next `render_update()`).
     pub fn row_graphemes(&self, row: u16) -> Option<&[GraphemeSlice]> {
         let mut len: u16 = 0;
-        let ptr = unsafe { ghostty_vt_terminal_render_row_graphemes(self.handle, row, &mut len) };
+        let ptr = unsafe { ghostty_terminal_render_row_graphemes(self.handle, row, &mut len) };
         if ptr.is_null() || len == 0 {
             return None;
         }
@@ -478,26 +478,26 @@ impl RenderFrame {
     /// Current dirty state of the render data.
     #[inline(always)]
     pub fn dirty(&self) -> DirtyState {
-        let raw = unsafe { ghostty_vt_terminal_render_dirty(self.handle) };
+        let raw = unsafe { ghostty_terminal_render_dirty(self.handle) };
         DirtyState::from_raw(raw)
     }
 
     /// Number of rows in the current render state.
     #[inline(always)]
     pub fn rows(&self) -> u16 {
-        unsafe { ghostty_vt_terminal_render_rows(self.handle) }
+        unsafe { ghostty_terminal_render_rows(self.handle) }
     }
 
     /// Number of columns in the current render state.
     #[inline(always)]
     pub fn cols(&self) -> u16 {
-        unsafe { ghostty_vt_terminal_render_cols(self.handle) }
+        unsafe { ghostty_terminal_render_cols(self.handle) }
     }
 
     /// Whether a specific row has changed since last clear.
     #[inline(always)]
     pub fn row_dirty(&self, y: u16) -> bool {
-        unsafe { ghostty_vt_terminal_render_row_dirty(self.handle, y) != 0 }
+        unsafe { ghostty_terminal_render_row_dirty(self.handle, y) != 0 }
     }
 
     /// Get selection range for a row. Returns `Some((start_x, end_x))` if
@@ -506,7 +506,7 @@ impl RenderFrame {
         let mut start_x: u16 = 0;
         let mut end_x: u16 = 0;
         let has = unsafe {
-            ghostty_vt_terminal_render_row_selection(self.handle, y, &mut start_x, &mut end_x)
+            ghostty_terminal_render_row_selection(self.handle, y, &mut start_x, &mut end_x)
         };
         if has != 0 {
             Some((start_x, end_x))
@@ -518,13 +518,13 @@ impl RenderFrame {
     /// Current cursor state.
     pub fn cursor(&self) -> CursorState {
         let mut out = CursorState::default();
-        unsafe { ghostty_vt_terminal_render_cursor(self.handle, &mut out) };
+        unsafe { ghostty_terminal_render_cursor(self.handle, &mut out) };
         out
     }
 
     /// Current terminal colors (foreground, background, cursor).
     pub fn colors(&self) -> &RenderColors {
-        let ptr = unsafe { ghostty_vt_terminal_render_colors(self.handle) };
+        let ptr = unsafe { ghostty_terminal_render_colors(self.handle) };
         // Safety: pointer is into RenderState memory, stable until next render_update().
         unsafe { &*ptr }
     }
@@ -533,7 +533,7 @@ impl RenderFrame {
 impl Drop for RenderFrame {
     fn drop(&mut self) {
         unsafe {
-            ghostty_vt_terminal_render_clear_dirty(self.handle);
+            ghostty_terminal_render_clear_dirty(self.handle);
         }
     }
 }
@@ -570,7 +570,7 @@ impl Debug for SelectionText {
 
 impl Drop for SelectionText {
     fn drop(&mut self) {
-        unsafe { ghostty_vt_bytes_free(self.ptr, self.len) }
+        unsafe { ghostty_terminal_bytes_free(self.ptr, self.len) }
     }
 }
 
@@ -635,7 +635,7 @@ pub fn encode_key(
         text.as_ptr()
     };
     unsafe {
-        ghostty_vt_encode_key(
+        ghostty_terminal_encode_key(
             opts.to_c(),
             key as c_int,
             mods,
@@ -664,7 +664,7 @@ pub fn encode_mouse(
     buf: &mut [u8],
 ) -> usize {
     unsafe {
-        ghostty_vt_encode_mouse(
+        ghostty_terminal_encode_mouse(
             opts.to_c(),
             button,
             action,
@@ -685,6 +685,6 @@ pub fn encode_mouse(
 ///
 /// Example W3C codes: "KeyA", "Enter", "ArrowLeft", "F1", "Digit0"
 pub fn key_from_w3c(code: &str) -> Option<i32> {
-    let result = unsafe { ghostty_vt_key_from_w3c(code.as_ptr(), code.len()) };
+    let result = unsafe { ghostty_terminal_key_from_w3c(code.as_ptr(), code.len()) };
     if result < 0 { None } else { Some(result) }
 }

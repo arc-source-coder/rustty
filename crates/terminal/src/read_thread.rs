@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use async_channel::Sender;
 use bytes::Bytes;
-use ghostty_vt::{Terminal, VtEvent};
+use ghostty::{Terminal, VtEvent};
 use pty::{PtyReader, WindowSize};
 use windows_sys::Win32::Foundation::HANDLE;
 

@@ -3,7 +3,7 @@ use crate::shaper::shaper::Codepoint;
 use crate::shared_grid::SharedGrid;
 use crate::types::Presentation;
 use crate::types::{FontIndex, Style, TextRun};
-use ghostty_vt::{CellStyle, GraphemeSlice, RawCell, StyleColor};
+use ghostty::{CellStyle, GraphemeSlice, RawCell, StyleColor};
 
 const KITTY_UNICODE_PLACEHOLDER: u32 = 0x10EEEE;
 

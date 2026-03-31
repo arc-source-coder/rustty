@@ -10,7 +10,7 @@ use rapidhash::fast::RapidHasher;
 /// 3. The font identity key for the run.
 ///
 /// Ghostty reference:
-///   `crates/ghostty-vt/zig/ghostty/src/font/shaper/run.zig` — `RunIterator.next`
+///   `zig/ghostty/src/font/shaper/run.zig` — `RunIterator.next`
 ///   + `addCodepoint` which feeds `(cp, cluster)` pairs via `autoHash`.
 use std::hash::Hasher;
 

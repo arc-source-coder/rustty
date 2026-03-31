@@ -5,7 +5,7 @@ use bytes::Bytes;
 use crossbeam_queue::ArrayQueue;
 use gpui::{AsyncApp, Context, Entity, Keystroke, Modifiers, Task, WeakEntity};
 
-use ghostty_vt::{ColorRGB, Terminal};
+use ghostty::{ColorRGB, Terminal};
 use pty::{Options, Shell, WindowSize};
 
 use crate::config::{RenderConfig, SpawnConfig};

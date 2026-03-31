@@ -49,7 +49,7 @@ impl Presentation {
 ///   `[12:0]`  face index   (13 bits, up to 8,192 faces per style)
 ///
 /// Ghostty reference:
-///   `crates/ghostty-vt/zig/ghostty/src/font/Collection.zig` — `Index`
+///   `zig/ghostty/src/font/Collection.zig` — `Index`
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]
 #[repr(transparent)]
 pub struct FontIndex(u16);
@@ -386,22 +386,22 @@ pub struct TextRun {
     /// Position-independent run hash for shaped-run cache keys.
     ///
     /// Ghostty reference:
-    /// `crates/ghostty-vt/zig/ghostty/src/font/shaper/run.zig` (`TextRun.hash`).
+    /// `zig/ghostty/src/font/shaper/run.zig` (`TextRun.hash`).
     pub hash: u64,
     /// Start column offset of this run in the row.
     ///
     /// Ghostty reference:
-    /// `crates/ghostty-vt/zig/ghostty/src/font/shaper/run.zig` (`TextRun.offset`).
+    /// `zig/ghostty/src/font/shaper/run.zig` (`TextRun.offset`).
     pub offset: u16,
     /// Number of terminal cells covered by this run.
     ///
     /// Ghostty reference:
-    /// `crates/ghostty-vt/zig/ghostty/src/font/shaper/run.zig` (`TextRun.cells`).
+    /// `zig/ghostty/src/font/shaper/run.zig` (`TextRun.cells`).
     pub cells: u16,
     /// Dense font face identity for the shaped segment.
     ///
     /// Ghostty reference:
-    /// `crates/ghostty-vt/zig/ghostty/src/font/shaper/run.zig` (`TextRun.font_index`).
+    /// `zig/ghostty/src/font/shaper/run.zig` (`TextRun.font_index`).
     pub font_index: FontIndex,
 }
 
@@ -410,22 +410,22 @@ pub struct Cell {
     /// Cell-local X position relative to `TextRun.offset`.
     ///
     /// Ghostty reference:
-    /// `crates/ghostty-vt/zig/ghostty/src/font/shape.zig` (`Cell.x`).
+    /// `zig/ghostty/src/font/shape.zig` (`Cell.x`).
     pub x: u16,
     /// Additional X offset applied at render time.
     ///
     /// Ghostty reference:
-    /// `crates/ghostty-vt/zig/ghostty/src/font/shape.zig` (`Cell.x_offset`).
+    /// `zig/ghostty/src/font/shape.zig` (`Cell.x_offset`).
     pub x_offset: i16,
     /// Additional Y offset applied at render time.
     ///
     /// Ghostty reference:
-    /// `crates/ghostty-vt/zig/ghostty/src/font/shape.zig` (`Cell.y_offset`).
+    /// `zig/ghostty/src/font/shape.zig` (`Cell.y_offset`).
     pub y_offset: i16,
     /// Glyph id/index in the mapped font face.
     ///
     /// Ghostty reference:
-    /// `crates/ghostty-vt/zig/ghostty/src/font/shape.zig` (`Cell.glyph_index`).
+    /// `zig/ghostty/src/font/shape.zig` (`Cell.glyph_index`).
     pub glyph_index: u32,
 }
 
@@ -499,7 +499,7 @@ pub struct ShapedCells<'a> {
     ///
     /// Ghostty equivalent:
     /// `[]font.shape.Cell` returned from shaper `shape(run)` and cached in
-    /// `crates/ghostty-vt/zig/ghostty/src/font/shaper/Cache.zig`.
+    /// `zig/ghostty/src/font/shaper/Cache.zig`.
     pub cells: &'a [Cell],
     /// UTF-16 cluster to glyph-start map, with sentinel at `text_len`.
     ///

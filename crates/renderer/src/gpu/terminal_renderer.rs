@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_channel::Sender;
 use crossbeam_channel::unbounded;
-use ghostty_vt::{ScrollbarInfo, Terminal};
+use ghostty::{ScrollbarInfo, Terminal};
 use gpui::{CompositionSlot, CompositionSlotEvent, Pixels, Window};
 use std::sync::{Arc, Mutex};
 use terminal::RendererMessage;

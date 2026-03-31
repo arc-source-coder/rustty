@@ -194,7 +194,7 @@ pub const TerminalHandle = struct {
     handler: ShimHandler,
     callbacks: Callbacks,
     render_state: terminal.RenderState,
-    /// Cell pixel dimensions — set by Rust via ghostty_vt_terminal_set_cell_size().
+    /// Cell pixel dimensions — set by Rust via ghostty_terminal_set_cell_size().
     /// Used for size report responses (CSI 14t, CSI 16t).
     /// Zero means "not yet measured" — size reports that need pixel info
     /// will be skipped until the renderer provides real values.

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ghostty_vt::{MouseMode, Terminal};
+use ghostty::{MouseMode, Terminal};
 use gpui::{Modifiers, ScrollDelta};
 
 use crate::input::{ENCODE_BUF_SIZE, encode_mouse_event};
@@ -373,7 +373,7 @@ impl TerminalSurface {
 
     fn send_mouse_event_with_opts(
         io_notify: &Arc<IoThreadNotify>,
-        opts: ghostty_vt::InputOpts,
+        opts: ghostty::InputOpts,
         button: u8,
         action: u8,
         mods: &Modifiers,
@@ -400,7 +400,7 @@ impl TerminalSurface {
 }
 
 struct ScrollContext {
-    opts: ghostty_vt::InputOpts,
+    opts: ghostty::InputOpts,
     is_alternate_screen: bool,
     mouse_alternate_scroll: bool,
     selection_cleared: bool,

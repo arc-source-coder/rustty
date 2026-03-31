@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/app",
     "crates/font",
-    "crates/ghostty-vt",
+    "crates/ghostty",
     "crates/pty",
     "crates/renderer",
     "crates/terminal",

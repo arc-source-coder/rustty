@@ -3,7 +3,7 @@ use std::sync::RwLock;
 
 #[cfg(target_os = "windows")]
 use anyhow::Result;
-use ghostty_vt::RawCell;
+use ghostty::RawCell;
 use rapidhash::{HashMapExt, RapidHashMap};
 
 use crate::atlas::{Atlas, Format, INITIAL_SIZE};
@@ -36,7 +36,7 @@ pub struct GridMetrics {
 /// discipline for atlas access and mutation.
 ///
 /// Ghostty reference:
-///   `crates/ghostty-vt/zig/ghostty/src/font/SharedGrid.zig`
+///   `zig/ghostty/src/font/SharedGrid.zig`
 pub struct SharedGrid {
     /// Maximum atlas side length (from D3D11 device caps). `0` = no limit.
     max_atlas_size: u32,

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use ghostty_vt::ScrollbarInfo;
+use terminal::ScrollbarInfo;
 use gpui::{
     App, BorderStyle, Bounds, Context, Corners, CursorStyle, DispatchPhase, Edges, Element,
     ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,

@@ -17,7 +17,7 @@
 /// increment `modified`; `grow` additionally increments `resized`.
 ///
 /// Ghostty reference:
-///   `crates/ghostty-vt/zig/ghostty/src/font/Atlas.zig`
+///   `zig/ghostty/src/font/Atlas.zig`
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Initial atlas side length (matches Ghostty's `512`).

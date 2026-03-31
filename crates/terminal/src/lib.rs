@@ -8,6 +8,7 @@ mod surface;
 mod types;
 
 pub use config::{RenderConfig, SpawnConfig};
+pub use ghostty::ScrollbarInfo;
 pub use input::{encode_focus_change, encode_key_event, encode_mouse_event, encode_paste};
 pub use session::TerminalSession;
 pub use surface::AppAction;

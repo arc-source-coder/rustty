@@ -2,7 +2,7 @@
 //!
 //! The renderer normalizes GPUI events and calls methods here.
 //! This module snapshots terminal input mode flags and encodes events
-//! lock-free using ghostty_vt's encode_key/encode_mouse functions.
+//! lock-free using ghostty's encode_key/encode_mouse functions.
 //!
 //! Key mapping strategy:
 //! GPUI Keystroke.key (string) → W3C key code (string) → Ghostty Key (i32)
@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use ghostty_vt::{InputOpts, encode_key, encode_mouse};
+use ghostty::{InputOpts, encode_key, encode_mouse};
 
 /// Maximum size for key/mouse encode output buffers.
 /// Ghostty's key encoder can produce up to ~32 bytes for complex
@@ -110,7 +110,7 @@ fn key_map() -> &'static HashMap<String, i32> {
 
         // Named keys via W3C codes
         for &(gpui_key, w3c_code) in GPUI_TO_W3C {
-            if let Some(val) = ghostty_vt::key_from_w3c(w3c_code) {
+            if let Some(val) = ghostty::key_from_w3c(w3c_code) {
                 map.insert(gpui_key.to_string(), val);
             }
         }
@@ -119,7 +119,7 @@ fn key_map() -> &'static HashMap<String, i32> {
         for ch in b'a'..=b'z' {
             let gpui_key = String::from(ch as char);
             let w3c = format!("Key{}", (ch as char).to_ascii_uppercase());
-            if let Some(val) = ghostty_vt::key_from_w3c(&w3c) {
+            if let Some(val) = ghostty::key_from_w3c(&w3c) {
                 map.insert(gpui_key, val);
             }
         }
@@ -128,7 +128,7 @@ fn key_map() -> &'static HashMap<String, i32> {
         for ch in b'0'..=b'9' {
             let gpui_key = String::from(ch as char);
             let w3c = format!("Digit{}", ch as char);
-            if let Some(val) = ghostty_vt::key_from_w3c(&w3c) {
+            if let Some(val) = ghostty::key_from_w3c(&w3c) {
                 map.insert(gpui_key, val);
             }
         }
@@ -149,7 +149,7 @@ fn key_map() -> &'static HashMap<String, i32> {
             (" ", "Space"),
         ];
         for &(gpui_key, w3c_code) in symbols {
-            if let Some(val) = ghostty_vt::key_from_w3c(w3c_code) {
+            if let Some(val) = ghostty::key_from_w3c(w3c_code) {
                 map.insert(gpui_key.to_string(), val);
             }
         }

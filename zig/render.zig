@@ -161,7 +161,7 @@ pub const GraphemeSlice = extern struct {
 
 /// Update the persistent RenderState from current terminal state.
 /// Returns 0 on success, 1 if null handle, 2 on allocation error.
-export fn ghostty_vt_terminal_render_update(ptr: ?*anyopaque) callconv(.c) c_int {
+export fn ghostty_terminal_render_update(ptr: ?*anyopaque) callconv(.c) c_int {
     if (ptr == null) return 1;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     handle.render_state.update(handle.alloc, &handle.terminal_inst) catch return 2;
@@ -170,7 +170,7 @@ export fn ghostty_vt_terminal_render_update(ptr: ?*anyopaque) callconv(.c) c_int
 }
 
 /// Returns dirty state: 0=false, 1=partial, 2=full
-export fn ghostty_vt_terminal_render_dirty(ptr: ?*anyopaque) callconv(.c) u8 {
+export fn ghostty_terminal_render_dirty(ptr: ?*anyopaque) callconv(.c) u8 {
     if (ptr == null) return 0;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     return switch (handle.render_state.dirty) {
@@ -181,7 +181,7 @@ export fn ghostty_vt_terminal_render_dirty(ptr: ?*anyopaque) callconv(.c) u8 {
 }
 
 /// Clear the dirty state (call after rendering)
-export fn ghostty_vt_terminal_render_clear_dirty(ptr: ?*anyopaque) callconv(.c) void {
+export fn ghostty_terminal_render_clear_dirty(ptr: ?*anyopaque) callconv(.c) void {
     if (ptr == null) return;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     handle.render_state.dirty = .false;
@@ -192,21 +192,21 @@ export fn ghostty_vt_terminal_render_clear_dirty(ptr: ?*anyopaque) callconv(.c) 
 }
 
 /// Returns number of rows in the current render state
-export fn ghostty_vt_terminal_render_rows(ptr: ?*anyopaque) callconv(.c) u16 {
+export fn ghostty_terminal_render_rows(ptr: ?*anyopaque) callconv(.c) u16 {
     if (ptr == null) return 0;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     return handle.render_state.rows;
 }
 
 /// Returns number of columns in the current render state
-export fn ghostty_vt_terminal_render_cols(ptr: ?*anyopaque) callconv(.c) u16 {
+export fn ghostty_terminal_render_cols(ptr: ?*anyopaque) callconv(.c) u16 {
     if (ptr == null) return 0;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     return handle.render_state.cols;
 }
 
 /// Returns 1 if the given row is dirty, 0 otherwise
-export fn ghostty_vt_terminal_render_row_dirty(ptr: ?*anyopaque, row: u16) callconv(.c) u8 {
+export fn ghostty_terminal_render_row_dirty(ptr: ?*anyopaque, row: u16) callconv(.c) u8 {
     if (ptr == null) return 0;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     if (row >= handle.render_state.rows) return 0;
@@ -214,7 +214,7 @@ export fn ghostty_vt_terminal_render_row_dirty(ptr: ?*anyopaque, row: u16) callc
 }
 
 /// Get cursor state from the current render state
-export fn ghostty_vt_terminal_render_cursor(ptr: ?*anyopaque, out: ?*CursorState) callconv(.c) c_int {
+export fn ghostty_terminal_render_cursor(ptr: ?*anyopaque, out: ?*CursorState) callconv(.c) c_int {
     if (ptr == null or out == null) return 1;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     const c = &handle.render_state.cursor;
@@ -247,7 +247,7 @@ export fn ghostty_vt_terminal_render_cursor(ptr: ?*anyopaque, out: ?*CursorState
 /// Returns a direct pointer to `RenderState.colors` (zero-copy).
 ///
 /// Valid until next `render_update()` call.
-export fn ghostty_vt_terminal_render_colors(ptr: ?*anyopaque) callconv(.c) ?*const RenderColors {
+export fn ghostty_terminal_render_colors(ptr: ?*anyopaque) callconv(.c) ?*const RenderColors {
     if (ptr == null) return null;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     return @ptrCast(&handle.render_state.colors);
@@ -255,7 +255,7 @@ export fn ghostty_vt_terminal_render_colors(ptr: ?*anyopaque) callconv(.c) ?*con
 
 /// Get selection range for a row. Returns 1 if row has a selection, 0 otherwise.
 /// When returning 1, start_x and end_x are set to the selection column range.
-export fn ghostty_vt_terminal_render_row_selection(
+export fn ghostty_terminal_render_row_selection(
     ptr: ?*anyopaque,
     row: u16,
     start_x: ?*u16,
@@ -277,7 +277,7 @@ export fn ghostty_vt_terminal_render_row_selection(
 /// Returns a direct pointer into RenderState's page.Cell array for a row.
 /// Zero-copy: the pointer is into persistent Zig memory.
 /// Valid until the next render_update() call.
-export fn ghostty_vt_terminal_render_row_raw(
+export fn ghostty_terminal_render_row_raw(
     ptr: ?*anyopaque,
     row: u16,
     out_len: ?*u16,
@@ -298,7 +298,7 @@ export fn ghostty_vt_terminal_render_row_raw(
 /// Valid until the next render_update() call.
 /// The Style data at column `col` is only valid if the corresponding
 /// page.Cell's style_id is non-zero OR content_tag is bg_color_*.
-export fn ghostty_vt_terminal_render_row_styles(
+export fn ghostty_terminal_render_row_styles(
     ptr: ?*anyopaque,
     row: u16,
     out_len: ?*u16,
@@ -324,7 +324,7 @@ export fn ghostty_vt_terminal_render_row_styles(
 ///
 /// Zero-copy: the pointer is into persistent Zig memory.
 /// Valid until the next render_update() call.
-export fn ghostty_vt_terminal_render_row_graphemes(
+export fn ghostty_terminal_render_row_graphemes(
     ptr: ?*anyopaque,
     row: u16,
     out_len: ?*u16,

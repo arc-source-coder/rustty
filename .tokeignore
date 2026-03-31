@@ -3,4 +3,4 @@ docs/
 # Vendored GPUI source
 vendor/zed/
 # Vendored Ghostty submodule
-crates/ghostty-vt/zig/ghostty/
+zig/ghostty/

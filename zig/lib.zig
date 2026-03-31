@@ -19,7 +19,7 @@ const TerminalHandle = handle_mod.TerminalHandle;
 const terminal = @import("ghostty/src/terminal/main.zig");
 const color = terminal.color;
 
-export fn ghostty_vt_terminal_new(
+export fn ghostty_terminal_new(
     cols: u16,
     rows: u16,
     fg_r: u8,
@@ -36,13 +36,13 @@ export fn ghostty_vt_terminal_new(
     return @ptrCast(handle);
 }
 
-export fn ghostty_vt_terminal_free(ptr: ?*anyopaque) callconv(.c) void {
+export fn ghostty_terminal_free(ptr: ?*anyopaque) callconv(.c) void {
     if (ptr == null) return;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
     handle.deinit();
 }
 
-export fn ghostty_vt_terminal_set_callbacks(
+export fn ghostty_terminal_set_callbacks(
     ptr: ?*anyopaque,
     userdata: ?*anyopaque,
     bell: ?BellCallback,
@@ -60,7 +60,7 @@ export fn ghostty_vt_terminal_set_callbacks(
     };
 }
 
-export fn ghostty_vt_terminal_feed(
+export fn ghostty_terminal_feed(
     ptr: ?*anyopaque,
     bytes: [*]const u8,
     len: usize,
@@ -71,7 +71,7 @@ export fn ghostty_vt_terminal_feed(
     return 0;
 }
 
-export fn ghostty_vt_terminal_resize(
+export fn ghostty_terminal_resize(
     ptr: ?*anyopaque,
     cols: u16,
     rows: u16,
@@ -92,7 +92,7 @@ export fn ghostty_vt_terminal_resize(
 
 /// Set cell pixel dimensions for size reports (CSI 14t, CSI 16t) and Kitty graphics.
 /// Called by the renderer whenever font metrics change.
-export fn ghostty_vt_terminal_set_cell_size(
+export fn ghostty_terminal_set_cell_size(
     ptr: ?*anyopaque,
     width_px: u16,
     height_px: u16,

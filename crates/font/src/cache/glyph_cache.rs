@@ -22,7 +22,7 @@
 /// - **Zero padding/alignment waste**
 ///
 /// Ghostty reference:
-///   `crates/ghostty-vt/zig/ghostty/src/font/SharedGrid.zig` — `GlyphKey`,
+///   `zig/ghostty/src/font/SharedGrid.zig` — `GlyphKey`,
 ///   `Render`, and `renderGlyph`.
 ///
 /// WT parallel:

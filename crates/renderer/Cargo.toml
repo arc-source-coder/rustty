@@ -8,7 +8,7 @@ gpui.workspace = true
 bytemuck.workspace = true
 rapidhash.workspace = true
 terminal = { path = "../terminal" }
-ghostty_vt = { path = "../ghostty-vt" }
+ghostty = { path = "../ghostty" }
 font = { path = "../font" }
 ui = { path = "../ui" }
 log.workspace = true

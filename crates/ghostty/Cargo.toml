@@ -1,4 +1,4 @@
 [package]
-name = "ghostty_vt"
+name = "ghostty"
 version.workspace = true
 edition.workspace = true
