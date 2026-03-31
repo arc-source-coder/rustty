@@ -677,6 +677,20 @@ pub fn encode_mouse(
     }
 }
 
+/// Encode paste bytes using Ghostty's paste encoder.
+/// Returns the number of bytes written into `buf`.
+pub fn encode_paste(opts: InputOpts, text: &[u8], buf: &mut [u8]) -> usize {
+    unsafe {
+        ghostty_terminal_encode_paste(
+            opts.to_c(),
+            text.as_ptr(),
+            text.len(),
+            buf.as_mut_ptr(),
+            buf.len(),
+        )
+    }
+}
+
 /// Resolve a W3C key code string to a Ghostty Key enum value (c_int).
 /// Returns `None` if the code is unrecognized.
 ///

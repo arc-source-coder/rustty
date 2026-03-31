@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use ghostty::{InputOpts, encode_key, encode_mouse};
+use ghostty::{InputOpts, encode_key, encode_mouse, encode_paste as ghostty_encode_paste};
 
 /// Maximum size for key/mouse encode output buffers.
 /// Ghostty's key encoder can produce up to ~32 bytes for complex
@@ -261,18 +261,11 @@ pub fn encode_key_event<'a>(
     if n == 0 { None } else { Some(&buf[..n]) }
 }
 
-/// Encode a bracketed paste. Wraps text with `\x1b[200~` / `\x1b[201~`
-/// if bracketed paste mode is active in `opts`, otherwise sends as-is.
-pub fn encode_paste(opts: InputOpts, text: &str) -> Vec<u8> {
-    if opts.bracketed_paste {
-        let mut out = Vec::with_capacity(text.len() + 12);
-        out.extend_from_slice(b"\x1b[200~");
-        out.extend_from_slice(text.as_bytes());
-        out.extend_from_slice(b"\x1b[201~");
-        out
-    } else {
-        text.as_bytes().to_vec()
-    }
+/// Encode paste bytes into a caller-provided buffer.
+///
+/// Returns the number of bytes written, or 0 if `out` is too small.
+pub fn encode_paste(opts: InputOpts, text: &str, out: &mut [u8]) -> usize {
+    ghostty_encode_paste(opts, text.as_bytes(), out)
 }
 
 /// Encode a focus change event.

@@ -10,7 +10,8 @@ use pty::{Options, Shell, WindowSize};
 
 use crate::config::{RenderConfig, SpawnConfig};
 use crate::input::{
-    ENCODE_BUF_SIZE, encode_focus_change, encode_key_event, encode_mouse_event, map_key,
+    ENCODE_BUF_SIZE, encode_focus_change, encode_key_event, encode_mouse_event, encode_paste,
+    map_key,
 };
 use crate::platform::windows::thread::PlatformThread;
 use crate::surface::{AppAction, TerminalSurface};
@@ -292,12 +293,25 @@ impl TerminalSession {
             }
             opts
         };
-        if opts.bracketed_paste {
-            self.write_small_to_pty(b"\x1b[200~");
-            self.write_to_pty(Bytes::copy_from_slice(text.as_bytes()));
-            self.write_small_to_pty(b"\x1b[201~");
-        } else {
-            self.write_to_pty(Bytes::copy_from_slice(text.as_bytes()));
+
+        // Paste output is at most input + bracket fenceposts.
+        let max_len = text.len() + 12;
+        let mut out = Vec::<u8>::with_capacity(max_len);
+        let n = {
+            let spare = out.spare_capacity_mut();
+            // SAFETY: we expose exactly the spare capacity as a temporary
+            // byte slice. `encode_paste` writes initialized bytes only in
+            // the returned prefix `n`, then we set_len(n) below.
+            let out_slice = unsafe {
+                std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, spare.len())
+            };
+            encode_paste(opts, text, out_slice)
+        };
+
+        if n != 0 {
+            // SAFETY: `n` bytes were initialized by `encode_paste`.
+            unsafe { out.set_len(n) };
+            self.write_to_pty(Bytes::from(out));
         }
     }
 

@@ -56,7 +56,6 @@ export fn ghostty_terminal_set_callbacks(
         .bell = bell,
         .title = title,
         .response = response,
-        .handle = handle,
     };
 }
 
@@ -67,7 +66,7 @@ export fn ghostty_terminal_feed(
 ) callconv(.c) c_int {
     if (ptr == null) return 1;
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr.?));
-    handle.stream.nextSlice(bytes[0..len]) catch return 2;
+    handle.stream.nextSlice(bytes[0..len]);
     return 0;
 }
 

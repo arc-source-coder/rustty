@@ -84,13 +84,7 @@ fn test_bell_callback() {
         )
     };
     unsafe {
-        ghostty_terminal_set_callbacks(
-            ptr,
-            std::ptr::null_mut(),
-            Some(bell_handler),
-            None,
-            None,
-        );
+        ghostty_terminal_set_callbacks(ptr, std::ptr::null_mut(), Some(bell_handler), None, None);
     }
     // BEL character (0x07)
     let bel = [0x07u8];

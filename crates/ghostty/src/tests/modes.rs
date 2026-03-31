@@ -21,10 +21,7 @@ fn test_mode_flags_default() {
     assert_eq!(unsafe { ghostty_terminal_get_mouse_mode(ptr) }, 0);
     assert_eq!(unsafe { ghostty_terminal_get_mouse_format(ptr) }, 0);
     assert_eq!(unsafe { ghostty_terminal_is_bracketed_paste(ptr) }, 0);
-    assert_eq!(
-        unsafe { ghostty_terminal_get_kitty_keyboard_flags(ptr) },
-        0
-    );
+    assert_eq!(unsafe { ghostty_terminal_get_kitty_keyboard_flags(ptr) }, 0);
     unsafe { ghostty_terminal_free(ptr) };
 }
 

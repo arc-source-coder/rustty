@@ -36,7 +36,7 @@ fn da2_secondary_response() {
         })
         .collect();
     assert_eq!(responses.len(), 1);
-    assert_eq!(responses[0], b"\x1B[>1;10;0c");
+    assert_eq!(responses[0], b"\x1B[>1;0;0c");
 }
 
 #[test]
@@ -103,6 +103,7 @@ fn kitty_keyboard_query() {
 #[test]
 fn size_report_csi_18t() {
     let mut term = Terminal::new(80, 24, DEFAULT_FG, DEFAULT_BG).unwrap();
+    term.set_cell_size(8, 16);
     // Query grid size: CSI 18 t
     term.feed(b"\x1B[18t");
     let mut events: Vec<VtEvent> = Vec::new();

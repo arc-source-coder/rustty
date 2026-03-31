@@ -29,6 +29,8 @@ struct TerminalElementState {
     /// Grid dimensions at last prepaint.
     last_cols: u16,
     last_rows: u16,
+    last_cell_width_px: u16,
+    last_cell_height_px: u16,
     last_device_bounds: Bounds<DevicePixels>,
 }
 
@@ -153,12 +155,16 @@ impl Element for TerminalElement {
                 self.composition_slot.set_bounds(device_bounds);
             }
 
+            let cell_w = metrics.cell_width.max(1.0).round() as u16;
+            let cell_h = metrics.line_height.max(1.0).round() as u16;
+
             let size_changed = prev_state
                 .as_ref()
                 .is_none_or(|s| s.last_cols != grid.cols || s.last_rows != grid.rows);
-            if size_changed {
-                let cell_w = metrics.cell_width.max(1.0).round() as u16;
-                let cell_h = metrics.line_height.max(1.0).round() as u16;
+            let metrics_changed = prev_state
+                .as_ref()
+                .is_none_or(|s| s.last_cell_width_px != cell_w || s.last_cell_height_px != cell_h);
+            if size_changed || metrics_changed {
                 session.update(cx, |s, _cx| {
                     s.request_resize(grid.cols, grid.rows, cell_w, cell_h);
                 });
@@ -168,6 +174,8 @@ impl Element for TerminalElement {
             let new_state = TerminalElementState {
                 last_cols: grid.cols,
                 last_rows: grid.rows,
+                last_cell_width_px: cell_w,
+                last_cell_height_px: cell_h,
                 last_device_bounds: device_bounds,
             };
 

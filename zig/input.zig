@@ -12,8 +12,9 @@ const TerminalHandle = handle_mod.TerminalHandle;
 
 const key_encode = @import("ghostty/src/input/key_encode.zig");
 const input_key = @import("ghostty/src/input/key.zig");
+const input_paste = @import("ghostty/src/input/paste.zig");
 const KittyFlags = @import("ghostty/src/terminal/kitty/key.zig").Flags;
-const Terminal = @import("ghostty/src/terminal/Terminal.zig");
+const terminal = @import("ghostty/src/terminal/main.zig");
 
 /// C-compatible snapshot of all terminal input mode flags.
 ///
@@ -130,10 +131,10 @@ export fn ghostty_terminal_encode_mouse(
     // If mouse reporting is disabled, don't encode anything.
     // This prevents flooding the shell with mouse escape sequences
     // when mouse reporting mode is off (the default).
-    const mouse_event: Terminal.MouseEvents = @enumFromInt(opts.mouse_event);
+    const mouse_event: terminal.MouseEvent = @enumFromInt(opts.mouse_event);
     if (mouse_event == .none) return 0;
 
-    const mouse_format: Terminal.MouseFormat = @enumFromInt(opts.mouse_format);
+    const mouse_format: terminal.MouseFormat = @enumFromInt(opts.mouse_format);
 
     var button_code: u8 = button;
     if (action == 1 and mouse_format != .sgr and mouse_format != .sgr_pixels) {
@@ -196,6 +197,58 @@ export fn ghostty_terminal_encode_mouse(
     }
 
     return fbs.pos;
+}
+
+/// Encode paste bytes using Ghostty's input/paste rules.
+/// Applies bracketed paste fenceposts, strips unsafe control bytes,
+/// and converts LF->CR in non-bracketed mode.
+export fn ghostty_terminal_encode_paste(
+    opts: InputOptsC,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+    buf: ?[*]u8,
+    buf_len: usize,
+) callconv(.c) usize {
+    if (buf == null) return 0;
+    const text: []const u8 = if (text_ptr == null or text_len == 0)
+        ""
+    else
+        text_ptr.?[0..text_len];
+
+    const encode_opts: input_paste.Options = .{ .bracketed = opts.bracketed_paste != 0 };
+
+    const parts_const = input_paste.encode(text, encode_opts) catch |err| switch (err) {
+        // Only allocate when paste encoding needs mutable bytes.
+        error.MutableRequired => {
+            var stack = std.heap.stackFallback(4096, std.heap.page_allocator);
+            const alloc = stack.get();
+
+            const mutable = alloc.dupe(u8, text) catch return 0;
+            defer alloc.free(mutable);
+
+            const parts = input_paste.encode(mutable, encode_opts);
+            const total = parts[0].len + parts[1].len + parts[2].len;
+            if (total > buf_len) return 0;
+
+            const dst = buf.?[0..buf_len];
+            @memcpy(dst[0..parts[0].len], parts[0]);
+            @memcpy(dst[parts[0].len .. parts[0].len + parts[1].len], parts[1]);
+            @memcpy(dst[parts[0].len + parts[1].len .. total], parts[2]);
+            return total;
+        },
+    };
+
+    const total = parts_const[0].len + parts_const[1].len + parts_const[2].len;
+    if (total > buf_len) return 0;
+
+    const dst = buf.?[0..buf_len];
+    @memcpy(dst[0..parts_const[0].len], parts_const[0]);
+    @memcpy(
+        dst[parts_const[0].len .. parts_const[0].len + parts_const[1].len],
+        parts_const[1],
+    );
+    @memcpy(dst[parts_const[0].len + parts_const[1].len .. total], parts_const[2]);
+    return total;
 }
 
 /// Resolve a W3C key code string to a Ghostty Key enum integer.

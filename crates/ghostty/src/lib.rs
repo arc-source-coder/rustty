@@ -7,6 +7,7 @@ pub(crate) use types::{BellCallback, ResponseCallback, TitleCallback};
 pub use terminal::key_from_w3c;
 pub use terminal::{
     InputOpts, RenderFrame, SelectionText, Terminal, VtEvent, encode_key, encode_mouse,
+    encode_paste,
 };
 pub use types::{
     CellStyle, ColorRGB, CursorState, DirtyState, GraphemeSlice, MouseFormat, MouseMode, RawCell,
@@ -112,21 +113,10 @@ unsafe extern "C" {
         end_y: u32,
         rectangular: u8,
     ) -> c_int;
-    pub(crate) fn ghostty_terminal_select_word_at(
-        terminal: *mut c_void,
-        x: u16,
-        y: u32,
-    ) -> c_int;
-    pub(crate) fn ghostty_terminal_select_line_at(
-        terminal: *mut c_void,
-        x: u16,
-        y: u32,
-    ) -> c_int;
-    pub(crate) fn ghostty_terminal_select_output_at(
-        terminal: *mut c_void,
-        x: u16,
-        y: u32,
-    ) -> c_int;
+    pub(crate) fn ghostty_terminal_select_word_at(terminal: *mut c_void, x: u16, y: u32) -> c_int;
+    pub(crate) fn ghostty_terminal_select_line_at(terminal: *mut c_void, x: u16, y: u32) -> c_int;
+    pub(crate) fn ghostty_terminal_select_output_at(terminal: *mut c_void, x: u16, y: u32)
+    -> c_int;
     pub(crate) fn ghostty_terminal_select_word_drag(
         terminal: *mut c_void,
         click_x: u16,
@@ -173,6 +163,15 @@ unsafe extern "C" {
         mods: u8,
         x: u16,
         y: u16,
+        buf: *mut u8,
+        buf_len: usize,
+    ) -> usize;
+
+    /// Encode paste bytes using Ghostty's paste encoder.
+    pub(crate) fn ghostty_terminal_encode_paste(
+        opts: InputOptsC,
+        text_ptr: *const u8,
+        text_len: usize,
         buf: *mut u8,
         buf_len: usize,
     ) -> usize;
