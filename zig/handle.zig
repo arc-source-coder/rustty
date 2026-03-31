@@ -18,15 +18,15 @@ const Callbacks = struct {
     handle: ?*TerminalHandle = null,
 };
 
-// --- ShimHandler: wraps ReadonlyHandler + fires callbacks ---
+// --- ShimHandler: wraps TerminalStream.Handler + fires callbacks ---
 const ShimHandler = struct {
-    readonly: terminal.ReadonlyHandler,
+    stream_handler: terminal.TerminalStream.Handler,
     callbacks: *Callbacks,
 
     const Action = terminal.StreamAction;
 
     pub fn deinit(self: *ShimHandler) void {
-        self.readonly.deinit();
+        self.stream_handler.deinit();
         self.* = undefined;
     }
 
@@ -40,12 +40,12 @@ const ShimHandler = struct {
         self: *ShimHandler,
         comptime action: Action.Tag,
         value: Action.Value(action),
-    ) !void {
-        // Delegate ALL state mutation to ReadonlyHandler.
-        // ReadonlyHandler no-ops on side-effect actions, so this is safe.
-        try self.readonly.vt(action, value);
+    ) void {
+        // Delegate terminal-state mutations to Ghostty's default terminal
+        // stream handler. Side effects are still intercepted below.
+        self.stream_handler.vt(action, value);
 
-        // Intercept side-effect actions that ReadonlyHandler ignores.
+        // Intercept side-effect actions we expose through Rust callbacks.
         switch (action) {
             .bell => {
                 if (self.callbacks.bell) |cb| cb(self.callbacks.userdata);
@@ -84,7 +84,7 @@ const ShimHandler = struct {
         switch (req) {
             .operating_status => self.emitResponse("\x1B[0n"),
             .cursor_position => {
-                const t = self.readonly.terminal;
+                const t = self.stream_handler.terminal;
                 const x = t.screens.active.cursor.x;
                 const y = t.screens.active.cursor.y;
 
@@ -112,7 +112,7 @@ const ShimHandler = struct {
 
     fn writeRequestMode(self: *ShimHandler, mode: terminal.Mode) void {
         const tag: terminal.modes.ModeTag = @bitCast(@intFromEnum(mode));
-        const code: u8 = if (self.readonly.terminal.modes.get(mode)) 1 else 2;
+        const code: u8 = if (self.stream_handler.terminal.modes.get(mode)) 1 else 2;
 
         var buf: [32]u8 = undefined;
         const resp = std.fmt.bufPrint(&buf, "\x1B[{s}{};{}$y", .{
@@ -133,7 +133,7 @@ const ShimHandler = struct {
     }
 
     fn writeKittyKeyboardQuery(self: *ShimHandler) void {
-        const flags = self.readonly.terminal.screens.active.kitty_keyboard.current();
+        const flags = self.stream_handler.terminal.screens.active.kitty_keyboard.current();
         const int_flags: u5 = @bitCast(flags);
 
         var buf: [16]u8 = undefined;
@@ -150,7 +150,7 @@ const ShimHandler = struct {
         // Access cell dimensions from TerminalHandle via the Callbacks backpointer.
         const th = self.callbacks.handle orelse return;
 
-        const t = self.readonly.terminal;
+        const t = self.stream_handler.terminal;
         const cols = t.cols;
         const rows = t.rows;
 
@@ -225,7 +225,7 @@ pub const TerminalHandle = struct {
             .terminal_inst = t,
             .callbacks = .{},
             .handler = .{
-                .readonly = .{ .terminal = undefined },
+                .stream_handler = .{ .terminal = undefined },
                 .callbacks = undefined,
             },
             .stream = undefined,
@@ -233,7 +233,7 @@ pub const TerminalHandle = struct {
         };
 
         // Fix up self-referential pointers
-        handle.handler.readonly.terminal = &handle.terminal_inst;
+        handle.handler.stream_handler.terminal = &handle.terminal_inst;
         handle.handler.callbacks = &handle.callbacks;
         handle.stream = terminal.Stream(*ShimHandler).initAlloc(alloc, &handle.handler);
 
