@@ -8,7 +8,7 @@ Rustty is a fast, clean, GPU-accelerated terminal emulator for Windows using GPU
 ### Reference
 
 1. `vendor/zed/crates/gpui` - Source code for GPUI.
-2. `zig/ghostty/` - The Ghostty source code (latest - version 1.3 using Zig 0.15.2). Inspiration for UI / feature design, architecture, and data models. Vendored as a submodule. The Rust wrapper around the zig shim is located at `crates/ghostty/`.
+2. `zig/ghostty/` - The Ghostty source code (latest - version 1.3 using Zig 0.15.2). Inspiration for UI / feature design, architecture, and data models. Vendored as a submodule. The Rust wrapper around the zig shim is located at `crates/ghostty/`. The zig shim itself is located at `zig/` to wrap the vendored Ghostty source.
 3. `opensrc/repos/MitchForest/rust-terminal` - Implementation of a terminal emulator using GPUI - inspired by Ghostty's UI style. Code organization is excellent.
 4. `opensrc/repos/microsoft/terminal` - Windows Terminal source code. Refer when working with Windows-specific code such as the Windows PTY backend / DirectWrite-specific code.
 5. `vendor/zed/crates/terminal` - Core business logic for Zed's terminal - based off the Alacritty crate.
