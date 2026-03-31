@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
         .simd = true,
         .oniguruma = false,
         .c_abi = false,
+        .version = .{ .major = 0, .minor = 0, .patch = 0 },
         .slow_runtime_safety = false,
     };
 
