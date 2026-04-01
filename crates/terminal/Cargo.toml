@@ -3,7 +3,11 @@ name = "terminal"
 version.workspace = true
 edition.workspace = true
 
+[features]
+profiler = ["dep:tracy-client"]
+
 [dependencies]
+tracy-client = { workspace = true, optional = true }
 log.workspace = true
 async-channel.workspace = true
 gpui.workspace = true

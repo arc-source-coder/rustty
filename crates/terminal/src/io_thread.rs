@@ -67,6 +67,8 @@ pub fn spawn_suspended(
 /// Ntdll thread entry trampoline.
 unsafe extern "system" fn io_thread_entry(context: *mut std::ffi::c_void) -> u32 {
     set_current_thread_name("pty-io");
+    #[cfg(feature = "profiler")]
+    tracy_client::set_thread_name!("pty-io");
     // SAFETY: context comes from Box::into_raw in spawn_suspended.
     let ctx = unsafe { Box::from_raw(context as *mut IoThreadContext) };
     let mut thread = IoThread::new(
@@ -252,7 +254,11 @@ impl IoThread {
         {
             self.sync_output_deadline = None;
             {
+                #[cfg(feature = "profiler")]
+                let _c = tracy_client::span!("reset_sync_output:contention", 32);
                 let mut term = self.terminal.lock().expect("terminal mutex poisoned");
+                #[cfg(feature = "profiler")]
+                let _h = tracy_client::span!("reset_sync_output:hold", 32);
                 term.reset_synchronized_output();
             }
             self.signal_tx.try_send(()).ok();
@@ -262,7 +268,11 @@ impl IoThread {
     /// Apply viewport scroll under terminal mutex.
     fn apply_scroll(&self, op: ScrollOp) {
         {
+            #[cfg(feature = "profiler")]
+            let _c = tracy_client::span!("apply_scroll:contention", 32);
             let mut term = self.terminal.lock().expect("terminal mutex poisoned");
+            #[cfg(feature = "profiler")]
+            let _h = tracy_client::span!("apply_scroll:hold", 32);
             match op {
                 ScrollOp::Delta(delta) => term.scroll_viewport(delta),
                 ScrollOp::Top => term.scroll_to_top(),

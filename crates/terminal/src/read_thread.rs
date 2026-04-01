@@ -113,6 +113,8 @@ pub fn spawn_suspended(
 /// Ntdll thread entry trampoline.
 unsafe extern "system" fn read_thread_entry(context: *mut std::ffi::c_void) -> u32 {
     set_current_thread_name("pty-read");
+    #[cfg(feature = "profiler")]
+    tracy_client::set_thread_name!("pty-read");
     // SAFETY: context comes from Box::into_raw in spawn_suspended.
     let ctx = unsafe { Box::from_raw(context as *mut ReadThreadContext) };
     read_loop(
@@ -442,7 +444,11 @@ fn handle_resize(
     }
 
     {
+        #[cfg(feature = "profiler")]
+        let _c = tracy_client::span!("handle_resize:contention", 32);
         let mut term = terminal.lock().expect("terminal mutex poisoned");
+        #[cfg(feature = "profiler")]
+        let _h = tracy_client::span!("handle_resize:hold", 32);
         term.set_cell_size(size.cell_width, size.cell_height);
         term.resize(size.num_cols, size.num_lines);
     }
@@ -560,7 +566,11 @@ fn feed_and_dispatch(
     event_tx: &Sender<IoEvent>,
 ) {
     let (sync_before, sync_after) = {
+        #[cfg(feature = "profiler")]
+        let _c = tracy_client::span!("feed_and_dispatch:contention", 32);
         let mut term = terminal.lock().expect("terminal mutex poisoned");
+        #[cfg(feature = "profiler")]
+        let _h = tracy_client::span!("feed_and_dispatch:hold", 32);
         let sync_before = *was_synchronized;
         term.feed(bytes);
         term.drain_events(vt_event_buf);

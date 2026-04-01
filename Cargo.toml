@@ -22,6 +22,8 @@ crossbeam-queue = "0.3.12"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 rapidhash = "4.4.0"
 
+tracy-client = { version = "0.18", default-features = false, features = ["enable", "sampling", "callstack-inlines", "system-tracing", "context-switch-tracing"] }
+
 windows = "0.61"
 windows-core = "0.61"
 windows-sys = { version = "0.59" }
@@ -31,6 +33,7 @@ windows-numerics = "0.2"
 gpui = { git = "file:///D:/projects/rust/rustty/vendor/zed/" }
 gpui_platform = { git = "file:///D:/projects/rust/rustty/vendor/zed/" }
 
-[profile.release]
+[profile.profiling]
+inherits = "release"
 debug = true
 strip = "none"

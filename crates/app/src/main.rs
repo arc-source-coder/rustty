@@ -4,6 +4,7 @@ mod shell_detection;
 mod types;
 mod workspace;
 
+use better_mimalloc_rs::MiMalloc;
 use gpui::{
     App, AppContext, Bounds, WindowBackgroundAppearance, WindowBounds, WindowOptions, px, size,
 };
@@ -13,8 +14,13 @@ use ui::{components::theme::Theme, title_bar::TitleBar};
 
 use crate::profile_registry::ProfileRegistry;
 use crate::workspace::Workspace;
+#[cfg(feature = "profiler")]
+use tracy_client::Client;
 
 fn main() {
+    #[cfg(feature = "profiler")]
+    let _client = Client::start();
+
     application().run(|cx: &mut App| {
         // Detect available shells and build profile list.
         let (profiles, default_id) = shell_detection::detect_profiles();

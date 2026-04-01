@@ -68,6 +68,8 @@ pub fn spawn(
     let join = std::thread::Builder::new()
         .name("terminal-renderer".into())
         .spawn(move || {
+            #[cfg(feature = "profiler")]
+            tracy_client::set_thread_name!("terminal-renderer");
             let mut thread = RendererThread::new(device, swap_chain, terminal, text_config, ui_tx)
                 .expect("failed to initialize renderer thread");
             thread.run(rx, slot_rx);
@@ -243,7 +245,11 @@ impl RendererThread {
 
     fn draw_and_present(&mut self) -> Result<()> {
         let (frame, scrollbar) = {
+            #[cfg(feature = "profiler")]
+            let _c = tracy_client::span!("draw_and_present:contention", 32);
             let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
+            #[cfg(feature = "profiler")]
+            let _h = tracy_client::span!("draw_and_present:hold", 32);
             (terminal.render_frame(), terminal.scrollbar_info())
         };
 
@@ -255,6 +261,8 @@ impl RendererThread {
         }
 
         self.build_batch(&frame)?;
+        #[cfg(feature = "profiler")]
+        tracy_client::frame_mark();
         self.backend.draw_and_present(
             &self.batch,
             self.contents.fg_lists(),

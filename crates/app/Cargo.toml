@@ -3,7 +3,11 @@ name = "app"
 version.workspace = true
 edition.workspace = true
 
+[features]
+profiler = ["terminal/profiler", "renderer/profiler", "dep:tracy-client"]
+
 [dependencies]
+tracy-client = { workspace = true, optional = true }
 gpui.workspace = true
 gpui_platform.workspace = true
 ui = { path = "../ui" }
