@@ -17,6 +17,9 @@ use crate::workspace::Workspace;
 #[cfg(feature = "profiler")]
 use tracy_client::Client;
 
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 fn main() {
     #[cfg(feature = "profiler")]
     let _client = Client::start();

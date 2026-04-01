@@ -21,6 +21,7 @@ crossbeam-channel = "0.5.15"
 crossbeam-queue = "0.3.12"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 rapidhash = "4.4.0"
+better_mimalloc_rs = "0.1.1"
 
 tracy-client = { version = "0.18", default-features = false, features = ["enable", "sampling", "callstack-inlines", "system-tracing", "context-switch-tracing"] }
 

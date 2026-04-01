@@ -81,6 +81,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "better_mimalloc_rs",
  "gpui",
  "gpui_platform",
  "renderer",
@@ -485,6 +486,25 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "better_mimalloc_rs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54be7bee89c922bed8d101e27e4b7ae9bf72e172b3acfe66a4b9fe3fce7372cb"
+dependencies = [
+ "better_mimalloc_sys",
+]
+
+[[package]]
+name = "better_mimalloc_sys"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a386f1c09cf2b4cf160f89ebfc34f9f2803b6669ab366a0687d014230f567619"
+dependencies = [
+ "cc",
+ "libc",
+]
 
 [[package]]
 name = "bindgen"

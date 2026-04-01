@@ -8,6 +8,7 @@ profiler = ["terminal/profiler", "renderer/profiler", "dep:tracy-client"]
 
 [dependencies]
 tracy-client = { workspace = true, optional = true }
+better_mimalloc_rs.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 ui = { path = "../ui" }
