@@ -451,6 +451,7 @@ fn handle_resize(
         let _h = tracy_client::span!("handle_resize:hold", 32);
         term.set_cell_size(size.cell_width, size.cell_height);
         term.resize(size.num_cols, size.num_lines);
+        term.reset_synchronized_output();
     }
     signal_tx.try_send(()).ok();
     Harvest::Continue

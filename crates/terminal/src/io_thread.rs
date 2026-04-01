@@ -28,6 +28,14 @@ const WRITE_CHUNK: usize = 64 * 1024;
 const RESIZE_COALESCE: Duration = Duration::from_millis(25);
 const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_secs(1);
 
+fn resize_deadline_after(current: Option<Instant>, now: Instant) -> Instant {
+    if let Some(deadline) = current {
+        deadline
+    } else {
+        now + RESIZE_COALESCE
+    }
+}
+
 /// Context passed through `NtCreateThreadEx` start routine.
 struct IoThreadContext {
     writer: PtyWriter,
@@ -196,7 +204,8 @@ impl IoThread {
             }
             IoMsg::Resize(size) => {
                 self.pending_resize = Some(size);
-                self.resize_deadline = Some(Instant::now() + RESIZE_COALESCE);
+                self.resize_deadline =
+                    Some(resize_deadline_after(self.resize_deadline, Instant::now()));
             }
             IoMsg::Scroll(op) => {
                 self.apply_scroll(op);
@@ -456,5 +465,28 @@ impl IoThread {
                 self.retire_front();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resize_deadline_starts_on_first_resize() {
+        let now = Instant::now();
+        let deadline = resize_deadline_after(None, now);
+        assert_eq!(deadline, now + RESIZE_COALESCE);
+    }
+
+    #[test]
+    fn resize_deadline_does_not_extend_while_active() {
+        let now = Instant::now();
+        let existing = now + RESIZE_COALESCE;
+        let later = now + Duration::from_millis(5);
+
+        let deadline = resize_deadline_after(Some(existing), later);
+
+        assert_eq!(deadline, existing);
     }
 }
