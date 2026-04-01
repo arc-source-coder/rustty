@@ -8,8 +8,9 @@
 //!
 //! No-ops if the marker file in <out-dir> already records this version + arch.
 
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { mkdirSync, existsSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const CONPTY_VERSION = "1.25.260303002-preview";
@@ -60,34 +61,49 @@ if (!resp.ok) {
 
 const nupkgBytes = Buffer.from(await resp.arrayBuffer());
 
-// Write to a temp file so unzip can work on it.
-const tmpPath = join(tmpdir(), `conpty-${CONPTY_VERSION}.nupkg`);
-writeFileSync(tmpPath, nupkgBytes);
+// Write to a temp file. Rename to .zip because PowerShell's Expand-Archive
+// rejects non-.zip extensions, even though .nupkg is a standard zip archive.
+const tmpZipPath = join(tmpdir(), `conpty-${CONPTY_VERSION}.zip`);
+writeFileSync(tmpZipPath, nupkgBytes);
 
-// The nupkg is a zip. Extract the two files we need via `unzip -p`.
 mkdirSync(outDir, { recursive: true });
 
-const dllZipPath = `runtimes/win-${arch}/native/conpty.dll`;
-const exeZipPath = `build/native/runtimes/${arch}/OpenConsole.exe`;
+// Extract entire archive to temp dir, then copy the two files we need.
+const extractDir = join(tmpdir(), `conpty-extract-${CONPTY_VERSION}`);
+mkdirSync(extractDir, { recursive: true });
 
-function extractEntry(zipFile: string, entryPath: string, destPath: string): void {
-    const proc = Bun.spawnSync(["unzip", "-p", zipFile, entryPath], {
-        stdout: "pipe",
-        stderr: "pipe",
-    });
-    if (proc.exitCode !== 0) {
-        const msg = proc.stderr ? new TextDecoder().decode(proc.stderr) : "(no stderr)";
-        console.error(`[fetch-conpty] unzip failed for ${entryPath}: ${msg}`);
+function run(cmd: string, args: string[]): void {
+    const result = spawnSync(cmd, args, { stdio: "inherit" });
+    if (result.error) {
+        console.error(`[fetch-conpty] Failed to run ${cmd}: ${result.error.message}`);
         process.exit(1);
     }
-    writeFileSync(destPath, proc.stdout!);
+    if (result.status !== 0) {
+        console.error(`[fetch-conpty] ${cmd} exited with code ${result.status}`);
+        process.exit(1);
+    }
 }
+
+// .nupkg is a zip archive. Extract with platform-specific tooling.
+if (process.platform === "win32") {
+    const psCmd = `Expand-Archive -Path '${tmpZipPath.replace(/'/g, "''")}' -DestinationPath '${extractDir.replace(/'/g, "''")}' -Force`;
+    run("powershell", ["-NoProfile", "-Command", psCmd]);
+} else {
+    run("unzip", ["-o", tmpZipPath, "-d", extractDir]);
+}
+
+const dllSrc = join(extractDir, "runtimes", `win-${arch}`, "native", "conpty.dll");
+const exeSrc = join(extractDir, "build", "native", "runtimes", arch, "OpenConsole.exe");
 
 const dllDest = join(outDir, "conpty.dll");
 const exeDest = join(outDir, "OpenConsole.exe");
 
-extractEntry(tmpPath, dllZipPath, dllDest);
-extractEntry(tmpPath, exeZipPath, exeDest);
+copyFileSync(dllSrc, dllDest);
+copyFileSync(exeSrc, exeDest);
+
+// Clean up temp dirs.
+rmSync(extractDir, { recursive: true, force: true });
+rmSync(tmpZipPath, { force: true });
 
 // Also copy into deps/ if it exists (used by `cargo test`).
 const depsDir = join(outDir, "deps");
