@@ -1,8 +1,9 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use windows::Win32::Graphics::DirectWrite::IDWriteFontFace2;
 
 use crate::backend::dwrite::analyzer::DWriteAnalyzer;
 use crate::shaper::run_iter::{RunIterator, RunIteratorHook, RunOptions};
+use crate::shared_grid::SharedGrid;
 use crate::types::{ShapeOptions, ShapedCells, TextRun};
 
 /// Ghostty: `Shaper.Codepoint` (both harfbuzz.zig and coretext.zig)
@@ -70,6 +71,17 @@ impl Shaper {
             face,
         )
     }
+
+    pub fn shape_with_grid<'a>(
+        &'a mut self,
+        run: TextRun,
+        grid: &SharedGrid,
+    ) -> Result<ShapedCells<'a>> {
+        let Some(face) = grid.face_for_index(run.font_index) else {
+            return Err(anyhow!("missing face for shaped run"));
+        };
+        self.shape(run, &face)
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]
@@ -91,28 +103,35 @@ mod windows_tests {
     use windows_core::{HSTRING, Interface};
 
     fn integration_grid(factory6: &IDWriteFactory6) -> SharedGrid {
-        let grid = SharedGrid::with_collection(Collection::new(), GridMetrics::default());
-        let requests: [StyleVariationRequest<'_>; Style::COUNT] =
-            std::array::from_fn(|_| StyleVariationRequest {
-                family: "Cascadia Code",
-                axes: Default::default(),
-            });
-        grid.configure_dwrite_primary_faces(factory6, &requests)
-            .expect("configure primary faces");
-
         let base_collection = unsafe {
             factory6.GetSystemFontCollection(false, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC)
         }
         .expect("system font collection");
         let fallback = unsafe { factory6.GetSystemFontFallback() }.expect("system font fallback");
-        grid.set_dwrite_fallback(
-            FontFallbackContext {
+        let mut grid = SharedGrid::with_collection(Collection::new(), GridMetrics::default());
+        let requests: [StyleVariationRequest<'_>; Style::COUNT] =
+            std::array::from_fn(|_| StyleVariationRequest {
+                family: "Cascadia Code",
+                axes: Default::default(),
+            });
+        grid.configure_dwrite(
+            factory6,
+            &requests,
+            crate::backend::dwrite::face::DWriteGridMetricsConfig {
+                font_size: 16.0,
+                cell_width: 0.0,
+                line_height: 0.0,
+                baseline: 0.0,
+            },
+            16.0,
+            Some(FontFallbackContext {
                 base_family: HSTRING::from("Segoe UI"),
                 base_collection: base_collection.cast().expect("font collection cast"),
                 fallback,
-            },
+            }),
             "en-US",
-        );
+        )
+        .expect("configure dwrite");
         grid
     }
 
@@ -158,10 +177,9 @@ mod windows_tests {
         });
 
         let first_run = run_iter.next().expect("first run");
-        let face = grid
-            .face_for_index(first_run.font_index)
-            .expect("face for first run");
-        let shaped = shaper.shape(first_run, &face).expect("shape first run");
+        let shaped = shaper
+            .shape_with_grid(first_run, &grid)
+            .expect("shape first run");
         let xs = shaped.cells.iter().map(|cell| cell.x).collect::<Vec<_>>();
 
         assert_eq!(xs, vec![0, 2, 3, 4, 6, 8]);
@@ -202,8 +220,7 @@ mod windows_tests {
         });
 
         while let Some(run) = run_iter.next() {
-            let face = grid.face_for_index(run.font_index).expect("face for run");
-            let shaped = shaper.shape(run, &face).expect("shape run");
+            let shaped = shaper.shape_with_grid(run, &grid).expect("shape run");
             for cell in shaped.cells {
                 let col = run.offset + cell.x;
                 assert!(

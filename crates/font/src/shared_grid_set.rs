@@ -4,6 +4,8 @@ use std::sync::Mutex;
 use rapidhash::RapidHashMap;
 
 #[cfg(target_os = "windows")]
+use crate::backend::dwrite::face::DWriteGridMetricsConfig;
+#[cfg(target_os = "windows")]
 use crate::backend::dwrite::fallback::FontFallbackContext;
 #[cfg(target_os = "windows")]
 use crate::backend::dwrite::variation::StyleVariationRequest;
@@ -127,7 +129,11 @@ pub struct DWriteFallbackKey {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DWriteGridKey {
     pub locale: String,
-    pub metrics: GridMetrics,
+    pub font_size_bits: u32,
+    pub raster_em_size_bits: u32,
+    pub cell_width_bits: u32,
+    pub line_height_bits: u32,
+    pub baseline_bits: u32,
     pub max_atlas_size: u32,
     pub styles: [DWriteStyleKey; Style::COUNT],
     pub fallback: Option<DWriteFallbackKey>,
@@ -145,7 +151,11 @@ pub struct DWriteStyleConfig {
 pub struct DWriteGridConfig {
     pub locale: String,
     pub styles: [DWriteStyleConfig; Style::COUNT],
-    pub metrics: GridMetrics,
+    pub font_size: f32,
+    pub raster_em_size: f32,
+    pub cell_width: f32,
+    pub line_height: f32,
+    pub baseline: f32,
     pub max_atlas_size: u32,
     pub fallback: Option<FontFallbackContext>,
 }
@@ -160,7 +170,11 @@ impl DWriteGridConfig {
                 family: family.clone(),
                 axes: FontAxisSpec::default(),
             }),
-            metrics: GridMetrics::default(),
+            font_size: 0.0,
+            raster_em_size: 0.0,
+            cell_width: 0.0,
+            line_height: 0.0,
+            baseline: 0.0,
             max_atlas_size: 0,
             fallback: None,
         }
@@ -175,7 +189,11 @@ impl DWriteGridKey {
     pub fn from_config(config: &DWriteGridConfig) -> Self {
         Self {
             locale: config.locale.clone(),
-            metrics: config.metrics,
+            font_size_bits: config.font_size.to_bits(),
+            raster_em_size_bits: config.raster_em_size.to_bits(),
+            cell_width_bits: config.cell_width.to_bits(),
+            line_height_bits: config.line_height.to_bits(),
+            baseline_bits: config.baseline.to_bits(),
             max_atlas_size: config.max_atlas_size,
             styles: std::array::from_fn(|i| {
                 let style = &config.styles[i];
@@ -216,9 +234,9 @@ impl SharedGridSet<DWriteGridKey> {
         let key = DWriteGridKey::from_config(config);
         let grid =
             self.try_ref_or_insert_with(key.clone(), move || -> anyhow::Result<SharedGrid> {
-                let grid = SharedGrid::with_atlas_max_size(
+                let mut grid = SharedGrid::with_atlas_max_size(
                     CodepointResolver::new(Collection::new()),
-                    config.metrics,
+                    GridMetrics::default(),
                     config.max_atlas_size,
                 );
 
@@ -227,10 +245,19 @@ impl SharedGridSet<DWriteGridKey> {
                         family: &config.styles[i].family,
                         axes: config.styles[i].axes.clone(),
                     });
-                grid.configure_dwrite_primary_faces(factory, &requests)?;
-                if let Some(fallback) = config.fallback.clone() {
-                    grid.set_dwrite_fallback(fallback, &config.locale);
-                }
+                grid.configure_dwrite(
+                    factory,
+                    &requests,
+                    DWriteGridMetricsConfig {
+                        font_size: config.font_size,
+                        cell_width: config.cell_width,
+                        line_height: config.line_height,
+                        baseline: config.baseline,
+                    },
+                    config.raster_em_size,
+                    config.fallback.clone(),
+                    &config.locale,
+                )?;
                 Ok(grid)
             })?;
         Ok((key, grid))

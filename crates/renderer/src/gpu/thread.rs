@@ -23,8 +23,7 @@ use windows::core::{HSTRING, Interface};
 
 use super::backend_d3d11::D3D11Backend;
 use super::scene::{
-    CellMetrics, Contents, DWriteGlyphRasterizer, build_batch, build_shape_options,
-    grid_metrics_from_renderer_config, measure_renderer_cell_metrics, ui_metrics,
+    CellMetrics, Contents, build_batch, build_shape_options, cell_metrics_from_grid, ui_metrics,
 };
 use super::shared_grid_ptr::shared_grid_ref;
 use super::terminal_renderer::{RendererTextConfig, RendererUiUpdate};
@@ -91,7 +90,6 @@ struct RendererThread {
     shaper_cache: ShapedRunCache,
     contents: Contents,
     cell_metrics: CellMetrics,
-    rasterizer: DWriteGlyphRasterizer,
     batch: RenderBatch,
     ui_tx: AsyncSender<RendererUiUpdate>,
     last_scrollbar: Option<ScrollbarInfo>,
@@ -132,7 +130,12 @@ impl RendererThread {
         let fallback = build_fallback_context(&dwrite_factory6)?;
         let mut grid_config =
             DWriteGridConfig::with_single_family(text_config.font_family.as_ref(), "en-US");
-        grid_config.metrics = grid_metrics_from_renderer_config(&text_config);
+        grid_config.font_size = text_config.font_size.as_f32();
+        grid_config.raster_em_size =
+            text_config.font_size.as_f32() * text_config.scale_factor.max(1.0);
+        grid_config.cell_width = text_config.cell_width.as_f32();
+        grid_config.line_height = text_config.line_height.as_f32();
+        grid_config.baseline = text_config.baseline.as_f32();
         grid_config.max_atlas_size = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
         grid_config.fallback = fallback;
 
@@ -142,15 +145,10 @@ impl RendererThread {
 
         let locale = "en-US";
         let feature_spec = font::types::FontFeatureSpec::default();
-        let cell_metrics = measure_renderer_cell_metrics(
-            shared_grid_ref(shared_grid),
-            &dwrite_factory2,
-            &text_config,
+        let cell_metrics = cell_metrics_from_grid(
+            shared_grid_ref(shared_grid).metrics(),
+            text_config.font_size.as_f32(),
         );
-        shared_grid_ref(shared_grid).set_metrics(font::shared_grid::GridMetrics {
-            cell_width: cell_metrics.cell_width.round().max(1.0) as u16,
-            cell_height: cell_metrics.line_height.round().max(1.0) as u16,
-        });
         let shape_options = build_shape_options(&text_config, &cell_metrics, locale, &feature_spec);
         let shaper = Shaper::new(analyzer, shape_options);
         let metrics = ui_metrics(cell_metrics);
@@ -165,7 +163,6 @@ impl RendererThread {
             shaper_cache: ShapedRunCache::new(),
             contents: Contents::new(),
             cell_metrics,
-            rasterizer: DWriteGlyphRasterizer::new(dwrite_factory2),
             batch: RenderBatch::default(),
             ui_tx,
             last_scrollbar: None,
@@ -278,7 +275,6 @@ impl RendererThread {
             &mut self.shaper_cache,
             &mut self.contents,
             &self.cell_metrics,
-            &self.rasterizer,
             frame,
             &mut self.batch,
         )

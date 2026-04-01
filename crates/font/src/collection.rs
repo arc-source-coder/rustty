@@ -129,7 +129,7 @@ impl Collection {
     }
 
     #[cfg(target_os = "windows")]
-    pub fn face_for_index(&self, index: FontIndex) -> Option<IDWriteFontFace2> {
+    pub(crate) fn face_for_index(&self, index: FontIndex) -> Option<IDWriteFontFace2> {
         Some(
             self.faces[index.style() as usize]
                 .get(index.index() as usize)?

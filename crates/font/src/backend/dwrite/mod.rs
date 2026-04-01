@@ -3,6 +3,8 @@ pub mod analyzer;
 #[cfg(target_os = "windows")]
 mod arena;
 #[cfg(target_os = "windows")]
+pub mod face;
+#[cfg(target_os = "windows")]
 pub mod fallback;
 #[cfg(target_os = "windows")]
 pub mod metrics;

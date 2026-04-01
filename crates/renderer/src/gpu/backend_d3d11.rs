@@ -7,7 +7,6 @@ use font::shared_grid_set::SharedGridPtr;
 use gpui::{Bounds, CompositionSlotEvent, DevicePixels};
 use std::mem::{size_of, size_of_val};
 use std::slice;
-use std::sync::atomic::Ordering;
 use windows::Win32::Foundation::{HANDLE, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 use windows::Win32::Graphics::Direct3D11::{
@@ -478,7 +477,7 @@ impl D3D11Backend {
 
 impl AtlasTexture {
     fn new(device: &ID3D11Device, shared_grid: &SharedGrid, kind: GlyphAtlasKind) -> Result<Self> {
-        let side = shared_grid.with_atlas_read(kind, |atlas| atlas.size());
+        let side = shared_grid.with_atlas_snapshot(kind, |atlas| atlas.size);
         let (format, bytes_per_pixel) = match kind {
             GlyphAtlasKind::Grayscale => (DXGI_FORMAT_R8_UNORM, 1),
             GlyphAtlasKind::Color => (DXGI_FORMAT_B8G8R8A8_UNORM, 4),
@@ -511,15 +510,14 @@ impl AtlasTexture {
     ) -> Result<bool> {
         let mut srv_resized = false;
 
-        let modified =
-            shared_grid.with_atlas_read(kind, |atlas| atlas.modified.load(Ordering::Relaxed));
+        let modified = shared_grid.with_atlas_snapshot(kind, |atlas| atlas.modified);
         if modified == self.modified_seen {
             return Ok(false);
         }
 
-        shared_grid.with_atlas_read(kind, |atlas| -> Result<()> {
-            let resized = atlas.resized.load(Ordering::Relaxed);
-            let size = atlas.size();
+        shared_grid.with_atlas_snapshot(kind, |atlas| -> Result<()> {
+            let resized = atlas.resized;
+            let size = atlas.size;
             if resized != self.resized_seen || size != self.side {
                 self.side = size;
                 self.texture = create_texture(
@@ -535,7 +533,7 @@ impl AtlasTexture {
                 srv_resized = true;
             }
 
-            let modified_after = atlas.modified.load(Ordering::Relaxed);
+            let modified_after = atlas.modified;
             if modified_after == self.modified_seen {
                 return Ok(());
             }
@@ -545,7 +543,7 @@ impl AtlasTexture {
                     &self.texture,
                     0,
                     None,
-                    atlas.data().as_ptr() as _,
+                    atlas.data.as_ptr() as _,
                     self.side * self.bytes_per_pixel,
                     0,
                 );

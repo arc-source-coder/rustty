@@ -463,14 +463,26 @@ mod tests {
     fn integration_grid() -> SharedGrid {
         let factory6: IDWriteFactory6 =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).expect("create dwrite") };
-        let grid = SharedGrid::with_collection(Collection::new(), GridMetrics::default());
+        let mut grid = SharedGrid::with_collection(Collection::new(), GridMetrics::default());
         let requests: [StyleVariationRequest<'_>; Style::COUNT] =
             std::array::from_fn(|_| StyleVariationRequest {
                 family: "Segoe UI Emoji",
                 axes: Default::default(),
             });
-        grid.configure_dwrite_primary_faces(&factory6, &requests)
-            .expect("configure primary faces");
+        grid.configure_dwrite(
+            &factory6,
+            &requests,
+            crate::backend::dwrite::face::DWriteGridMetricsConfig {
+                font_size: 16.0,
+                cell_width: 0.0,
+                line_height: 0.0,
+                baseline: 0.0,
+            },
+            16.0,
+            None,
+            "en-US",
+        )
+        .expect("configure dwrite");
         grid
     }
 
