@@ -31,8 +31,8 @@ windows-sys = { version = "0.59" }
 windows-numerics = "0.2"
 
 # Update the below paths to match your local vendored source
-gpui = { git = "file:///D:/projects/rust/rustty/vendor/zed/" }
-gpui_platform = { git = "file:///D:/projects/rust/rustty/vendor/zed/" }
+gpui = { git = "https://github.com/arc-source-coder/zed/" }
+gpui_platform = { git = "https://github.com/arc-source-coder/zed/" }
 
 [profile.profiling]
 inherits = "release"
