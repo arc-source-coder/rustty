@@ -24,6 +24,19 @@ pub(crate) struct DirtyRect {
     pub bottom: i32,
 }
 
+impl DirtyRect {
+    pub(crate) fn include_vertical_span_of(&mut self, instance: &QuadInstance) {
+        let height = i32::from(instance.size[1]);
+        if height == 0 {
+            return;
+        }
+
+        let top = i32::from(instance.pos[1]);
+        self.top = self.top.min(top);
+        self.bottom = self.bottom.max(top + height);
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct QuadInstance {

@@ -282,50 +282,37 @@ pub(crate) fn build_batch(
     if full_rebuild {
         // Ghostty: self.cells.reset()
         contents.reset();
+    }
 
-        for y in 0..rows {
-            rebuild_row(
-                y as u16,
-                frame,
-                palette,
-                cursor,
-                contents,
-                shaper,
-                shaper_cache,
-                shared_grid,
-                config,
-                cell_metrics,
-                default_fg,
-                default_bg,
-            )?;
-            push_row_dirty_rect(out, y as u16, cols, *cell_metrics, scale_factor);
-        }
-    } else {
-        for y in 0..rows {
-            let y_u16 = y as u16;
-            let row_dirty = dirty == DirtyState::Partial && frame.row_dirty(y_u16);
-            if !row_dirty {
+    for y in 0..rows {
+        let y_u16 = y as u16;
+
+        if !full_rebuild {
+            if dirty != DirtyState::Partial || !frame.row_dirty(y_u16) {
                 continue;
             }
 
             // Ghostty: self.cells.clear(y) then self.rebuildRow(y, ...)
             contents.clear(y_u16);
-            rebuild_row(
-                y_u16,
-                frame,
-                palette,
-                cursor,
-                contents,
-                shaper,
-                shaper_cache,
-                shared_grid,
-                config,
-                cell_metrics,
-                default_fg,
-                default_bg,
-            )?;
-            push_row_dirty_rect(out, y_u16, cols, *cell_metrics, scale_factor);
         }
+
+        let mut dirty_rect = nominal_row_rect(y_u16, cols, *cell_metrics, scale_factor);
+        rebuild_row(
+            y_u16,
+            frame,
+            palette,
+            cursor,
+            contents,
+            &mut dirty_rect,
+            shaper,
+            shaper_cache,
+            shared_grid,
+            config,
+            cell_metrics,
+            default_fg,
+            default_bg,
+        )?;
+        push_dirty_rect_coalesced(&mut out.dirty_rects, dirty_rect);
     }
 
     // Cursor
@@ -362,6 +349,7 @@ fn rebuild_row(
     palette: &[ColorRGB; 256],
     cursor: CursorState,
     contents: &mut Contents,
+    dirty_rect: &mut DirtyRect,
     shaper: &mut Shaper,
     shaper_cache: &mut ShapedRunCache,
     shared_grid: SharedGridPtr,
@@ -522,6 +510,7 @@ fn rebuild_row(
                         &cells[shaper_cells_i],
                         fg_u32,
                         contents,
+                        dirty_rect,
                         shared_grid,
                         cell_metrics,
                         baseline_y,
@@ -553,6 +542,7 @@ fn add_glyph(
     cell: &Cell,
     fg: u32,
     contents: &mut Contents,
+    dirty_rect: &mut DirtyRect,
     shared_grid: SharedGridPtr,
     cell_metrics: &CellMetrics,
     baseline_y: f32,
@@ -588,7 +578,7 @@ fn add_glyph(
             cached.atlas_x.min(u16::MAX as u32) as u16,
             cached.atlas_y.min(u16::MAX as u32) as u16,
         );
-        contents.add(y, instance);
+        emit_row_instance(contents, y, dirty_rect, instance);
         return Ok(());
     }
 
@@ -603,7 +593,7 @@ fn add_glyph(
             cached.atlas_x.min(u16::MAX as u32) as u16,
             cached.atlas_y.min(u16::MAX as u32) as u16,
         );
-        contents.add(y, instance);
+        emit_row_instance(contents, y, dirty_rect, instance);
         return Ok(());
     }
 
@@ -621,6 +611,7 @@ fn add_glyph(
         &cached,
         cell_width_px,
         contents,
+        dirty_rect,
     );
     Ok(())
 }
@@ -646,6 +637,7 @@ fn overlap_split_glyph(
     cached: &CachedGlyph,
     cell_width_px: f32,
     contents: &mut Contents,
+    dirty_rect: &mut DirtyRect,
 ) {
     let tex_x = cached.atlas_x.min(u16::MAX as u32) as u16;
     let tex_y = cached.atlas_y.min(u16::MAX as u32) as u16;
@@ -686,7 +678,7 @@ fn overlap_split_glyph(
             let mut inst =
                 QuadInstance::glyph_rect([span_left, origin[1]], [seg_width, size[1]], span_fg);
             inst.set_texcoord(tex_x.saturating_add(tex_offset), tex_y);
-            contents.add(y, inst);
+            emit_row_instance(contents, y, dirty_rect, inst);
 
             span_left = clip_left;
             span_fg = neighbor_fg;
@@ -701,7 +693,7 @@ fn overlap_split_glyph(
     let tex_offset = (span_left - glyph_left).round() as u16;
     let mut inst = QuadInstance::glyph_rect([span_left, origin[1]], [seg_width, size[1]], span_fg);
     inst.set_texcoord(tex_x.saturating_add(tex_offset), tex_y);
-    contents.add(y, inst);
+    emit_row_instance(contents, y, dirty_rect, inst);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -926,25 +918,26 @@ fn is_covering(cp: u32) -> bool {
     cp == 0x2588
 }
 
-fn push_row_dirty_rect(
-    out: &mut RenderBatch,
+#[inline]
+fn emit_row_instance(
+    contents: &mut Contents,
     row: u16,
-    cols: u16,
-    metrics: CellMetrics,
-    scale_factor: f32,
+    dirty_rect: &mut DirtyRect,
+    instance: QuadInstance,
 ) {
-    let top = (row as f32 * metrics.line_height * scale_factor).floor() as i32;
-    let bottom = (((row + 1) as f32) * metrics.line_height * scale_factor).ceil() as i32;
-    let right = (cols as f32 * metrics.cell_width * scale_factor).ceil() as i32;
-    push_dirty_rect_coalesced(
-        &mut out.dirty_rects,
-        DirtyRect {
-            left: 0,
-            top,
-            right,
-            bottom,
-        },
-    );
+    dirty_rect.include_vertical_span_of(&instance);
+    contents.add(row, instance);
+}
+
+fn nominal_row_rect(row: u16, cols: u16, metrics: CellMetrics, scale_factor: f32) -> DirtyRect {
+    // Keep a nominal per-row band so background-only changes remain dirty even
+    // when a rebuilt row emits no foreground quads.
+    DirtyRect {
+        left: 0,
+        top: (row as f32 * metrics.line_height * scale_factor).floor() as i32,
+        right: (cols as f32 * metrics.cell_width * scale_factor).ceil() as i32,
+        bottom: (((row + 1) as f32) * metrics.line_height * scale_factor).ceil() as i32,
+    }
 }
 
 fn push_dirty_rect_coalesced(rects: &mut Vec<DirtyRect>, rect: DirtyRect) {
@@ -963,7 +956,8 @@ fn push_dirty_rect_coalesced(rects: &mut Vec<DirtyRect>, rect: DirtyRect) {
 
 #[cfg(test)]
 mod tests {
-    use super::overlap_split_bounds;
+    use super::{CellMetrics, nominal_row_rect, overlap_split_bounds, push_dirty_rect_coalesced};
+    use crate::gpu::types::QuadInstance;
 
     #[test]
     fn overlap_split_bounds_anchor_to_cell_edges() {
@@ -971,5 +965,61 @@ mod tests {
         assert_eq!(bounds.first_col, 0);
         assert_eq!(bounds.left_px, 4.0);
         assert_eq!(bounds.right_px, 22.0);
+    }
+
+    #[test]
+    fn dirty_rect_expands_to_emitted_quad_bounds() {
+        let mut rect = nominal_row_rect(
+            3,
+            8,
+            CellMetrics {
+                cell_width: 10.0,
+                line_height: 20.0,
+                baseline: 15.0,
+            },
+            1.0,
+        );
+        rect.include_vertical_span_of(&QuadInstance::glyph_rect([12.4, 57.2], [8.6, 24.1], 0));
+
+        assert_eq!(rect.left, 0);
+        assert_eq!(rect.top, 57);
+        assert_eq!(rect.right, 80);
+        assert_eq!(rect.bottom, 81);
+    }
+
+    #[test]
+    fn dirty_rect_keeps_nominal_band_for_background_only_rows() {
+        let rect = nominal_row_rect(
+            1,
+            4,
+            CellMetrics {
+                cell_width: 9.0,
+                line_height: 18.0,
+                baseline: 14.0,
+            },
+            1.5,
+        );
+
+        assert_eq!(rect.left, 0);
+        assert_eq!(rect.top, 27);
+        assert_eq!(rect.right, 54);
+        assert_eq!(rect.bottom, 54);
+    }
+
+    #[test]
+    fn push_dirty_rect_coalesced_merges_adjacent_row_bands() {
+        let metrics = CellMetrics {
+            cell_width: 10.0,
+            line_height: 20.0,
+            baseline: 15.0,
+        };
+        let mut rects = Vec::new();
+
+        push_dirty_rect_coalesced(&mut rects, nominal_row_rect(0, 8, metrics, 1.0));
+        push_dirty_rect_coalesced(&mut rects, nominal_row_rect(1, 8, metrics, 1.0));
+
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].top, 0);
+        assert_eq!(rects[0].bottom, 40);
     }
 }

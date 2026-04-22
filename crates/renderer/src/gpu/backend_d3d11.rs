@@ -164,6 +164,8 @@ impl D3D11Backend {
         let Some(target) = self.target.as_ref() else {
             return Ok(());
         };
+        let target_width = target.width;
+        let target_height = target.height;
         self.begin_target_frame(target, batch.clear_color);
         let grayscale_resized = self.atlas_grayscale.sync(
             &self.device,
@@ -197,7 +199,7 @@ impl D3D11Backend {
             fg_lists,
             batch.instance_count,
         )?;
-        self.present(batch)?;
+        self.present(target_width, target_height, batch)?;
         Ok(())
     }
 
@@ -284,19 +286,32 @@ impl D3D11Backend {
         }
     }
 
-    fn present(&mut self, batch: &RenderBatch) -> Result<()> {
+    fn present(
+        &mut self,
+        target_width: u32,
+        target_height: u32,
+        batch: &RenderBatch,
+    ) -> Result<()> {
         self.present_rect_scratch.clear();
         self.present_rect_scratch.reserve(batch.dirty_rects.len());
         for rect in &batch.dirty_rects {
-            if rect.right <= rect.left || rect.bottom <= rect.top {
+            let left = rect.left.max(0);
+            let top = rect.top.max(0);
+            let right = rect.right.min(target_width as i32);
+            let bottom = rect.bottom.min(target_height as i32);
+            if right <= left || bottom <= top {
                 continue;
             }
             self.present_rect_scratch.push(RECT {
-                left: rect.left,
-                top: rect.top,
-                right: rect.right,
-                bottom: rect.bottom,
+                left,
+                top,
+                right,
+                bottom,
             });
+        }
+
+        if !batch.dirty_rects.is_empty() && self.present_rect_scratch.is_empty() {
+            return Ok(());
         }
 
         let params = DXGI_PRESENT_PARAMETERS {
