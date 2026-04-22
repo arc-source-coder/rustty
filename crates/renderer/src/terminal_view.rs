@@ -48,12 +48,6 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Re-render whenever the session is notified (IO thread data arrival).
-        cx.observe(&session, |_this, _session, cx| {
-            cx.notify();
-        })
-        .detach();
-
         let focus_handle = cx.focus_handle();
 
         // Register focus event handlers.
@@ -86,8 +80,8 @@ impl TerminalView {
                 },
                 ui_tx,
             )
-            .expect("Window::d3d11_device() returned None - D3D11 backend required");
-            session.read(cx).attach_renderer_sender(renderer.sender());
+            .expect("failed to create terminal external surface renderer");
+            session.read(cx).bind_renderer_sender(renderer.sender());
             let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 while let Ok(update) = ui_rx.recv().await {
                     let updated = this.update(cx, |this, cx| {
@@ -165,12 +159,7 @@ impl TerminalView {
         }
     }
 
-    fn mouse_position(
-        &self,
-        cx: &Context<Self>,
-        position: Point<Pixels>,
-        scale_factor: f32,
-    ) -> Option<MousePosition> {
+    fn mouse_position(&self, position: Point<Pixels>, scale_factor: f32) -> Option<MousePosition> {
         let metrics = self.cell_metrics?;
         // `event.position` is window-relative; subtract the element's origin
         // (derived from surface bounds) to get a position local to the terminal surface.
@@ -185,15 +174,21 @@ impl TerminalView {
             return None;
         }
 
-        let grid = self.session.read(cx).current_size();
+        let bounds = self.surface_bounds.get()?;
+        let cols = (f32::from(bounds.size.width) / metrics.cell_width)
+            .floor()
+            .max(1.0) as u16;
+        let rows = (f32::from(bounds.size.height) / metrics.line_height)
+            .floor()
+            .max(1.0) as u16;
 
-        let col = (x_px / metrics.cell_width).floor() as u32;
-        let row = (y_px / metrics.line_height).floor() as u32;
+        let mouse_col = (x_px / metrics.cell_width).floor() as u32;
+        let mouse_row = (y_px / metrics.line_height).floor() as u32;
 
         Some(MousePosition {
             // These will never be 0 because all grid construction sites clamp to min 1.
-            x: col.min((grid.cols - 1) as u32),
-            y: row.min((grid.rows - 1) as u32),
+            x: mouse_col.min((cols - 1) as u32),
+            y: mouse_row.min((rows - 1) as u32),
             x_px: x_px * scale_factor,
             y_px: y_px * scale_factor,
         })
@@ -213,7 +208,7 @@ impl TerminalView {
         }
 
         window.focus(&self.focus_handle, cx);
-        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
+        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
             return;
         };
 
@@ -232,7 +227,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
-        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
+        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
             return;
         };
         let needs_notify = self.session.update(cx, |session, _cx| {
@@ -250,7 +245,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
-        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
+        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
             return;
         };
         let needs_notify = self.session.update(cx, |session, _cx| {
@@ -272,7 +267,7 @@ impl TerminalView {
             return;
         }
 
-        let position = self.mouse_position(&cx, event.position, window.scale_factor());
+        let position = self.mouse_position(event.position, window.scale_factor());
         let needs_notify = self.session.update(cx, |session, _cx| {
             session.handle_left_mouse_up(position, &event.modifiers)
         });
@@ -287,7 +282,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let position = self.mouse_position(&cx, event.position, window.scale_factor());
+        let position = self.mouse_position(event.position, window.scale_factor());
         let mut action = None;
         let mut emit = |next| action = Some(next);
         let needs_notify = self.session.update(cx, |session, _cx| {
@@ -307,7 +302,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
+        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
             return;
         };
         let needs_notify = self.session.update(cx, |session, _cx| {
@@ -329,7 +324,7 @@ impl TerminalView {
             return;
         }
 
-        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
+        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
             return;
         };
 
@@ -358,7 +353,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
+        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
             return;
         };
 
@@ -439,16 +434,11 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.renderer
-            .sender()
-            .try_send(terminal::RendererMessage::Wake)
-            .ok();
-
         let terminal_element = TerminalElement::new(
             self.session.clone(),
             self.element_id.clone(),
             Rc::clone(&self.surface_bounds),
-            self.renderer.slot(),
+            self.renderer.host(),
             self.cell_metrics,
         );
 

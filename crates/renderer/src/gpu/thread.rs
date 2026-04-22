@@ -1,5 +1,4 @@
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -11,8 +10,8 @@ use font::backend::dwrite::fallback::FontFallbackContext;
 use font::cache::shaped_run_cache::ShapedRunCache;
 use font::shaper::Shaper;
 use font::shared_grid_set::{DWriteGridConfig, DWriteGridKey, SharedGridPtr, SharedGridSet};
-use ghostty::{RenderFrame, ScrollbarInfo, Terminal};
-use gpui::CompositionSlotEvent;
+use ghostty::{ScrollbarInfo, Terminal};
+use gpui::{ExternalSurfaceEvent, ExternalSurfaceState};
 use terminal::RendererMessage;
 use windows::Win32::Graphics::Direct3D11::{D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION, ID3D11Device};
 use windows::Win32::Graphics::DirectWrite::{
@@ -63,7 +62,8 @@ pub fn spawn(
     terminal: Arc<Terminal>,
     text_config: RendererTextConfig,
     ui_tx: AsyncSender<RendererUiUpdate>,
-    slot_rx: Receiver<CompositionSlotEvent>,
+    surface_state: Arc<Mutex<ExternalSurfaceState>>,
+    surface_event_rx: Receiver<ExternalSurfaceEvent>,
 ) -> RendererThreadHandle {
     let (tx, rx) = crossbeam_channel::bounded::<RendererMessage>(1);
 
@@ -74,7 +74,7 @@ pub fn spawn(
             tracy_client::set_thread_name!("terminal-renderer");
             let mut thread = RendererThread::new(device, swap_chain, terminal, text_config, ui_tx)
                 .expect("failed to initialize renderer thread");
-            thread.run(rx, slot_rx);
+            thread.run(rx, surface_state, surface_event_rx);
         })
         .expect("failed to spawn renderer thread");
 
@@ -98,6 +98,18 @@ struct RendererThread {
     last_scrollbar: Option<ScrollbarInfo>,
     grid_set: &'static SharedGridSet<DWriteGridKey>,
     grid_key: DWriteGridKey,
+}
+
+struct RendererTextState {
+    shared_grid: SharedGridPtr,
+    grid_key: DWriteGridKey,
+    shaper: Shaper,
+    cell_metrics: CellMetrics,
+}
+
+enum SurfaceEventOutcome {
+    Continue(bool),
+    Dropped,
 }
 
 impl Drop for RendererThread {
@@ -124,57 +136,36 @@ impl RendererThread {
         text_config: RendererTextConfig,
         ui_tx: AsyncSender<RendererUiUpdate>,
     ) -> Result<Self> {
-        let dwrite_factory2: IDWriteFactory2 =
-            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
-        let dwrite_factory6 = dwrite_factory2.cast::<IDWriteFactory6>()?;
-        let mut analyzer = DWriteAnalyzer::new(&dwrite_factory2)?;
-        analyzer.reserve_for(8192, 1024)?;
-
-        let fallback = build_fallback_context(&dwrite_factory6)?;
-        let mut grid_config =
-            DWriteGridConfig::with_single_family(text_config.font_family.as_ref(), "en-US");
-        grid_config.font_size = text_config.font_size.as_f32();
-        grid_config.raster_em_size =
-            text_config.font_size.as_f32() * text_config.scale_factor.max(1.0);
-        grid_config.cell_width = text_config.cell_width.as_f32();
-        grid_config.line_height = text_config.line_height.as_f32();
-        grid_config.baseline = text_config.baseline.as_f32();
-        grid_config.max_atlas_size = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
-        grid_config.fallback = fallback;
-
         // Ghostty reference: `SharedGridSet.ref` key-based lifecycle ownership.
         let grid_set = dwrite_shared_grid_set();
-        let (grid_key, shared_grid) = grid_set.ref_dwrite(&dwrite_factory6, &grid_config)?;
 
-        let locale = "en-US";
-        let feature_spec = font::types::FontFeatureSpec::default();
-        let cell_metrics = cell_metrics_from_grid(
-            shared_grid_ref(shared_grid).metrics(),
-            text_config.font_size.as_f32(),
-        );
-        let shape_options = build_shape_options(&text_config, &cell_metrics, locale, &feature_spec);
-        let shaper = Shaper::new(analyzer, shape_options);
-        let metrics = ui_metrics(cell_metrics);
+        let text_state = build_renderer_text_state(&text_config, grid_set)?;
+        let metrics = ui_metrics(text_state.cell_metrics);
         ui_tx.try_send(RendererUiUpdate::Metrics(metrics)).ok();
 
         Ok(Self {
-            backend: D3D11Backend::new(device, swap_chain, shared_grid)?,
+            backend: D3D11Backend::new(device, swap_chain, text_state.shared_grid)?,
             terminal,
             config: text_config,
-            shared_grid,
-            shaper,
+            shared_grid: text_state.shared_grid,
+            shaper: text_state.shaper,
             shaper_cache: ShapedRunCache::new(),
             contents: Contents::new(),
-            cell_metrics,
+            cell_metrics: text_state.cell_metrics,
             batch: RenderBatch::default(),
             ui_tx,
             last_scrollbar: None,
             grid_set,
-            grid_key,
+            grid_key: text_state.grid_key,
         })
     }
 
-    fn run(&mut self, rx: Receiver<RendererMessage>, slot_rx: Receiver<CompositionSlotEvent>) {
+    fn run(
+        &mut self,
+        rx: Receiver<RendererMessage>,
+        surface_state: Arc<Mutex<ExternalSurfaceState>>,
+        surface_event_rx: Receiver<ExternalSurfaceEvent>,
+    ) {
         let mut wait_for_presentation = false;
 
         loop {
@@ -184,12 +175,12 @@ impl RendererThread {
             }
 
             let mut pending_wake = false;
-            let mut first_slot_event = None;
+            let mut first_surface_event = None;
 
             select! {
-                recv(slot_rx) -> msg => {
+                recv(surface_event_rx) -> msg => {
                     match msg {
-                        Ok(event) => first_slot_event = Some(event),
+                        Ok(event) => first_surface_event = Some(event),
                         Err(_) => break,
                     }
                 }
@@ -211,19 +202,24 @@ impl RendererThread {
                 }
             }
 
-            if first_slot_event.is_none() {
-                first_slot_event = match slot_rx.try_recv() {
+            if first_surface_event.is_none() {
+                first_surface_event = match surface_event_rx.try_recv() {
                     Ok(event) => Some(event),
                     Err(TryRecvError::Empty) => None,
                     Err(TryRecvError::Disconnected) => return,
                 };
             }
 
-            let slot_needs_present = if let Some(first_event) = first_slot_event {
-                match self.backend.process_slot_event_batch(first_event, &slot_rx) {
-                    Ok(value) => value,
+            let surface_needs_present = if let Some(first_event) = first_surface_event {
+                match self.process_surface_event_batch(
+                    first_event,
+                    &surface_event_rx,
+                    &surface_state,
+                ) {
+                    Ok(SurfaceEventOutcome::Continue(value)) => value,
+                    Ok(SurfaceEventOutcome::Dropped) => return,
                     Err(err) => {
-                        log::error!("slot event handling failed: {err:#}");
+                        log::error!("external surface event handling failed: {err:#}");
                         false
                     }
                 }
@@ -236,7 +232,8 @@ impl RendererThread {
                 pending_wake = coalesce_wakes(&rx, WAKE_COALESCE_WINDOW);
             }
 
-            let should_present = (pending_wake || slot_needs_present) && self.backend.has_target();
+            let should_present =
+                (pending_wake || surface_needs_present) && self.backend.has_target();
             if !should_present {
                 continue;
             }
@@ -274,17 +271,6 @@ impl RendererThread {
                 .ok();
         }
 
-        self.build_batch(&frame)?;
-        #[cfg(feature = "profiler")]
-        tracy_client::frame_mark();
-        self.backend.draw_and_present(
-            &self.batch,
-            self.contents.fg_lists(),
-            &self.contents.bg_cells,
-        )
-    }
-
-    fn build_batch(&mut self, frame: &RenderFrame) -> Result<()> {
         build_batch(
             &self.config,
             self.shared_grid,
@@ -292,10 +278,105 @@ impl RendererThread {
             &mut self.shaper_cache,
             &mut self.contents,
             &self.cell_metrics,
-            frame,
+            &frame,
             &mut self.batch,
+        )?;
+        #[cfg(feature = "profiler")]
+        tracy_client::frame_mark();
+        self.backend.draw_and_present(
+            self.shared_grid,
+            &self.batch,
+            self.contents.fg_lists(),
+            &self.contents.bg_cells,
         )
     }
+
+    fn process_surface_event_batch(
+        &mut self,
+        first: ExternalSurfaceEvent,
+        surface_event_rx: &Receiver<ExternalSurfaceEvent>,
+        surface_state: &Arc<Mutex<ExternalSurfaceState>>,
+    ) -> Result<SurfaceEventOutcome> {
+        let mut dropped = matches!(first, ExternalSurfaceEvent::Dropped);
+        while let Ok(event) = surface_event_rx.try_recv() {
+            if matches!(event, ExternalSurfaceEvent::Dropped) {
+                dropped = true;
+            }
+        }
+        if dropped {
+            return Ok(SurfaceEventOutcome::Dropped);
+        }
+
+        let next_state = *surface_state
+            .lock()
+            .expect("external surface state poisoned");
+        let scale_factor_changed = self.update_scale_factor(next_state.window_scale_factor)?;
+        let needs_present = self.backend.apply_surface_state(next_state)? || scale_factor_changed;
+        Ok(SurfaceEventOutcome::Continue(needs_present))
+    }
+
+    fn update_scale_factor(&mut self, scale_factor: f32) -> Result<bool> {
+        if self.config.scale_factor == scale_factor {
+            return Ok(false);
+        }
+
+        self.grid_set.deref(&self.grid_key);
+        self.config.scale_factor = scale_factor;
+
+        let text_state = build_renderer_text_state(&self.config, self.grid_set)?;
+        self.shared_grid = text_state.shared_grid;
+        self.grid_key = text_state.grid_key;
+        self.shaper = text_state.shaper;
+        self.shaper_cache = ShapedRunCache::new();
+        self.contents = Contents::new();
+        self.cell_metrics = text_state.cell_metrics;
+        self.batch = RenderBatch::default();
+
+        let metrics = ui_metrics(self.cell_metrics);
+        self.ui_tx.try_send(RendererUiUpdate::Metrics(metrics)).ok();
+        Ok(true)
+    }
+}
+
+fn build_renderer_text_state(
+    text_config: &RendererTextConfig,
+    grid_set: &'static SharedGridSet<DWriteGridKey>,
+) -> Result<RendererTextState> {
+    let dwrite_factory2: IDWriteFactory2 =
+        unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+    let dwrite_factory6 = dwrite_factory2.cast::<IDWriteFactory6>()?;
+    let mut analyzer = DWriteAnalyzer::new(&dwrite_factory2)?;
+    analyzer.reserve_for(8192, 1024)?;
+
+    let fallback = build_fallback_context(&dwrite_factory6)?;
+    let mut grid_config =
+        DWriteGridConfig::with_single_family(text_config.font_family.as_ref(), "en-US");
+    grid_config.font_size = text_config.font_size.as_f32();
+    grid_config.raster_em_size = text_config.font_size.as_f32() * text_config.scale_factor.max(1.0);
+    grid_config.cell_width = text_config.cell_width.as_f32();
+    grid_config.line_height = text_config.line_height.as_f32();
+    grid_config.baseline = text_config.baseline.as_f32();
+    grid_config.max_atlas_size = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+    grid_config.fallback = fallback;
+
+    // Ghostty reference: `SharedGridSet.ref` key-based lifecycle ownership.
+    let (grid_key, shared_grid) = grid_set.ref_dwrite(&dwrite_factory6, &grid_config)?;
+
+    let locale = "en-US";
+    let feature_spec = font::types::FontFeatureSpec::default();
+    let cell_metrics = cell_metrics_from_grid(
+        shared_grid_ref(shared_grid).metrics(),
+        text_config.font_size.as_f32(),
+    );
+    let shape_options = build_shape_options(text_config, &cell_metrics, locale, &feature_spec);
+    let shaper = Shaper::new(analyzer, shape_options);
+
+    Ok(RendererTextState {
+        shared_grid,
+        grid_key,
+        shaper,
+        cell_metrics,
+    })
 }
 
 fn coalesce_wakes(rx: &Receiver<RendererMessage>, window: Duration) -> bool {

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_channel::Sender;
 use crossbeam_channel::unbounded;
 use ghostty::{ScrollbarInfo, Terminal};
-use gpui::{CompositionSlot, CompositionSlotEvent, Pixels, Window};
+use gpui::{ExternalSurfaceEvent, ExternalSurfaceHost, Pixels, Window};
 use std::sync::Arc;
 use terminal::RendererMessage;
 use windows::Win32::{
@@ -46,13 +46,15 @@ pub struct RendererTextConfig {
     pub font_family: Arc<str>,
     pub font_size: Pixels,
     pub scale_factor: f32,
+    /// Bootstrap metrics only. The renderer rebuilds these from DirectWrite and
+    /// publishes authoritative values as soon as its thread starts.
     pub cell_width: Pixels,
     pub line_height: Pixels,
     pub baseline: Pixels,
 }
 
 pub struct TerminalRenderer {
-    slot: CompositionSlot,
+    host: ExternalSurfaceHost,
     thread: RendererThreadHandle,
     surface_handle: HANDLE,
 }
@@ -72,18 +74,27 @@ impl TerminalRenderer {
         text_config: RendererTextConfig,
         ui_tx: Sender<RendererUiUpdate>,
     ) -> Result<Self> {
-        let (slot_tx, slot_rx) = unbounded::<CompositionSlotEvent>();
-        let slot = window
-            .acquire_composition_slot(slot_tx)
-            .context("Window::acquire_composition_slot() returned None")?;
+        let (event_tx, event_rx) = unbounded::<ExternalSurfaceEvent>();
+        let host = window
+            .create_external_surface_host(event_tx)
+            .context("Window::create_external_surface_host() returned None")?;
 
         let device = create_renderer_device()?;
         let (swap_chain, surface_handle) = create_composition_swap_chain(&device, 1, 1)?;
-        slot.set_surface_handle(surface_handle)?;
+        host.set_surface_handle(surface_handle)?;
 
-        let thread = spawn(device, swap_chain, terminal, text_config, ui_tx, slot_rx);
+        let thread = spawn(
+            device,
+            swap_chain,
+            terminal,
+            text_config,
+            ui_tx,
+            host.state(),
+            event_rx,
+        );
+
         Ok(Self {
-            slot,
+            host,
             thread,
             surface_handle,
         })
@@ -93,8 +104,8 @@ impl TerminalRenderer {
         self.thread.sender()
     }
 
-    pub fn slot(&self) -> CompositionSlot {
-        self.slot.clone()
+    pub fn host(&self) -> ExternalSurfaceHost {
+        self.host.clone()
     }
 }
 

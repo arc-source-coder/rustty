@@ -1,10 +1,9 @@
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable, cast_slice};
-use crossbeam_channel::Receiver;
 use font::cache::glyph_cache::GlyphAtlasKind;
 use font::shared_grid::SharedGrid;
 use font::shared_grid_set::SharedGridPtr;
-use gpui::{Bounds, CompositionSlotEvent, DevicePixels};
+use gpui::ExternalSurfaceState;
 use std::mem::{size_of, size_of_val};
 use std::slice;
 use windows::Win32::Foundation::{HANDLE, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT};
@@ -21,9 +20,6 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11InputLayout, ID3D11PixelShader, ID3D11RenderTargetView, ID3D11SamplerState,
     ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
 };
-use windows::Win32::Graphics::DirectComposition::{
-    IDCompositionDevice, IDCompositionRectangleClip, IDCompositionVisual,
-};
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UINT,
     DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16G16_SINT,
@@ -34,7 +30,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, IDXGISwapChain1, IDXGISwapChain2,
 };
 use windows::Win32::System::Threading::WaitForSingleObjectEx;
-use windows::core::{IUnknown, Interface, s};
+use windows::core::{Interface, s};
 
 use super::shared_grid_ptr::shared_grid_ref;
 use super::types::{QuadInstance, RenderBatch};
@@ -55,14 +51,8 @@ pub(crate) struct D3D11Backend {
     pipeline: GlyphPipeline,
     background_cells: BackgroundCells,
     target: Option<RenderTarget>,
-    comp_device: Option<IDCompositionDevice>,
-    slot_visual: Option<IDCompositionVisual>,
-    slot_clip: Option<IDCompositionRectangleClip>,
-    slot_surface_handle: Option<HANDLE>,
-    slot_surface: Option<IUnknown>,
-    last_bounds: Option<Bounds<DevicePixels>>,
+    surface_state: ExternalSurfaceState,
     frame_latency_waitable_object: Option<HANDLE>,
-    shared_grid: SharedGridPtr,
     present_rect_scratch: Vec<RECT>,
 }
 
@@ -127,14 +117,6 @@ struct GlyphVertex {
     unit: [f32; 2],
 }
 
-#[derive(Default)]
-struct SlotBatchFlags {
-    bind_surface: bool,
-    apply_bounds: bool,
-    resize_target: bool,
-    request_present: bool,
-}
-
 impl D3D11Backend {
     pub(crate) fn new(
         device: ID3D11Device,
@@ -162,52 +144,19 @@ impl D3D11Backend {
             pipeline,
             background_cells,
             target: None,
-            comp_device: None,
-            slot_visual: None,
-            slot_clip: None,
-            slot_surface_handle: None,
-            slot_surface: None,
-            last_bounds: None,
+            surface_state: ExternalSurfaceState::default(),
             frame_latency_waitable_object,
-            shared_grid,
             present_rect_scratch: Vec::new(),
         })
     }
 
     pub(crate) fn has_target(&self) -> bool {
-        self.target.is_some()
-    }
-
-    pub(crate) fn process_slot_event_batch(
-        &mut self,
-        first: CompositionSlotEvent,
-        slot_rx: &Receiver<CompositionSlotEvent>,
-    ) -> Result<bool> {
-        let mut flags = SlotBatchFlags::default();
-        self.apply_slot_event(first, &mut flags);
-        while let Ok(event) = slot_rx.try_recv() {
-            self.apply_slot_event(event, &mut flags);
-        }
-        let mut committed_slot_updates = false;
-        if flags.bind_surface {
-            committed_slot_updates |= self.bind_surface_to_slot()?;
-        }
-        if flags.apply_bounds {
-            committed_slot_updates |= self.apply_slot_bounds()?;
-        }
-        if committed_slot_updates {
-            self.commit_slot_updates()?;
-        }
-        let resized = if flags.resize_target {
-            self.resize_to_slot_bounds()?
-        } else {
-            false
-        };
-        Ok((resized || flags.request_present) && self.target.is_some())
+        self.target.is_some() && self.surface_state.visible
     }
 
     pub(crate) fn draw_and_present(
         &mut self,
+        shared_grid: SharedGridPtr,
         batch: &RenderBatch,
         fg_lists: &[Vec<QuadInstance>],
         bg_cells: &[u32],
@@ -219,13 +168,13 @@ impl D3D11Backend {
         let grayscale_resized = self.atlas_grayscale.sync(
             &self.device,
             &self.context,
-            shared_grid_ref(self.shared_grid),
+            shared_grid_ref(shared_grid),
             GlyphAtlasKind::Grayscale,
         )?;
         let color_resized = self.atlas_color.sync(
             &self.device,
             &self.context,
-            shared_grid_ref(self.shared_grid),
+            shared_grid_ref(shared_grid),
             GlyphAtlasKind::Color,
         )?;
         let bg_resized = self.background_cells.update_from_batch(
@@ -252,109 +201,25 @@ impl D3D11Backend {
         Ok(())
     }
 
-    fn apply_slot_event(&mut self, event: CompositionSlotEvent, flags: &mut SlotBatchFlags) {
-        match event {
-            CompositionSlotEvent::SetSurfaceHandle(handle) => {
-                if self.slot_surface_handle != Some(handle) {
-                    self.slot_surface_handle = Some(handle);
-                    self.slot_surface = None;
-                }
-                flags.bind_surface = true;
-                flags.request_present = true;
-            }
-            CompositionSlotEvent::SetBounds(bounds) => {
-                let previous = self.last_bounds;
-                self.last_bounds = Some(bounds);
-                if previous != Some(bounds) {
-                    flags.apply_bounds = true;
-                    flags.resize_target = true;
-                    flags.request_present = true;
-                }
-            }
-            CompositionSlotEvent::SlotRecovered {
-                visual,
-                comp_device,
-            } => {
-                self.slot_visual = Some(visual);
-                self.comp_device = Some(comp_device);
-                self.slot_clip = None;
-                self.slot_surface = None;
-                flags.bind_surface = true;
-                flags.apply_bounds = true;
-                flags.resize_target = true;
-                flags.request_present = true;
-            }
-            CompositionSlotEvent::SlotDropped => {
-                self.comp_device = None;
-                self.slot_visual = None;
-                self.slot_clip = None;
-                self.slot_surface_handle = None;
-                self.slot_surface = None;
-                *flags = SlotBatchFlags::default();
-            }
-        }
-    }
+    pub(crate) fn apply_surface_state(&mut self, next_state: ExternalSurfaceState) -> Result<bool> {
+        let previous_state = self.surface_state;
+        self.surface_state = next_state;
 
-    fn bind_surface_to_slot(&mut self) -> Result<bool> {
-        let (Some(visual), Some(comp_device), Some(surface_handle)) = (
-            self.slot_visual.as_ref(),
-            self.comp_device.as_ref(),
-            self.slot_surface_handle,
-        ) else {
-            return Ok(false);
-        };
-
-        if self.slot_surface.is_none() {
-            let surface: IUnknown = unsafe { comp_device.CreateSurfaceFromHandle(surface_handle) }?;
-            self.slot_surface = Some(surface);
-        }
-
-        unsafe {
-            let surface = self
-                .slot_surface
-                .as_ref()
-                .expect("slot surface should be cached")
-                .clone();
-            visual.SetContent(&surface)?;
-        }
-        Ok(true)
-    }
-
-    fn apply_slot_bounds(&mut self) -> Result<bool> {
-        let (Some(visual), Some(comp_device), Some(bounds)) = (
-            self.slot_visual.as_ref(),
-            self.comp_device.as_ref(),
-            self.last_bounds,
-        ) else {
-            return Ok(false);
-        };
-        if bounds.size.width.0 <= 0 || bounds.size.height.0 <= 0 {
+        if !next_state.visible {
             return Ok(false);
         }
-        let clip = if let Some(clip) = self.slot_clip.clone() {
-            clip
-        } else {
-            unsafe { comp_device.CreateRectangleClip() }?
-        };
-        unsafe {
-            visual.SetOffsetX2(bounds.origin.x.0 as f32)?;
-            visual.SetOffsetY2(bounds.origin.y.0 as f32)?;
-            clip.SetLeft2(0.0)?;
-            clip.SetTop2(0.0)?;
-            clip.SetRight2(bounds.size.width.0 as f32)?;
-            clip.SetBottom2(bounds.size.height.0 as f32)?;
-            visual.SetClip(&clip)?;
-        }
-        self.slot_clip = Some(clip);
-        Ok(true)
-    }
 
-    fn commit_slot_updates(&self) -> Result<()> {
-        let Some(comp_device) = self.comp_device.as_ref() else {
-            return Ok(());
-        };
-        unsafe { comp_device.Commit()? };
-        Ok(())
+        let width = next_state.device_size.width.0.max(1) as u32;
+        let height = next_state.device_size.height.0.max(1) as u32;
+        let needs_resize = self
+            .target
+            .as_ref()
+            .is_none_or(|target| target.width != width || target.height != height);
+        if needs_resize {
+            self.resize(width, height)?;
+            return Ok(true);
+        }
+        Ok(!previous_state.visible)
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
@@ -387,23 +252,6 @@ impl D3D11Backend {
             height,
         });
         Ok(())
-    }
-
-    fn resize_to_slot_bounds(&mut self) -> Result<bool> {
-        let Some(bounds) = self.last_bounds else {
-            return Ok(false);
-        };
-        let width = bounds.size.width.0.max(1) as u32;
-        let height = bounds.size.height.0.max(1) as u32;
-        let needs_resize = self
-            .target
-            .as_ref()
-            .is_none_or(|target| target.width != width || target.height != height);
-        if !needs_resize {
-            return Ok(false);
-        }
-        self.resize(width, height)?;
-        Ok(true)
     }
 
     pub(crate) fn wait_for_frame_latency(&self) {

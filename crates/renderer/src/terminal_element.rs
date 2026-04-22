@@ -2,11 +2,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, CompositionSlot, DefiniteLength, DevicePixels, Element, ElementId, Entity,
-    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, Length,
-    Pixels, Style, Window, point, size,
+    App, Bounds, DefiniteLength, Element, ElementId, Entity, ExternalSurfaceHost,
+    ExternalSurfaceState, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
+    LayoutId, Length, Pixels, Style, Window,
 };
-use terminal::TerminalSession;
+use terminal::{TerminalDimensions, TerminalSession};
 
 use crate::gpu::RendererCellMetrics;
 
@@ -18,10 +18,8 @@ pub struct LayoutState {
 
 /// State persisted across frames via with_element_state.
 struct TerminalElementState {
-    /// Grid dimensions at last prepaint.
-    last_cell_width_px: u32,
-    last_cell_height_px: u32,
-    last_device_bounds: Bounds<DevicePixels>,
+    last_dimensions: TerminalDimensions,
+    last_surface_state: ExternalSurfaceState,
 }
 
 /// The GPUI Element that renders the terminal surface.
@@ -31,7 +29,7 @@ pub struct TerminalElement {
     /// Written during prepaint so `TerminalView` can read the surface bounds for
     /// mouse-coordinate conversion and for publishing scroll info to the scrollbar.
     bounds_out: Rc<Cell<Option<Bounds<Pixels>>>>,
-    composition_slot: CompositionSlot,
+    surface_host: ExternalSurfaceHost,
     /// Renderer-authoritative metrics pushed from the renderer thread.
     cell_metrics: Option<RendererCellMetrics>,
 }
@@ -41,14 +39,14 @@ impl TerminalElement {
         session: Entity<TerminalSession>,
         element_id: ElementId,
         bounds_out: Rc<Cell<Option<Bounds<Pixels>>>>,
-        composition_slot: CompositionSlot,
+        surface_host: ExternalSurfaceHost,
         cell_metrics: Option<RendererCellMetrics>,
     ) -> Self {
         Self {
             session,
             element_id,
             bounds_out,
-            composition_slot,
+            surface_host,
             cell_metrics,
         }
     }
@@ -112,48 +110,44 @@ impl Element for TerminalElement {
                 .unwrap_or_else(|| Self::fallback_metrics(render_config.font_size));
 
             let scale_factor = window.scale_factor();
-            let device_bounds = Bounds::new(
-                point(
-                    DevicePixels((f32::from(bounds.origin.x) * scale_factor).round() as i32),
-                    DevicePixels((f32::from(bounds.origin.y) * scale_factor).round() as i32),
-                ),
-                size(
-                    DevicePixels((f32::from(bounds.size.width) * scale_factor).round() as i32),
-                    DevicePixels((f32::from(bounds.size.height) * scale_factor).round() as i32),
-                ),
-            );
-            let bounds_changed = prev_state
+            let content_mask = window.content_mask();
+            let clipped_bounds = bounds.intersect(&content_mask.bounds);
+
+            let next_surface_state = ExternalSurfaceState {
+                logical_size: bounds.size,
+                device_size: bounds.size.to_device_pixels(scale_factor),
+                window_scale_factor: scale_factor,
+                visible: !clipped_bounds.is_empty(),
+            };
+
+            let surface_state_changed = prev_state
                 .as_ref()
-                .is_none_or(|s| s.last_device_bounds != device_bounds);
-            if bounds_changed {
-                self.composition_slot.set_bounds(device_bounds);
+                .is_none_or(|state| state.last_surface_state != next_surface_state);
+
+            if surface_state_changed {
+                self.surface_host.update_state(next_surface_state);
             }
 
-            let cell_w = (metrics.cell_width.max(1.0) * scale_factor).round() as u32;
-            let cell_h = (metrics.line_height.max(1.0) * scale_factor).round() as u32;
+            let dimensions = TerminalDimensions {
+                screen_width_px: next_surface_state.device_size.width.0.max(1) as u32,
+                screen_height_px: next_surface_state.device_size.height.0.max(1) as u32,
+                cell_width_px: (metrics.cell_width.max(1.0) * scale_factor).round() as u32,
+                cell_height_px: (metrics.line_height.max(1.0) * scale_factor).round() as u32,
+            };
 
-            let size_changed = prev_state
+            let dimensions_changed = prev_state
                 .as_ref()
-                .is_none_or(|s| s.last_device_bounds.size != device_bounds.size);
-            let metrics_changed = prev_state
-                .as_ref()
-                .is_none_or(|s| s.last_cell_width_px != cell_w || s.last_cell_height_px != cell_h);
-            if size_changed || metrics_changed {
+                .is_none_or(|state| state.last_dimensions != dimensions);
+            if dimensions_changed {
                 session.update(cx, |s, _cx| {
-                    s.request_resize(
-                        device_bounds.size.width.0 as u32,
-                        device_bounds.size.height.0 as u32,
-                        cell_w,
-                        cell_h,
-                    );
+                    s.apply_resize(dimensions);
                 });
             }
 
             let layout = LayoutState { _hitbox: hitbox };
             let new_state = TerminalElementState {
-                last_cell_width_px: cell_w,
-                last_cell_height_px: cell_h,
-                last_device_bounds: device_bounds,
+                last_dimensions: dimensions,
+                last_surface_state: next_surface_state,
             };
 
             (layout, new_state)
@@ -173,12 +167,13 @@ impl Element for TerminalElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         _layout: &mut Self::PrepaintState,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) {
+        window.paint_external_surface(&self.surface_host, bounds);
     }
 }
 

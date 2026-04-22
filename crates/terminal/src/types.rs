@@ -2,7 +2,7 @@ use crossbeam_queue::ArrayQueue;
 pub use ghostty::TerminalDimensions;
 use std::path::PathBuf;
 use std::process::ExitStatus;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use zconpty::{KeyEvent, MouseEvent};
 
@@ -31,18 +31,6 @@ impl SessionId {
 impl Default for SessionId {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct GridSize {
-    pub cols: u16,
-    pub rows: u16,
-}
-
-impl GridSize {
-    pub fn new(cols: u16, rows: u16) -> Self {
-        Self { cols, rows }
     }
 }
 
@@ -104,10 +92,6 @@ pub enum IoMsg {
     /// Begin/reset the 1-second synchronized output safety timer.
     #[allow(dead_code)]
     StartSyncOutput,
-    /// Attach a renderer sender for forwarding committed resizes.
-    AttachRenderer(crossbeam_channel::Sender<RendererMessage>),
-    /// Detach renderer sender. Normal during view teardown.
-    DetachRenderer,
     /// Ordered shutdown.
     Close,
 }
@@ -184,10 +168,6 @@ impl IoThreadNotify {
 
 /// Messages sent from the terminal/IO path to the renderer thread.
 ///
-/// Defined in `terminal` so that `TerminalSession` can store a sender without
-/// a circular dependency on the `renderer` crate. The `renderer` crate
-/// re-exports this type.
-///
 /// Reserve a `DeviceLost` variant for the next slice — the renderer thread
 /// must not outlive GPUI device recreation.
 #[derive(Debug)]
@@ -196,4 +176,32 @@ pub enum RendererMessage {
     Wake,
     /// Ordered shutdown; renderer thread should exit its loop.
     Quit,
+}
+
+/// Direct wake path into the renderer thread.
+///
+/// This is shared by Ghostty's output callback and by Rust-side terminal
+/// mutators that change render state without producing output.
+pub struct RendererWake {
+    sender: Mutex<Option<crossbeam_channel::Sender<RendererMessage>>>,
+}
+
+impl RendererWake {
+    pub fn new() -> Self {
+        Self {
+            sender: Mutex::new(None),
+        }
+    }
+
+    pub fn bind(&self, sender: crossbeam_channel::Sender<RendererMessage>) {
+        let mut slot = self.sender.lock().expect("renderer wake mutex poisoned");
+        *slot = Some(sender);
+    }
+
+    pub fn wake(&self) {
+        let slot = self.sender.lock().expect("renderer wake mutex poisoned");
+        if let Some(sender) = slot.as_ref() {
+            let _ = sender.try_send(RendererMessage::Wake);
+        }
+    }
 }

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crossbeam_queue::ArrayQueue;
 use gpui::{AsyncApp, Context, Entity, Keystroke, Modifiers, Task, WeakEntity};
@@ -9,8 +9,8 @@ use crate::io_thread;
 use crate::platform::windows::thread::PlatformThread;
 use crate::surface::{AppAction, TerminalSurface};
 use crate::types::{
-    GridSize, IoEvent, IoInput, IoMsg, IoThreadNotify, ProcessState, RendererMessage, ScrollOp,
-    SessionId, SessionMetadata, TerminalDimensions,
+    IoEvent, IoInput, IoMsg, IoThreadNotify, ProcessState, RendererWake, ScrollOp, SessionId,
+    SessionMetadata, TerminalDimensions,
 };
 use ghostty::{CallbackHandle, ColorRGB, Event as TerminalEvent, Terminal};
 use zconpty::{ConPTY, KeyAction, KeyEvent, MouseButton, MousePosition, key_from_w3c};
@@ -27,12 +27,12 @@ pub struct TerminalSession {
     console_session: Arc<ConPTY>,
     callback_handle: CallbackHandle,
     terminal: Arc<Terminal>,
-    size: GridSize,
+    dimensions: TerminalDimensions,
     spawn_config: SpawnConfig,
     render_config: Entity<RenderConfig>,
     /// Sender for user input and resize commands to the IO thread.
     io_notify: Arc<IoThreadNotify>,
-    renderer_tx: Arc<Mutex<Option<crossbeam_channel::Sender<RendererMessage>>>>,
+    renderer_wake: Arc<RendererWake>,
     metadata: SessionMetadata,
     process_state: ProcessState,
     surface: TerminalSurface,
@@ -47,27 +47,33 @@ impl TerminalSession {
         render_config: Entity<RenderConfig>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let size = GridSize::new(spawn_config.initial_cols, spawn_config.initial_rows);
-
         // Channels:
         //   io_notify.queue: bounded lock-free — GPUI → IO thread
         //   event_tx/rx:     unbounded bell/title events — Ghostty callbacks → GPUI task
         let io_queue = Arc::new(ArrayQueue::new(IO_MSG_CHANNEL_CAPACITY));
         let io_notify = Arc::new(IoThreadNotify::new(io_queue));
         let (event_tx, event_rx) = async_channel::unbounded::<TerminalEvent>();
-        let renderer_tx = Arc::new(Mutex::new(None));
+        let renderer_wake = Arc::new(RendererWake::new());
 
         let default_fg = ColorRGB::new(0xDD, 0xDD, 0xDD);
         let default_bg = ColorRGB::new(0x1E, 0x1E, 0x2E);
         let terminal = Arc::new(
-            Terminal::new(size.cols, size.rows, default_fg, default_bg)
-                .expect("failed to allocate ghostty terminal"),
+            Terminal::new(
+                spawn_config.initial_cols,
+                spawn_config.initial_rows,
+                default_fg,
+                default_bg,
+            )
+            .expect("failed to allocate ghostty terminal"),
         );
         let console_session =
             Arc::new(ConPTY::new(terminal.handle()).expect("failed to start console session"));
-        let callback_renderer_tx = renderer_tx.clone();
+        let callback_renderer_wake = renderer_wake.clone();
         let callback_handle =
-            terminal.set_event_sender(event_tx, move || wake_renderer(&callback_renderer_tx));
+            terminal.set_event_sender(event_tx, move || callback_renderer_wake.wake());
+
+        let dimensions = initial_dimensions(&spawn_config);
+        terminal.set_dimensions(dimensions);
 
         /*    let mut env = HashMap::new();
                 env.insert("TERM".into(), spawn_config.term.clone());
@@ -86,6 +92,7 @@ impl TerminalSession {
             console_session.clone(),
             terminal.clone(),
             io_notify.clone(),
+            renderer_wake.clone(),
         )
         .expect("failed to spawn IO thread");
 
@@ -116,11 +123,11 @@ impl TerminalSession {
             console_session,
             callback_handle,
             terminal,
-            size,
+            dimensions,
             spawn_config,
             render_config,
             io_notify,
-            renderer_tx,
+            renderer_wake,
             metadata: SessionMetadata::default(),
             process_state: ProcessState::Running,
             surface: TerminalSurface::new(),
@@ -136,63 +143,22 @@ impl TerminalSession {
         &self.terminal
     }
 
-    /// Attach a renderer-thread sender so the IO thread can wake the renderer
-    /// after committed resize events. Called by `TerminalView` after startup.
-    ///
-    /// Only the sender is stored; no renderer-owned state enters `terminal`.
-    pub fn attach_renderer_sender(&self, sender: crossbeam_channel::Sender<RendererMessage>) {
-        {
-            let mut slot = self
-                .renderer_tx
-                .lock()
-                .expect("renderer sender mutex poisoned");
-            *slot = Some(sender.clone());
-        }
-        let _ = self.io_notify.try_send(IoMsg::AttachRenderer(sender));
-    }
-
-    /// Remove the renderer sender, for example when the view is torn down.
-    /// Send failures after detach are treated as normal shutdown races.
-    pub fn detach_renderer_sender(&self) {
-        {
-            let mut slot = self
-                .renderer_tx
-                .lock()
-                .expect("renderer sender mutex poisoned");
-            *slot = None;
-        }
-        let _ = self.io_notify.try_send(IoMsg::DetachRenderer);
-    }
-
-    /// Request a resize from the renderer.
-    /// Sends IoMsg::Resize to the IO thread, which coalesces (25ms) then signals
-    /// applies terminal.resize()/cell-size update and wakes the renderer.
-    /// Includes cell dimensions for CSI size reports.
-    pub fn request_resize(
-        &mut self,
-        screen_width_px: u32,
-        screen_height_px: u32,
-        cell_width_px: u32,
-        cell_height_px: u32,
+    /// Bind the session's direct renderer wake path.
+    pub fn bind_renderer_sender(
+        &self,
+        sender: crossbeam_channel::Sender<crate::types::RendererMessage>,
     ) {
-        let rows = (screen_height_px / cell_height_px) as u16;
-        let cols = (screen_width_px / cell_width_px) as u16;
-
-        let new_size = GridSize::new(cols.max(1), rows.max(1));
-        self.size = new_size;
-
-        let dimensions = TerminalDimensions {
-            screen_width_px,
-            screen_height_px,
-            cell_width_px,
-            cell_height_px,
-        };
-        let _ = self.io_notify.try_send(IoMsg::Resize(dimensions));
+        self.renderer_wake.bind(sender);
     }
 
-    /// Current grid size.
-    pub fn current_size(&self) -> GridSize {
-        self.size
+    /// Apply the latest terminal dimensions from layout.
+    pub fn apply_resize(&mut self, dimensions: TerminalDimensions) {
+        if self.dimensions == dimensions {
+            return;
+        }
+
+        self.dimensions = dimensions;
+        let _ = self.io_notify.try_send(IoMsg::Resize(dimensions));
     }
 
     /// Current process state.
@@ -444,12 +410,15 @@ impl TerminalSession {
         keystroke: &Keystroke,
         emit: &mut dyn FnMut(AppAction),
     ) -> bool {
+        let cell_height_px = self.dimensions.cell_height_px.max(1);
+        let rows = self.dimensions.screen_height_px / cell_height_px;
+
         self.surface.handle_scroll_key(
             &self.terminal,
             &self.io_notify,
             &keystroke.key,
             &keystroke.modifiers,
-            self.size.rows,
+            rows.max(1) as u16,
             emit,
         )
     }
@@ -457,6 +426,20 @@ impl TerminalSession {
     /// Locks internally.
     pub fn has_selection(&self) -> bool {
         self.terminal.selection_text().is_some()
+    }
+}
+
+fn initial_dimensions(spawn_config: &SpawnConfig) -> TerminalDimensions {
+    // Bootstrap dimensions only. The renderer publishes authoritative text metrics
+    // when it starts, and layout then replaces this initial guess via apply_resize.
+    let cell_width_px = 8;
+    let cell_height_px = 16;
+
+    TerminalDimensions {
+        screen_width_px: u32::from(spawn_config.initial_cols) * cell_width_px,
+        screen_height_px: u32::from(spawn_config.initial_rows) * cell_height_px,
+        cell_width_px,
+        cell_height_px,
     }
 }
 
@@ -475,13 +458,6 @@ fn should_clear_selection_on_key_event(event: &KeyEvent) -> bool {
     // Modifier-only events arrive with no logical key code and no text payload.
     // Keep selection for these so Shift/Ctrl/Alt taps don't dismiss a selection.
     event.code.as_raw() != 0 || event.text_len > 0
-}
-
-fn wake_renderer(renderer_tx: &Arc<Mutex<Option<crossbeam_channel::Sender<RendererMessage>>>>) {
-    let slot = renderer_tx.lock().expect("renderer sender mutex poisoned");
-    if let Some(sender) = slot.as_ref() {
-        let _ = sender.try_send(RendererMessage::Wake);
-    }
 }
 
 impl Drop for TerminalSession {
@@ -509,14 +485,6 @@ mod tests {
         let a = SessionId::new();
         let b = SessionId::new();
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn grid_size_equality() {
-        let a = GridSize::new(80, 24);
-        let b = GridSize::new(80, 24);
-        assert_eq!(a, b);
-        assert_ne!(a, GridSize::new(120, 40));
     }
 
     #[test]

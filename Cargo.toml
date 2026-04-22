@@ -30,7 +30,6 @@ windows-core = "0.61"
 windows-sys = { version = "0.59" }
 windows-numerics = "0.2"
 
-# Update the below paths to match your local vendored source
 gpui = { git = "https://github.com/arc-source-coder/zed/" }
 gpui_platform = { git = "https://github.com/arc-source-coder/zed/" }
 

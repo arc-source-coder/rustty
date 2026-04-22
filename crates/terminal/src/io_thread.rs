@@ -1,8 +1,4 @@
-/// IO thread — input ingress, mailbox, and timers.
-///
-/// Deferred TODOs for later slices:
-/// - Reintroduce server-output ingestion path if needed.
-/// - Reintroduce close coordination with a dedicated read thread (if any).
+/// IO thread — handles input ingress, mailbox, and timers.
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -16,7 +12,7 @@ use crate::platform::windows::ntdll::{
     STATUS_ALERTED, STATUS_SUCCESS, STATUS_TIMEOUT, STATUS_USER_APC,
 };
 use crate::platform::windows::thread::{PlatformThread, set_current_thread_name};
-use crate::types::{IoInput, IoMsg, IoThreadNotify, RendererMessage, ScrollOp, TerminalDimensions};
+use crate::types::{IoInput, IoMsg, IoThreadNotify, RendererWake, ScrollOp, TerminalDimensions};
 
 const RESIZE_COALESCE: Duration = Duration::from_millis(25);
 const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -29,17 +25,20 @@ struct IoThreadContext {
     console_session: Arc<ConPTY>,
     terminal: Arc<Terminal>,
     io_notify: Arc<IoThreadNotify>,
+    renderer_wake: Arc<RendererWake>,
 }
 
 pub fn spawn_suspended(
     console_session: Arc<ConPTY>,
     terminal: Arc<Terminal>,
     io_notify: Arc<IoThreadNotify>,
+    renderer_wake: Arc<RendererWake>,
 ) -> io::Result<PlatformThread> {
     let ctx = Box::new(IoThreadContext {
         console_session,
         terminal,
         io_notify,
+        renderer_wake,
     });
     let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
     match PlatformThread::spawn_suspended(io_thread_entry, ctx_ptr) {
@@ -62,7 +61,7 @@ unsafe extern "system" fn io_thread_entry(context: *mut std::ffi::c_void) -> u32
 
     // SAFETY: context comes from Box::into_raw in spawn_suspended.
     let ctx = unsafe { Box::from_raw(context as *mut IoThreadContext) };
-    let mut thread = IoThread::new(ctx.console_session, ctx.terminal, ctx.io_notify);
+    let mut thread = IoThread::new(ctx.console_session, ctx.terminal, ctx.io_notify, ctx.renderer_wake);
     thread.run();
     0
 }
@@ -72,7 +71,7 @@ struct IoThread {
     console_session: Arc<ConPTY>,
     terminal: Arc<Terminal>,
     io_notify: Arc<IoThreadNotify>,
-    renderer_tx: Option<crossbeam_channel::Sender<RendererMessage>>,
+    renderer_wake: Arc<RendererWake>,
 
     resize_deadline: Option<Instant>,
     pending_resize: Option<TerminalDimensions>,
@@ -84,12 +83,13 @@ impl IoThread {
         console_session: Arc<ConPTY>,
         terminal: Arc<Terminal>,
         io_notify: Arc<IoThreadNotify>,
+        renderer_wake: Arc<RendererWake>,
     ) -> Self {
         Self {
             console_session,
             terminal,
             io_notify,
-            renderer_tx: None,
+            renderer_wake,
             resize_deadline: None,
             pending_resize: None,
             sync_output_deadline: None,
@@ -149,12 +149,6 @@ impl IoThread {
             IoMsg::StartSyncOutput => {
                 self.sync_output_deadline = Some(Instant::now() + SYNC_OUTPUT_TIMEOUT);
             }
-            IoMsg::AttachRenderer(sender) => {
-                self.renderer_tx = Some(sender);
-            }
-            IoMsg::DetachRenderer => {
-                self.renderer_tx = None;
-            }
             IoMsg::Close => {
                 self.handle_close();
                 return true;
@@ -196,9 +190,7 @@ impl IoThread {
         {
             self.sync_output_deadline = None;
             self.terminal.reset_synchronized_output();
-            if let Some(sender) = self.renderer_tx.as_ref() {
-                let _ = sender.try_send(RendererMessage::Wake);
-            }
+            self.renderer_wake.wake();
         }
     }
 
@@ -209,9 +201,7 @@ impl IoThread {
             ScrollOp::Top => self.terminal.scroll_to_top(),
             ScrollOp::Bottom => self.terminal.scroll_to_bottom(),
         }
-        if let Some(sender) = self.renderer_tx.as_ref() {
-            let _ = sender.try_send(RendererMessage::Wake);
-        }
+        self.renderer_wake.wake();
     }
 
     fn apply_resize(&self, dimensions: TerminalDimensions) {
@@ -221,9 +211,7 @@ impl IoThread {
         self.terminal.resize(cols.max(1), rows.max(1));
         self.terminal.set_dimensions(dimensions);
         self.console_session.send_resize(cols.max(1), rows.max(1));
-        if let Some(sender) = self.renderer_tx.as_ref() {
-            let _ = sender.try_send(RendererMessage::Wake);
-        }
+        self.renderer_wake.wake();
     }
 
     fn handle_close(&mut self) {
