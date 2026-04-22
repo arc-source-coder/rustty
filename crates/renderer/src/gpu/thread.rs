@@ -29,7 +29,7 @@ use super::shared_grid_ptr::shared_grid_ref;
 use super::terminal_renderer::{RendererTextConfig, RendererUiUpdate};
 use super::types::RenderBatch;
 
-const WAKE_COALESCE_WINDOW: Duration = Duration::from_millis(1);
+const WAKE_COALESCE_WINDOW: Duration = Duration::from_millis(2);
 
 fn dwrite_shared_grid_set() -> &'static SharedGridSet<DWriteGridKey> {
     static GRID_SET: OnceLock<SharedGridSet<DWriteGridKey>> = OnceLock::new();
