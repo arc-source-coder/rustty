@@ -142,9 +142,7 @@ impl Render for TitleBar {
                         el
                     }
                 }
-                PlatformStyle::Windows => el.child(WindowsWindowControls {
-                    button_height: TITLE_BAR_HEIGHT,
-                }),
+                PlatformStyle::Windows => el.child(WindowsWindowControls::new(TITLE_BAR_HEIGHT)),
             })
     }
 }
@@ -154,13 +152,37 @@ impl Render for TitleBar {
 #[derive(IntoElement)]
 struct WindowsWindowControls {
     button_height: Pixels,
+    icon_font: String,
+}
+
+impl WindowsWindowControls {
+    fn new(button_height: Pixels) -> Self {
+        Self {
+            button_height,
+            icon_font: Self::get_font(),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn get_font() -> String {
+        use windows::Wdk::System::SystemServices::RtlGetVersion;
+
+        let mut version = unsafe { std::mem::zeroed() };
+        let status = unsafe { RtlGetVersion(&mut version) };
+
+        if status.is_ok() && version.dwBuildNumber >= 22000 {
+            "Segoe Fluent Icons".to_string()
+        } else {
+            "Segoe MDL2 Assets".to_string()
+        }
+    }
 }
 
 impl RenderOnce for WindowsWindowControls {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         div()
             .id("windows-window-controls")
-            .font_family("Segoe Fluent Icons")
+            .font_family(self.icon_font)
             .flex()
             .flex_row()
             .justify_center()
