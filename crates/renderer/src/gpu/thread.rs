@@ -363,6 +363,8 @@ fn build_renderer_text_state(
     let (grid_key, shared_grid) = grid_set.ref_dwrite(&dwrite_factory6, &grid_config)?;
 
     let locale = "en-US";
+    // TODO(renderer-config): plumb font feature config into RendererTextConfig
+    // so overlap splitting can be disabled entirely when ligatures are off.
     let feature_spec = font::types::FontFeatureSpec::default();
     let cell_metrics = cell_metrics_from_grid(
         shared_grid_ref(shared_grid).metrics(),

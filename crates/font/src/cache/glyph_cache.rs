@@ -110,6 +110,7 @@ impl GlyphRenderOptions {
         let cleared = self.0 & !(0b11 << 11);
         Self(cleared | (((constraint_width as u16) & 0b11) << 11))
     }
+
     /// Pack all option fields into a `u16`.
     ///
     /// Bit layout (LSB first):
@@ -236,6 +237,9 @@ pub struct CachedGlyph {
     pub atlas_y: u32,
     /// Which atlas texture this glyph lives in.
     pub atlas_kind: Option<GlyphAtlasKind>,
+    /// WT-style cached decision for whether this glyph needs per-cell overlap
+    /// splitting to preserve foreground color changes across a ligature bitmap.
+    pub overlap_split: bool,
 }
 
 /// HashMap-backed glyph cache.
@@ -372,6 +376,7 @@ mod tests {
             atlas_x,
             atlas_y: 0,
             atlas_kind: Some(GlyphAtlasKind::Grayscale),
+            overlap_split: false,
         }
     }
 

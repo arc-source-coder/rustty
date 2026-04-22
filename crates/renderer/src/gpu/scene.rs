@@ -593,14 +593,11 @@ fn add_glyph(
     }
 
     let cell_width_px = (cell_metrics.cell_width * scale_factor).round();
-    let glyph_cells = if cell_width_px > 0.0 {
-        ((cached.width as f32 / cell_width_px).ceil() as usize).max(1)
-    } else {
-        1
-    };
 
-    // Fast path: single-cell glyph or glyph that doesn't span extra columns.
-    if glyph_cells <= 1 {
+    // Fast path: most glyphs stay as a single quad. WT caches the overlap-split
+    // decision with the glyph entry, so we only pay the per-row color walk for
+    // ligature-like overhangs that actually need it.
+    if !cached.overlap_split {
         let mut instance = QuadInstance::glyph_rect(origin, size, fg);
         instance.set_texcoord(
             cached.atlas_x.min(u16::MAX as u32) as u16,
@@ -610,18 +607,15 @@ fn add_glyph(
         return Ok(());
     }
 
-    // Multi-cell glyph: check if any covered column has a different fg color.
-    // Only resolve neighboring colors when we actually have a wide glyph.
+    // Ligature-like overhang: split at cell edges so per-cell foreground color
+    // changes still apply across the shared glyph bitmap.
     overlap_split_glyph(
         y,
-        col,
-        glyph_cells,
         raw_cells,
         styles,
         palette,
         default_fg,
         default_bg,
-        fg,
         origin,
         size,
         &cached,
@@ -642,14 +636,11 @@ fn add_glyph(
 #[allow(clippy::too_many_arguments)]
 fn overlap_split_glyph(
     y: u16,
-    col: usize,
-    glyph_cells: usize,
     raw_cells: &[RawCell],
     styles: &[CellStyle],
     palette: &[ColorRGB; 256],
     default_fg: ColorRGB,
     default_bg: ColorRGB,
-    first_fg: u32,
     origin: [f32; 2],
     size: [f32; 2],
     cached: &CachedGlyph,
@@ -660,50 +651,88 @@ fn overlap_split_glyph(
     let tex_y = cached.atlas_y.min(u16::MAX as u32) as u16;
     let glyph_left = origin[0];
     let glyph_right = origin[0] + size[0];
+    let Some(bounds) =
+        overlap_split_bounds(glyph_left, glyph_right, cell_width_px, raw_cells.len())
+    else {
+        return;
+    };
 
-    let mut span_left = glyph_left;
-    let mut span_fg = first_fg;
+    let mut span_left = bounds.left_px;
+    let mut span_fg = resolve_cell_fg_u32(
+        raw_cells[bounds.first_col],
+        styles,
+        bounds.first_col,
+        palette,
+        default_fg,
+        default_bg,
+    );
+    let mut column = bounds.first_col + 1;
+    let mut clip_left = ((bounds.first_col + 1) as f32) * cell_width_px;
 
-    for i in 1..glyph_cells {
-        let neighbor = col + i;
-        if neighbor >= raw_cells.len() {
-            break;
-        }
-
-        let cell_boundary = glyph_left + (i as f32) * cell_width_px;
-        if cell_boundary >= glyph_right {
-            break;
-        }
-
+    while clip_left < bounds.right_px && column < raw_cells.len() {
         let neighbor_fg = resolve_cell_fg_u32(
-            raw_cells[neighbor],
+            raw_cells[column],
             styles,
-            neighbor,
+            column,
             palette,
             default_fg,
             default_bg,
         );
 
         if neighbor_fg != span_fg {
-            // Emit the segment up to this boundary.
-            let seg_width = cell_boundary - span_left;
+            // WT splits at logical cell edges, not at glyph-local bitmap offsets.
+            let seg_width = clip_left - span_left;
             let tex_offset = (span_left - glyph_left).round() as u16;
             let mut inst =
                 QuadInstance::glyph_rect([span_left, origin[1]], [seg_width, size[1]], span_fg);
             inst.set_texcoord(tex_x.saturating_add(tex_offset), tex_y);
             contents.add(y, inst);
 
-            span_left = cell_boundary;
+            span_left = clip_left;
             span_fg = neighbor_fg;
         }
+
+        column += 1;
+        clip_left += cell_width_px;
     }
 
     // Emit the final (or only) segment.
-    let seg_width = glyph_right - span_left;
+    let seg_width = bounds.right_px - span_left;
     let tex_offset = (span_left - glyph_left).round() as u16;
     let mut inst = QuadInstance::glyph_rect([span_left, origin[1]], [seg_width, size[1]], span_fg);
     inst.set_texcoord(tex_x.saturating_add(tex_offset), tex_y);
     contents.add(y, inst);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OverlapSplitBounds {
+    first_col: usize,
+    left_px: f32,
+    right_px: f32,
+}
+
+#[inline]
+fn overlap_split_bounds(
+    glyph_left: f32,
+    glyph_right: f32,
+    cell_width_px: f32,
+    col_count: usize,
+) -> Option<OverlapSplitBounds> {
+    if cell_width_px <= 0.0 {
+        return None;
+    }
+
+    let left_px = glyph_left.max(0.0);
+    let right_px = glyph_right.min(col_count as f32 * cell_width_px);
+    if left_px >= right_px {
+        return None;
+    }
+
+    Some(OverlapSplitBounds {
+        first_col: (left_px / cell_width_px).floor() as usize,
+        left_px,
+        right_px,
+    })
 }
 
 /// Resolve the effective foreground color for a single cell column as GPU-ready u32.
@@ -930,4 +959,17 @@ fn push_dirty_rect_coalesced(rects: &mut Vec<DirtyRect>, rect: DirtyRect) {
         return;
     }
     rects.push(rect);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overlap_split_bounds;
+
+    #[test]
+    fn overlap_split_bounds_anchor_to_cell_edges() {
+        let bounds = overlap_split_bounds(4.0, 22.0, 10.0, 4).expect("visible overlap split");
+        assert_eq!(bounds.first_col, 0);
+        assert_eq!(bounds.left_px, 4.0);
+        assert_eq!(bounds.right_px, 22.0);
+    }
 }

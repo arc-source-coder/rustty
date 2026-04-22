@@ -76,6 +76,7 @@ pub struct SharedGrid {
 struct DWriteSharedGrid {
     rasterizer: DWriteGlyphRasterizer,
     raster_em_size: f32,
+    raster_cell_width: f32,
 }
 
 struct SharedGridInner {
@@ -167,9 +168,15 @@ impl SharedGrid {
         }
 
         let factory2 = factory.cast::<IDWriteFactory2>()?;
+        let raster_scale = if metric_config.font_size > 0.0 {
+            raster_em_size / metric_config.font_size
+        } else {
+            1.0
+        };
         self.dwrite = Some(DWriteSharedGrid {
             rasterizer: DWriteGlyphRasterizer::new(factory2),
             raster_em_size,
+            raster_cell_width: (metrics.cell_width * raster_scale).round().max(1.0),
         });
         Ok(())
     }
@@ -345,6 +352,12 @@ impl SharedGrid {
                         atlas_x: glyph_region.x,
                         atlas_y: glyph_region.y,
                         atlas_kind: Some(atlas_kind),
+                        overlap_split: Self::glyph_needs_overlap_split(
+                            raster.offset_x,
+                            raster.width,
+                            Self::glyph_cell_width(key),
+                            dwrite.raster_cell_width,
+                        ),
                     };
                     return Ok(inner.glyphs.insert_or_get_existing(key, cached));
                 }
@@ -398,6 +411,32 @@ impl SharedGrid {
     fn reset_all_atlases(&self, inner: &mut SharedGridInner) {
         inner.atlas_grayscale.clear();
         inner.atlas_color.clear();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn glyph_needs_overlap_split(
+        offset_x: i32,
+        width: u32,
+        cell_width_count: u8,
+        raster_cell_width: f32,
+    ) -> bool {
+        if raster_cell_width <= 0.0 || (width as f32) < raster_cell_width {
+            return false;
+        }
+
+        let half_cell_width = raster_cell_width * 0.5;
+        let logical_advance_width = raster_cell_width * f32::from(cell_width_count.max(1));
+        let overhang_left = offset_x as f32;
+        let overhang_right = overhang_left + width as f32;
+
+        overhang_left <= -half_cell_width
+            || overhang_right >= logical_advance_width + half_cell_width
+    }
+
+    #[cfg(target_os = "windows")]
+    fn glyph_cell_width(key: GlyphKey) -> u8 {
+        let packed = key.packed_options();
+        ((packed & 0b11) as u8).max(1)
     }
 
     #[cfg(test)]
@@ -473,6 +512,17 @@ mod tests {
         )
         .expect("configure dwrite");
         grid
+    }
+
+    #[test]
+    fn overlap_split_trigger_ignores_regular_aa_overhang() {
+        assert!(!SharedGrid::glyph_needs_overlap_split(-2, 10, 1, 10.0));
+    }
+
+    #[test]
+    fn overlap_split_trigger_matches_wt_ligature_threshold() {
+        assert!(SharedGrid::glyph_needs_overlap_split(0, 18, 1, 10.0));
+        assert!(!SharedGrid::glyph_needs_overlap_split(0, 20, 2, 10.0));
     }
 
     #[test]
