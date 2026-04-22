@@ -5,7 +5,7 @@ use std::process::ExitStatus;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use self::windows::{Pty, PtyReader, PtyWriter, ResizePseudoConsoleFn};
+pub use self::windows::{Pty, PtyReader, PtyWriter};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ChildEvent {

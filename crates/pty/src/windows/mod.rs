@@ -12,17 +12,23 @@ pub(crate) mod child;
 mod conpty;
 
 use child::ChildProcess;
-use conpty::Conpty;
-
-pub use conpty::ResizePseudoConsoleFn;
+use conpty::PtySession;
 
 /// Read-half of a split PTY. Owns conout + child process.
-/// Holds raw HPCON + resize function pointer for resize operations.
 pub struct PtyReader {
     pub conout: OwnedHandle,
     pub child: ChildProcess,
     pub hpcon: HPCON,
-    pub resize_fn: ResizePseudoConsoleFn,
+}
+
+impl PtyReader {
+    pub fn resize(&self, size: WindowSize) {
+        let coord = windows_sys::Win32::System::Console::COORD {
+            X: size.num_cols as i16,
+            Y: size.num_lines as i16,
+        };
+        let _ = conpty::resize(self.hpcon, coord);
+    }
 }
 
 unsafe impl Send for PtyReader {}
@@ -30,7 +36,7 @@ unsafe impl Send for PtyReader {}
 /// Write-half of a split PTY. Owns conin + backend (HPCON for close + drop).
 pub struct PtyWriter {
     // Backend MUST be first field: HPCON must close before conin pipe.
-    pub backend: Conpty,
+    pub backend: PtySession,
     pub conin: OwnedHandle,
 }
 
@@ -40,7 +46,6 @@ impl Pty {
     /// Consume the PTY into read and write halves for separate thread ownership.
     pub fn split(self) -> (PtyReader, PtyWriter) {
         let hpcon = self.backend.raw_hpcon();
-        let resize_fn = self.backend.resize_fn();
 
         let Pty {
             backend,
@@ -53,7 +58,6 @@ impl Pty {
             conout,
             child,
             hpcon,
-            resize_fn,
         };
         let writer = PtyWriter { backend, conin };
         (reader, writer)
@@ -94,7 +98,7 @@ unsafe impl Send for OwnedHandle {}
 pub struct Pty {
     // Backend MUST be the first field for correct drop order.
     // Dropping conout before backend will deadlock ClosePseudoConsole.
-    backend: Conpty,
+    backend: PtySession,
     conout: OwnedHandle,
     conin: OwnedHandle,
     child: ChildProcess,
@@ -102,7 +106,7 @@ pub struct Pty {
 
 impl Pty {
     pub(crate) fn new(
-        backend: Conpty,
+        backend: PtySession,
         conout: OwnedHandle,
         conin: OwnedHandle,
         child: ChildProcess,

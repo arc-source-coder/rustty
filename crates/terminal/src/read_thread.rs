@@ -11,6 +11,7 @@
 use std::io;
 use std::os::windows::process::ExitStatusExt;
 use std::process::ExitStatus;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -434,12 +435,8 @@ fn handle_resize(
 
     {
         let _guard = notify.hpcon_op.lock().unwrap();
-        if !notify.closing.load(std::sync::atomic::Ordering::Acquire) {
-            let coord = windows_sys::Win32::System::Console::COORD {
-                X: size.num_cols as i16,
-                Y: size.num_lines as i16,
-            };
-            let _ = unsafe { (reader.resize_fn)(reader.hpcon, coord) };
+        if !notify.closing.load(Ordering::Acquire) {
+            reader.resize(size);
         }
     }
 
