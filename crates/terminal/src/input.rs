@@ -1,177 +1,176 @@
-//! Input encoding: GPUI events → VT byte sequences.
+//! Input normalization: GPUI events → zconpty wire structs.
 //!
-//! The renderer normalizes GPUI events and calls methods here.
-//! This module snapshots terminal input mode flags and encodes events
-//! lock-free using ghostty's encode_key/encode_mouse functions.
+//! The UI layer lowers GPUI events into zconpty-owned structs here.
 //!
 //! Key mapping strategy:
-//! GPUI Keystroke.key (string) → W3C key code (string) → Ghostty Key (i32)
-//! The GPUI→W3C mapping is a static string table (stable across Ghostty versions).
-//! The W3C→Ghostty mapping uses Ghostty's own `Key.fromW3C()` via FFI.
+//! Rust forwards normalized text/modifiers/native metadata.
+//! zconpty owns the Windows-native key resolution details.
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
+use gpui::WindowsNativeKey;
+use zconpty::{KeyAction, KeyEvent, Mods, W3cCode, key_from_w3c};
 
-use ghostty::{InputOpts, encode_key, encode_mouse, encode_paste as ghostty_encode_paste};
+const RIGHT_ALT_PRESSED: u32 = 0x0001;
+const LEFT_CTRL_PRESSED: u32 = 0x0008;
+const RIGHT_CTRL_PRESSED: u32 = 0x0004;
+const CAPSLOCK_ON: u32 = 0x0080;
+const NUMLOCK_ON: u32 = 0x0020;
 
-/// Maximum size for key/mouse encode output buffers.
-/// Ghostty's key encoder can produce up to ~32 bytes for complex
-/// kitty protocol sequences. 128 bytes is generous.
-pub const ENCODE_BUF_SIZE: usize = 128;
+/// Map a GPUI Keystroke.key string to a W3C-based physical key enum.
+/// Returns `None` for keys we don't handle (modifier-only keys,
+/// media keys, etc.).
+pub(crate) fn map_key(key: &str) -> Option<W3cCode> {
+    if key.len() == 1 {
+        return map_single_char_key(key.as_bytes()[0]);
+    }
 
-/// Ghostty Mods packed bitfield (u16).
-/// Must match ghostty/src/input/key_mods.zig Mods packed struct.
-///
-/// Layout: shift(1) | ctrl(1) | alt(1) | super(1) | caps_lock(1) |
-///         num_lock(1) | sides(4) | padding(6)
-fn pack_mods(shift: bool, ctrl: bool, alt: bool, super_: bool) -> u16 {
-    let mut mods: u16 = 0;
-    if shift {
-        mods |= 1 << 0;
-    }
-    if ctrl {
-        mods |= 1 << 1;
-    }
-    if alt {
-        mods |= 1 << 2;
-    }
-    if super_ {
-        mods |= 1 << 3;
-    }
-    mods
+    let lower;
+    let key = if key.as_bytes().iter().any(|b| b.is_ascii_uppercase()) {
+        lower = key.to_ascii_lowercase();
+        lower.as_str()
+    } else {
+        key
+    };
+
+    let w3c = match key {
+        "return" => "enter",
+        "pageup" | "page_up" => "page_up",
+        "pagedown" | "page_down" => "page_down",
+        "left" => "arrow_left",
+        "right" => "arrow_right",
+        "up" => "arrow_up",
+        "down" => "arrow_down",
+        "enter" | "tab" | "escape" | "backspace" | "space" | "delete" | "insert" | "home"
+        | "end" | "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11"
+        | "f12" | "f13" | "f14" | "f15" | "f16" | "f17" | "f18" | "f19" | "f20" | "f21" | "f22"
+        | "f23" | "f24" => key,
+        _ => return None,
+    };
+
+    key_from_w3c(w3c.as_bytes())
 }
 
-// --- GPUI key string → W3C key code mapping ---
+pub(crate) fn pack_key_mods(
+    modifiers: &gpui::Modifiers,
+    native_key: Option<WindowsNativeKey>,
+) -> Mods {
+    let mut packed = (modifiers.shift as u16)
+        | ((modifiers.control as u16) << 1)
+        | ((modifiers.alt as u16) << 2)
+        | ((modifiers.platform as u16) << 3);
 
-/// Static mapping from GPUI `Keystroke.key` strings to W3C key code
-/// strings. GPUI key strings are lowercase on Windows/Linux.
-///
-/// W3C key codes: https://www.w3.org/TR/uievents-code
-/// Ghostty's `Key.fromW3C()` handles the W3C→enum conversion.
-///
-/// Single ASCII characters are handled separately (see `map_key`).
-/// This table covers named keys only.
-const GPUI_TO_W3C: &[(&str, &str)] = &[
-    // Functional keys
-    ("enter", "Enter"),
-    ("return", "Enter"),
-    ("tab", "Tab"),
-    ("escape", "Escape"),
-    ("backspace", "Backspace"),
-    ("space", "Space"),
-    // Control pad
-    ("delete", "Delete"),
-    ("insert", "Insert"),
-    ("home", "Home"),
-    ("end", "End"),
-    ("pageup", "PageUp"),
-    ("page_up", "PageUp"),
-    ("pagedown", "PageDown"),
-    ("page_down", "PageDown"),
-    // Arrow keys
-    ("left", "ArrowLeft"),
-    ("right", "ArrowRight"),
-    ("up", "ArrowUp"),
-    ("down", "ArrowDown"),
-    // Function keys
-    ("f1", "F1"),
-    ("f2", "F2"),
-    ("f3", "F3"),
-    ("f4", "F4"),
-    ("f5", "F5"),
-    ("f6", "F6"),
-    ("f7", "F7"),
-    ("f8", "F8"),
-    ("f9", "F9"),
-    ("f10", "F10"),
-    ("f11", "F11"),
-    ("f12", "F12"),
-    ("f13", "F13"),
-    ("f14", "F14"),
-    ("f15", "F15"),
-    ("f16", "F16"),
-    ("f17", "F17"),
-    ("f18", "F18"),
-    ("f19", "F19"),
-    ("f20", "F20"),
-    ("f21", "F21"),
-    ("f22", "F22"),
-    ("f23", "F23"),
-    ("f24", "F24"),
-];
-
-/// Lazily-built HashMap from GPUI key strings to resolved Ghostty Key
-/// integers. Built once on first use. Includes both named keys from
-/// `GPUI_TO_W3C` and single-char ASCII keys.
-fn key_map() -> &'static HashMap<String, i32> {
-    static MAP: OnceLock<HashMap<String, i32>> = OnceLock::new();
-    MAP.get_or_init(|| {
-        let mut map = HashMap::new();
-
-        // Named keys via W3C codes
-        for &(gpui_key, w3c_code) in GPUI_TO_W3C {
-            if let Some(val) = ghostty::key_from_w3c(w3c_code) {
-                map.insert(gpui_key.to_string(), val);
-            }
+    if let Some(native) = native_key {
+        if (native.control_key_state & CAPSLOCK_ON) != 0 {
+            packed |= 1 << 4;
         }
-
-        // Single ASCII letters → W3C "KeyA".."KeyZ"
-        for ch in b'a'..=b'z' {
-            let gpui_key = String::from(ch as char);
-            let w3c = format!("Key{}", (ch as char).to_ascii_uppercase());
-            if let Some(val) = ghostty::key_from_w3c(&w3c) {
-                map.insert(gpui_key, val);
-            }
+        if (native.control_key_state & NUMLOCK_ON) != 0 {
+            packed |= 1 << 5;
         }
+    }
 
-        // Single ASCII digits → W3C "Digit0".."Digit9"
-        for ch in b'0'..=b'9' {
-            let gpui_key = String::from(ch as char);
-            let w3c = format!("Digit{}", ch as char);
-            if let Some(val) = ghostty::key_from_w3c(&w3c) {
-                map.insert(gpui_key, val);
-            }
-        }
+    Mods(packed)
+}
 
-        // Symbol keys → W3C codes
-        let symbols: &[(&str, &str)] = &[
-            ("`", "Backquote"),
-            ("\\", "Backslash"),
-            ("[", "BracketLeft"),
-            ("]", "BracketRight"),
-            (",", "Comma"),
-            ("=", "Equal"),
-            ("-", "Minus"),
-            (".", "Period"),
-            ("'", "Quote"),
-            (";", "Semicolon"),
-            ("/", "Slash"),
-            (" ", "Space"),
-        ];
-        for &(gpui_key, w3c_code) in symbols {
-            if let Some(val) = ghostty::key_from_w3c(w3c_code) {
-                map.insert(gpui_key.to_string(), val);
-            }
-        }
+pub(crate) fn pack_mouse_mods(modifiers: &gpui::Modifiers) -> Mods {
+    Mods(
+        (modifiers.shift as u16)
+            | ((modifiers.control as u16) << 1)
+            | ((modifiers.alt as u16) << 2)
+            | ((modifiers.platform as u16) << 3),
+    )
+}
 
-        map
+pub(crate) fn normalize_key_event(
+    keystroke: &gpui::Keystroke,
+    native_key: Option<WindowsNativeKey>,
+    action: KeyAction,
+    is_held: bool,
+) -> Option<KeyEvent> {
+    let code = if let Some(code) = map_key(keystroke.key.as_str()) {
+        code
+    } else if native_key.is_some() {
+        W3cCode::from_raw(0)
+    } else {
+        return None;
+    };
+    let mut text = [0u8; 32];
+    let source = keystroke.key_char.as_deref().unwrap_or("");
+    let bytes = source.as_bytes();
+    let text_len = bytes.len().min(text.len());
+    text[..text_len].copy_from_slice(&bytes[..text_len]);
+
+    let mods = pack_key_mods(&keystroke.modifiers, native_key);
+    let consumed_mods = compute_consumed_mods(native_key, text_len);
+
+    Some(KeyEvent {
+        action: normalize_key_action(action, is_held),
+        mods,
+        consumed_mods,
+        repeat_count: 1,
+        code,
+        text_len: text_len as u8,
+        text,
+        unshifted_codepoint: compute_unshifted_codepoint(keystroke),
+        composing: 0,
+        has_win_vk: native_key.is_some() as u8,
+        win_vk: native_key.map_or(0, |native| native.virtual_key),
+        has_win_scan: native_key.is_some() as u8,
+        win_scan: native_key.map_or(0, |native| native.scan_code),
+        has_win_control_key_state: native_key.is_some() as u8,
+        win_control_key_state: native_key.map_or(0, |native| native.control_key_state),
     })
 }
 
-/// Map a GPUI Keystroke.key string to a Ghostty Key enum integer.
-/// Returns `None` for keys we don't handle (modifier-only keys,
-/// media keys, etc.).
-pub(crate) fn map_key(key: &str) -> Option<i32> {
-    if let Some(value) = key_map().get(key) {
-        return Some(*value);
+pub(crate) fn normalize_modifier_event(
+    modifiers: &gpui::Modifiers,
+    native_key: WindowsNativeKey,
+) -> KeyEvent {
+    KeyEvent {
+        action: if native_key.is_down {
+            KeyAction::Press
+        } else {
+            KeyAction::Release
+        },
+        mods: pack_key_mods(modifiers, Some(native_key)),
+        consumed_mods: Mods(0),
+        repeat_count: 1,
+        code: W3cCode::from_raw(0),
+        text_len: 0,
+        text: [0; 32],
+        unshifted_codepoint: 0,
+        composing: 0,
+        has_win_vk: 1,
+        win_vk: native_key.virtual_key,
+        has_win_scan: 1,
+        win_scan: native_key.scan_code,
+        has_win_control_key_state: 1,
+        win_control_key_state: native_key.control_key_state,
+    }
+}
+
+fn compute_consumed_mods(native_key: Option<WindowsNativeKey>, text_len: usize) -> Mods {
+    if text_len == 0 {
+        return Mods(0);
     }
 
-    if key.as_bytes().iter().any(|b| b.is_ascii_uppercase()) {
-        let lower = key.to_ascii_lowercase();
-        return key_map().get(lower.as_str()).copied();
+    // AltGr generates text while reporting Ctrl+Alt on Windows.
+    // Mark these as consumed so text input doesn't look like a Ctrl+Alt binding.
+    // TODO: Find out a better way to do this than a heuristic.
+    if let Some(native) = native_key {
+        let state = native.control_key_state;
+        let ctrl = LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED;
+        if (state & RIGHT_ALT_PRESSED) != 0 && (state & ctrl) != 0 {
+            return Mods((1 << 1) | (1 << 2));
+        }
     }
 
-    None
+    Mods(0)
+}
+
+fn normalize_key_action(action: KeyAction, is_held: bool) -> KeyAction {
+    match action {
+        KeyAction::Press if is_held => KeyAction::Repeat,
+        _ => action,
+    }
 }
 
 /// Compute the unshifted codepoint from a keystroke.
@@ -211,104 +210,37 @@ fn compute_unshifted_codepoint(keystroke: &gpui::Keystroke) -> u32 {
     0
 }
 
-/// Encode a GPUI key event into VT bytes using Ghostty's encoder.
-///
-/// `opts` is a mode snapshot captured under the terminal mutex by the caller.
-/// Encoding runs entirely lock-free against the snapshot.
-///
-/// Returns `Some(Vec<u8>)` with the encoded bytes, or `None` if the
-/// keystroke produces no terminal output.
-pub fn encode_key_event<'a>(
-    opts: InputOpts,
-    keystroke: &gpui::Keystroke,
-    is_held: bool,
-    buf: &'a mut [u8; ENCODE_BUF_SIZE],
-) -> Option<&'a [u8]> {
-    let key = keystroke.key.as_str();
-    let ghostty_key = map_key(key)?;
-
-    let mods = pack_mods(
-        keystroke.modifiers.shift,
-        keystroke.modifiers.control,
-        keystroke.modifiers.alt,
-        keystroke.modifiers.platform,
-    );
-
-    // action: 0=release, 1=press, 2=repeat
-    let action: u8 = if is_held { 2 } else { 1 };
-
-    // Text for kitty keyboard protocol: use key_char if available,
-    // otherwise use the key string for single printable chars.
-    let text = keystroke
-        .key_char
-        .as_deref()
-        .unwrap_or(if key.len() == 1 { key } else { "" });
-
-    // Unshifted codepoint: the key as if shift wasn't pressed.
-    // Critical for kitty keyboard protocol to encode shifted keys correctly.
-    let unshifted_codepoint = compute_unshifted_codepoint(keystroke);
-
-    let n = encode_key(
-        opts,
-        ghostty_key,
-        mods,
-        action,
-        text.as_bytes(),
-        unshifted_codepoint,
-        buf,
-    );
-
-    if n == 0 { None } else { Some(&buf[..n]) }
-}
-
-/// Encode paste bytes into a caller-provided buffer.
-///
-/// Returns the number of bytes written, or 0 if `out` is too small.
-pub fn encode_paste(opts: InputOpts, text: &str, out: &mut [u8]) -> usize {
-    ghostty_encode_paste(opts, text.as_bytes(), out)
-}
-
-/// Encode a focus change event.
-/// Returns `Some(bytes)` if focus event mode (DEC 1004) is active in `opts`,
-/// `None` otherwise.
-pub fn encode_focus_change(opts: InputOpts, focused: bool) -> Option<&'static [u8]> {
-    if !opts.focus_event_mode {
-        return None;
-    }
-    if focused {
-        Some(b"\x1b[I")
-    } else {
-        Some(b"\x1b[O")
+fn map_single_char_key(byte: u8) -> Option<W3cCode> {
+    match byte {
+        b'a'..=b'z' => map_letter_key(byte),
+        b'A'..=b'Z' => map_letter_key(byte.to_ascii_lowercase()),
+        b'0'..=b'9' => map_digit_key(byte),
+        b'`' => key_from_w3c(b"backquote"),
+        b'\\' => key_from_w3c(b"backslash"),
+        b'[' => key_from_w3c(b"bracket_left"),
+        b']' => key_from_w3c(b"bracket_right"),
+        b',' => key_from_w3c(b"comma"),
+        b'=' => key_from_w3c(b"equal"),
+        b'-' => key_from_w3c(b"minus"),
+        b'.' => key_from_w3c(b"period"),
+        b'\'' => key_from_w3c(b"quote"),
+        b';' => key_from_w3c(b"semicolon"),
+        b'/' => key_from_w3c(b"slash"),
+        b' ' => key_from_w3c(b"space"),
+        _ => None,
     }
 }
 
-/// Encode a mouse event using Ghostty's encoder.
-///
-/// `opts` is a mode snapshot captured under the terminal mutex by the caller.
-/// Encoding runs entirely lock-free against the snapshot.
-///
-/// `button`: 0=left, 1=middle, 2=right, 64=scroll_up, 65=scroll_down
-/// `action`: 0=press, 1=release, 2=motion
-/// `shift`, `alt`, `ctrl`: modifier state
-/// `x`, `y`: 0-indexed cell coordinates
-///
-/// Returns `Some(Vec<u8>)` with encoded bytes, or `None` if mouse
-/// reporting is disabled or the event produces no output.
-#[allow(clippy::too_many_arguments)]
-pub fn encode_mouse_event(
-    opts: InputOpts,
-    button: u8,
-    action: u8,
-    shift: bool,
-    alt: bool,
-    ctrl: bool,
-    x: u16,
-    y: u16,
-    buf: &mut [u8; ENCODE_BUF_SIZE],
-) -> Option<&[u8]> {
-    let mods: u8 = (shift as u8) | ((alt as u8) << 1) | ((ctrl as u8) << 2);
-    let n = encode_mouse(opts, button, action, mods, x, y, &mut buf[..]);
-    if n == 0 { None } else { Some(&buf[..n]) }
+fn map_letter_key(byte: u8) -> Option<W3cCode> {
+    let mut code = *b"key_a";
+    code[4] = byte;
+    key_from_w3c(&code)
+}
+
+fn map_digit_key(byte: u8) -> Option<W3cCode> {
+    let mut code = *b"digit_0";
+    code[6] = byte;
+    key_from_w3c(&code)
 }
 
 #[cfg(test)]
@@ -317,35 +249,33 @@ mod tests {
 
     #[test]
     fn map_key_letters() {
-        // Verify single-char mapping resolves via W3C
-        assert!(map_key("a").is_some());
-        assert!(map_key("z").is_some());
-        // Different letters should map to different keys
+        assert_eq!(map_key("a"), key_from_w3c(b"key_a"));
+        assert_eq!(map_key("z"), key_from_w3c(b"key_z"));
         assert_ne!(map_key("a"), map_key("b"));
     }
 
     #[test]
     fn map_key_digits() {
-        assert!(map_key("0").is_some());
-        assert!(map_key("9").is_some());
+        assert_eq!(map_key("0"), key_from_w3c(b"digit_0"));
+        assert_eq!(map_key("9"), key_from_w3c(b"digit_9"));
         assert_ne!(map_key("0"), map_key("1"));
     }
 
     #[test]
     fn map_key_named() {
-        assert!(map_key("enter").is_some());
+        assert_eq!(map_key("enter"), key_from_w3c(b"enter"));
         assert_eq!(map_key("enter"), map_key("return")); // aliases
-        assert!(map_key("escape").is_some());
-        assert!(map_key("backspace").is_some());
-        assert!(map_key("tab").is_some());
-        assert!(map_key("left").is_some());
-        assert!(map_key("f1").is_some());
-        assert!(map_key("f12").is_some());
-        assert!(map_key("pageup").is_some());
+        assert_eq!(map_key("escape"), key_from_w3c(b"escape"));
+        assert_eq!(map_key("backspace"), key_from_w3c(b"backspace"));
+        assert_eq!(map_key("tab"), key_from_w3c(b"tab"));
+        assert_eq!(map_key("left"), key_from_w3c(b"arrow_left"));
+        assert_eq!(map_key("f1"), key_from_w3c(b"f1"));
+        assert_eq!(map_key("f12"), key_from_w3c(b"f12"));
+        assert_eq!(map_key("pageup"), key_from_w3c(b"page_up"));
         assert_eq!(map_key("pageup"), map_key("page_up")); // aliases
-        assert!(map_key("delete").is_some());
-        assert!(map_key("home").is_some());
-        assert!(map_key("end").is_some());
+        assert_eq!(map_key("delete"), key_from_w3c(b"delete"));
+        assert_eq!(map_key("home"), key_from_w3c(b"home"));
+        assert_eq!(map_key("end"), key_from_w3c(b"end"));
     }
 
     #[test]
@@ -367,12 +297,45 @@ mod tests {
     }
 
     #[test]
-    fn pack_mods_bitfield() {
-        assert_eq!(pack_mods(false, false, false, false), 0);
-        assert_eq!(pack_mods(true, false, false, false), 0b0001);
-        assert_eq!(pack_mods(false, true, false, false), 0b0010);
-        assert_eq!(pack_mods(false, false, true, false), 0b0100);
-        assert_eq!(pack_mods(false, false, false, true), 0b1000);
-        assert_eq!(pack_mods(true, true, true, true), 0b1111);
+    fn pack_key_mods_bitfield() {
+        let mut modifiers = gpui::Modifiers::default();
+        assert_eq!(pack_key_mods(&modifiers, None), Mods(0));
+
+        modifiers.shift = true;
+        assert_eq!(pack_key_mods(&modifiers, None), Mods(0b0001));
+
+        modifiers = gpui::Modifiers::default();
+        modifiers.control = true;
+        assert_eq!(pack_key_mods(&modifiers, None), Mods(0b0010));
+
+        modifiers = gpui::Modifiers::default();
+        modifiers.alt = true;
+        assert_eq!(pack_key_mods(&modifiers, None), Mods(0b0100));
+
+        modifiers = gpui::Modifiers::default();
+        modifiers.platform = true;
+        assert_eq!(pack_key_mods(&modifiers, None), Mods(0b1000));
+
+        modifiers = gpui::Modifiers {
+            shift: true,
+            control: true,
+            alt: true,
+            platform: true,
+            ..gpui::Modifiers::default()
+        };
+        assert_eq!(pack_key_mods(&modifiers, None), Mods(0b1111));
+    }
+
+    #[test]
+    fn pack_key_mods_includes_lock_bits_from_native_state() {
+        let native = WindowsNativeKey {
+            control_key_state: CAPSLOCK_ON | NUMLOCK_ON,
+            ..WindowsNativeKey::default()
+        };
+
+        assert_eq!(
+            pack_key_mods(&gpui::Modifiers::default(), Some(native)),
+            Mods(0b11_0000)
+        );
     }
 }

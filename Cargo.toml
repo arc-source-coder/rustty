@@ -4,10 +4,10 @@ members = [
     "crates/app",
     "crates/font",
     "crates/ghostty",
-    "crates/pty",
     "crates/renderer",
     "crates/terminal",
     "crates/ui",
+    "crates/zconpty",
 ]
 
 [workspace.package]

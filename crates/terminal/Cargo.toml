@@ -12,7 +12,7 @@ log.workspace = true
 async-channel.workspace = true
 gpui.workspace = true
 ghostty = { path = "../ghostty" }
-pty = { path = "../pty" }
+zconpty = { path = "../zconpty" }
 crossbeam-channel.workspace = true
 crossbeam-queue.workspace = true
 windows-sys = {

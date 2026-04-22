@@ -1,0 +1,24 @@
+.{
+    .paths = .{
+        // Build
+        "build.zig",
+        "build.zig.zon",
+        // Library
+        "ghostty_shim.zig",
+        "zconpty_shim.zig",
+        "src",
+        // Tests
+        "tests.zig",
+        "tests/",
+    },
+    .rules = .{
+        // Function name should be camelCase
+        // FFI functions and tests are snake_case
+        .Z001 = .{ .enabled = false },
+        // Set maximum line length to 150.
+        .Z024 = .{ .max_length = 150 },
+        // Acronym should use standard casing
+        // Windows API declarations are ALL_CAPS
+        .Z032 = .{ .enabled = false },
+    },
+}

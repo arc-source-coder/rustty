@@ -1,6 +1,95 @@
 const std = @import("std");
 const TerminalBuildOptions = @import("ghostty/src/terminal/build_options.zig").Options;
 
+const LibraryNames = struct {
+    raw: []const u8,
+    merged: []const u8,
+};
+
+const Context = struct {
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    terminal_options: TerminalBuildOptions,
+    uucode_tables: std.Build.LazyPath,
+    props_output: std.Build.LazyPath,
+    symbols_output: std.Build.LazyPath,
+};
+
+fn libraryNames(target: std.Build.ResolvedTarget) LibraryNames {
+    if (target.result.os.tag == .windows) {
+        return .{ .raw = "ghostty_shim_raw.lib", .merged = "ghostty_shim.lib" };
+    }
+    return .{ .raw = "libghostty_shim_raw.a", .merged = "libghostty_shim.a" };
+}
+
+fn configureGhosttyModule(b: *std.Build, module: *std.Build.Module, ctx: Context) !void {
+    const build_opts = b.addOptions();
+    build_opts.addOption(bool, "simd", ctx.terminal_options.simd);
+    module.addOptions("build_options", build_opts);
+
+    ctx.terminal_options.add(b, module);
+
+    const uucode_dep = b.dependency("uucode", .{
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+        .tables_path = ctx.uucode_tables,
+        .build_config_path = b.path("ghostty/src/build/uucode_config.zig"),
+    });
+    module.addImport("uucode", uucode_dep.module("uucode"));
+
+    module.addAnonymousImport("unicode_tables", .{ .root_source_file = ctx.props_output });
+    module.addAnonymousImport("symbols_tables", .{ .root_source_file = ctx.symbols_output });
+
+    if (!ctx.terminal_options.simd) return;
+
+    // Configure SIMD dependencies
+    const simdutf_dep = b.dependency("simdutf", .{ .target = ctx.target, .optimize = ctx.optimize });
+    const highway_dep = b.dependency("highway", .{ .target = ctx.target, .optimize = ctx.optimize });
+    const utfcpp_dep = b.dependency("utfcpp", .{ .target = ctx.target, .optimize = ctx.optimize });
+
+    const simdutf = simdutf_dep.artifact("simdutf");
+    const highway = highway_dep.artifact("highway");
+    const utfcpp = utfcpp_dep.artifact("utfcpp");
+
+    module.linkLibrary(simdutf);
+    module.linkLibrary(highway);
+    module.linkLibrary(utfcpp);
+
+    module.addIncludePath(b.path("ghostty/src"));
+
+    // ziglint-ignore: Z006
+    const HWY_AVX10_2: c_int = 1 << 3;
+    // ziglint-ignore: Z006
+    const HWY_AVX3_SPR: c_int = 1 << 4;
+    // ziglint-ignore: Z006
+    const HWY_AVX3_ZEN4: c_int = 1 << 6;
+    // ziglint-ignore: Z006
+    const HWY_AVX3_DL: c_int = 1 << 7;
+    // ziglint-ignore: Z006
+    const HWY_AVX3: c_int = 1 << 8;
+    // ziglint-ignore: Z006
+    const HWY_DISABLED_TARGETS: c_int =
+        HWY_AVX10_2 | HWY_AVX3_SPR | HWY_AVX3_ZEN4 | HWY_AVX3_DL | HWY_AVX3;
+
+    var simd_flags: std.ArrayList([]const u8) = .empty;
+    defer simd_flags.deinit(b.allocator);
+    try simd_flags.append(b.allocator, "-std=c++17");
+    if (ctx.target.result.cpu.arch == .x86_64) {
+        const flags = b.fmt("-DHWY_DISABLED_TARGETS={}", .{HWY_DISABLED_TARGETS});
+        try simd_flags.append(b.allocator, flags);
+    }
+
+    module.addCSourceFiles(.{
+        .files = &.{
+            "ghostty/src/simd/base64.cpp",
+            "ghostty/src/simd/codepoint_width.cpp",
+            "ghostty/src/simd/index_of.cpp",
+            "ghostty/src/simd/vt.cpp",
+        },
+        .flags = simd_flags.items,
+    });
+}
+
 pub fn build(b: *std.Build) !void {
     const target = blk: {
         var result = b.standardTargetOptions(.{});
@@ -29,17 +118,18 @@ pub fn build(b: *std.Build) !void {
     const uucode_tables = blk: {
         const uucode = b.dependency("uucode", .{
             .build_config_path = b.path("ghostty/src/build/uucode_config.zig"),
+            .optimize = optimize,
         });
         break :blk uucode.namedLazyPath("tables.zig");
     };
 
     // --- Unicode table generators (host executables) ---
-
     const props_exe = b.addExecutable(.{
         .name = "props-unigen",
         .root_module = b.createModule(.{
             .root_source_file = b.path("ghostty/src/unicode/props_uucode.zig"),
             .target = b.graph.host,
+            .optimize = optimize,
         }),
         .use_llvm = true,
     });
@@ -49,19 +139,20 @@ pub fn build(b: *std.Build) !void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("ghostty/src/unicode/symbols_uucode.zig"),
             .target = b.graph.host,
+            .optimize = optimize,
         }),
         .use_llvm = true,
     });
 
     // Add uucode import to generators (host target)
-    if (b.lazyDependency("uucode", .{
+    const host_uucode_dep = b.dependency("uucode", .{
         .target = b.graph.host,
+        .optimize = optimize,
         .tables_path = uucode_tables,
         .build_config_path = b.path("ghostty/src/build/uucode_config.zig"),
-    })) |dep| {
-        inline for (&.{ props_exe, symbols_exe }) |exe| {
-            exe.root_module.addImport("uucode", dep.module("uucode"));
-        }
+    });
+    inline for (&.{ props_exe, symbols_exe }) |exe| {
+        exe.root_module.addImport("uucode", host_uucode_dep.module("uucode"));
     }
 
     // Capture generated table sources from stdout
@@ -71,13 +162,21 @@ pub fn build(b: *std.Build) !void {
     const props_output = wf.addCopyFile(props_run.captureStdOut(), "props.zig");
     const symbols_output = wf.addCopyFile(symbols_run.captureStdOut(), "symbols.zig");
 
-    // --- Main library ---
+    const ctx: Context = .{
+        .target = target,
+        .optimize = optimize,
+        .terminal_options = terminal_options,
+        .uucode_tables = uucode_tables,
+        .props_output = props_output,
+        .symbols_output = symbols_output,
+    };
 
+    // --- Main library ---
     const lib = b.addLibrary(.{
         .name = "ghostty_shim",
         .linkage = .static,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("lib.zig"),
+            .root_source_file = b.path("ghostty_shim.zig"),
             .target = target,
             .optimize = optimize,
             // SIMD requires libc and libcpp
@@ -86,116 +185,87 @@ pub fn build(b: *std.Build) !void {
             .link_libc = terminal_options.simd,
         }),
     });
-
-    // Add build_options (simd code expects this module name)
-    const build_opts = b.addOptions();
-    build_opts.addOption(bool, "simd", terminal_options.simd);
-    lib.root_module.addOptions("build_options", build_opts);
-
-    terminal_options.add(b, lib.root_module);
     lib.bundle_compiler_rt = true;
-
-    // Step 2: target build with tables_path to get the uucode module
-    if (b.lazyDependency("uucode", .{
-        .target = target,
-        .optimize = optimize,
-        .tables_path = uucode_tables,
-        .build_config_path = b.path("ghostty/src/build/uucode_config.zig"),
-    })) |dep| {
-        lib.root_module.addImport("uucode", dep.module("uucode"));
-    }
+    try configureGhosttyModule(b, lib.root_module, ctx);
 
     // Wire up generated unicode tables
     props_output.addStepDependencies(&lib.step);
     symbols_output.addStepDependencies(&lib.step);
-    lib.root_module.addAnonymousImport("unicode_tables", .{
-        .root_source_file = props_output,
-    });
-    lib.root_module.addAnonymousImport("symbols_tables", .{
-        .root_source_file = symbols_output,
-    });
-
-    // --- SIMD dependencies ---
-    if (terminal_options.simd) {
-        // Add include path for simd headers
-        lib.root_module.addIncludePath(b.path("ghostty/src"));
-
-        // Disable AVX512 to work around Zig 0.13 bug:
-        // https://github.com/ziglang/zig/issues/20414
-        const HWY_AVX10_2: c_int = 1 << 3;
-        const HWY_AVX3_SPR: c_int = 1 << 4;
-        const HWY_AVX3_ZEN4: c_int = 1 << 6;
-        const HWY_AVX3_DL: c_int = 1 << 7;
-        const HWY_AVX3: c_int = 1 << 8;
-        const HWY_DISABLED_TARGETS: c_int = HWY_AVX10_2 | HWY_AVX3_SPR | HWY_AVX3_ZEN4 | HWY_AVX3_DL | HWY_AVX3;
-
-        // MSVC requires explicit std specification otherwise SIMD C++17
-        // features are guarded. Doing it unconditionally is harmless.
-        var simd_flags: std.ArrayList([]const u8) = .empty;
-        defer simd_flags.deinit(b.allocator);
-        try simd_flags.append(b.allocator, "-std=c++17");
-        if (target.result.cpu.arch == .x86_64) {
-            try simd_flags.append(
-                b.allocator,
-                b.fmt("-DHWY_DISABLED_TARGETS={}", .{HWY_DISABLED_TARGETS}),
-            );
-        }
-
-        lib.root_module.addCSourceFiles(.{
-            .files = &.{
-                "ghostty/src/simd/base64.cpp",
-                "ghostty/src/simd/codepoint_width.cpp",
-                "ghostty/src/simd/index_of.cpp",
-                "ghostty/src/simd/vt.cpp",
-            },
-            .flags = simd_flags.items,
-        });
-
-        if (b.lazyDependency("simdutf", .{
-            .target = target,
-            .optimize = optimize,
-        })) |dep| {
-            const artifact = dep.artifact("simdutf");
-            lib.root_module.linkLibrary(artifact);
-            b.installArtifact(artifact);
-        }
-
-        if (b.lazyDependency("highway", .{
-            .target = target,
-            .optimize = optimize,
-        })) |dep| {
-            const artifact = dep.artifact("highway");
-            lib.root_module.linkLibrary(artifact);
-            b.installArtifact(artifact);
-        }
-
-        if (b.lazyDependency("utfcpp", .{
-            .target = target,
-            .optimize = optimize,
-        })) |dep| {
-            const artifact = dep.artifact("utfcpp");
-            lib.root_module.linkLibrary(artifact);
-            b.installArtifact(artifact);
-        }
-    }
-
-    b.installArtifact(lib);
 
     // --- Tests ---
+    var test_terminal_ctx = ctx;
+    test_terminal_ctx.terminal_options.slow_runtime_safety = true;
 
-    const test_step = b.step("test", "Run unit tests");
-    const lib_tests = b.addTest(.{
+    const test_step = b.step("test", "Run Zig shim tests");
+    const shim_tests = b.addExecutable(.{
+        .name = "ghostty_shim_tests",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("lib.zig"),
+            .root_source_file = b.path("tests.zig"),
             .target = target,
             .optimize = optimize,
-            // SIMD requires libc and libcpp
-            // Skip libcpp since we use MSVC (same as main library)
-            .link_libc = terminal_options.simd,
+            .link_libc = test_terminal_ctx.terminal_options.simd,
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(lib_tests).step);
+    try configureGhosttyModule(b, shim_tests.root_module, test_terminal_ctx);
+    test_step.dependOn(&b.addRunArtifact(shim_tests).step);
 
-    const fmt_check = b.addFmt(.{ .paths = &.{ "lib.zig", "handle.zig", "modes.zig", "render.zig", "scroll.zig", "build.zig", "build.zig.zon" } });
+    const fmt_check = b.addFmt(.{
+        // ziglint-ignore: Z024
+        .paths = &.{ "src", "zconpty_shim.zig", "build.zig", "build.zig.zon" },
+    });
     test_step.dependOn(&fmt_check.step);
+
+    const zconpty_dep = b.dependency("zconpty", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const zconpty_shim = b.addLibrary(.{
+        .name = "zconpty_shim",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zconpty_shim.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    zconpty_shim.root_module.addImport("zconpty", zconpty_dep.module("zconpty"));
+    try configureGhosttyModule(b, zconpty_shim.root_module, ctx);
+
+    b.installArtifact(zconpty_shim);
+
+    // ---- SIMD dependencies ----
+    if (!terminal_options.simd) {
+        b.installArtifact(lib);
+        return;
+    }
+
+    // Merge all SIMD dependencies into the final library
+    const simdutf_dep = b.dependency("simdutf", .{ .target = target, .optimize = optimize });
+    const highway_dep = b.dependency("highway", .{ .target = target, .optimize = optimize });
+    const utfcpp_dep = b.dependency("utfcpp", .{ .target = target, .optimize = optimize });
+
+    const simdutf = simdutf_dep.artifact("simdutf");
+    const highway = highway_dep.artifact("highway");
+    const utfcpp = utfcpp_dep.artifact("utfcpp");
+
+    const library_names = libraryNames(target);
+    b.getInstallStep().dependOn(&b.addInstallArtifact(lib, .{
+        .dest_sub_path = library_names.raw,
+    }).step);
+
+    // Use `zig ar` to merge the compiled SIMD library files.
+    const archiver_path = b.findProgram(&.{"zig"}, &.{}) catch unreachable;
+    const run = b.addSystemCommand(&.{archiver_path});
+
+    run.addArg("ar");
+    run.addArgs(&.{"qcsL"});
+
+    const merged_library = run.addOutputFileArg(library_names.merged);
+    run.addFileArg(lib.getEmittedBin());
+    run.addFileArg(simdutf.getEmittedBin());
+    run.addFileArg(highway.getEmittedBin());
+    run.addFileArg(utfcpp.getEmittedBin());
+
+    b.getInstallStep().dependOn(&b.addInstallLibFile(merged_library, library_names.merged).step);
 }

@@ -1,63 +1,45 @@
-/// IO thread — cold path for input/timers/writer state.
+/// IO thread — input ingress, mailbox, and timers.
 ///
-/// Responsibilities:
-/// - drain `IoMsg` mailbox,
-/// - coalesce resizes and signal read thread,
-/// - enforce synchronized-output safety timeout,
-/// - write input to `conin` via `NtWriteFile` APC completions.
-use std::collections::VecDeque;
+/// Deferred TODOs for later slices:
+/// - Reintroduce server-output ingestion path if needed.
+/// - Reintroduce close coordination with a dedicated read thread (if any).
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use async_channel::Sender;
-use bytes::{Bytes, BytesMut};
 use ghostty::Terminal;
-use pty::{PtyWriter, WindowSize};
+use zconpty::ConPTY;
 
-use crate::platform::windows::io::{AsyncIo, alertable_wait, async_write};
+use crate::platform::windows::io::alertable_wait;
 use crate::platform::windows::ntdll::{
-    STATUS_ALERTED, STATUS_CANCELLED, STATUS_END_OF_FILE, STATUS_PENDING, STATUS_PIPE_BROKEN,
-    STATUS_SUCCESS, STATUS_TIMEOUT, STATUS_USER_APC,
+    STATUS_ALERTED, STATUS_SUCCESS, STATUS_TIMEOUT, STATUS_USER_APC,
 };
 use crate::platform::windows::thread::{PlatformThread, set_current_thread_name};
-use crate::types::{IoMsg, IoThreadNotify, ReadThreadNotify, RendererMessage, ScrollOp};
+use crate::types::{IoInput, IoMsg, IoThreadNotify, RendererMessage, ScrollOp, TerminalDimensions};
 
-const WRITE_CHUNK: usize = 64 * 1024;
 const RESIZE_COALESCE: Duration = Duration::from_millis(25);
 const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn resize_deadline_after(current: Option<Instant>, now: Instant) -> Instant {
-    if let Some(deadline) = current {
-        deadline
-    } else {
-        now + RESIZE_COALESCE
-    }
+    current.unwrap_or(now + RESIZE_COALESCE)
 }
 
-/// Context passed through `NtCreateThreadEx` start routine.
 struct IoThreadContext {
-    writer: PtyWriter,
-    terminal: Arc<Mutex<Terminal>>,
-    read_notify: Arc<ReadThreadNotify>,
+    console_session: Arc<ConPTY>,
+    terminal: Arc<Terminal>,
     io_notify: Arc<IoThreadNotify>,
-    signal_tx: Sender<()>,
 }
 
 pub fn spawn_suspended(
-    writer: PtyWriter,
-    terminal: Arc<Mutex<Terminal>>,
-    read_notify: Arc<ReadThreadNotify>,
+    console_session: Arc<ConPTY>,
+    terminal: Arc<Terminal>,
     io_notify: Arc<IoThreadNotify>,
-    signal_tx: Sender<()>,
 ) -> io::Result<PlatformThread> {
     let ctx = Box::new(IoThreadContext {
-        writer,
+        console_session,
         terminal,
-        read_notify,
         io_notify,
-        signal_tx,
     });
     let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
     match PlatformThread::spawn_suspended(io_thread_entry, ctx_ptr) {
@@ -77,74 +59,37 @@ unsafe extern "system" fn io_thread_entry(context: *mut std::ffi::c_void) -> u32
     set_current_thread_name("pty-io");
     #[cfg(feature = "profiler")]
     tracy_client::set_thread_name!("pty-io");
+
     // SAFETY: context comes from Box::into_raw in spawn_suspended.
     let ctx = unsafe { Box::from_raw(context as *mut IoThreadContext) };
-    let mut thread = IoThread::new(
-        ctx.writer,
-        ctx.terminal,
-        ctx.read_notify,
-        ctx.io_notify,
-        ctx.signal_tx,
-    );
+    let mut thread = IoThread::new(ctx.console_session, ctx.terminal, ctx.io_notify);
     thread.run();
     0
 }
 
 /// Stateful IO worker.
 struct IoThread {
-    writer: PtyWriter,
-    terminal: Arc<Mutex<Terminal>>,
-    read_notify: Arc<ReadThreadNotify>,
+    console_session: Arc<ConPTY>,
+    terminal: Arc<Terminal>,
     io_notify: Arc<IoThreadNotify>,
-    signal_tx: Sender<()>,
     renderer_tx: Option<crossbeam_channel::Sender<RendererMessage>>,
 
-    /// Bytes waiting to be written to conin.
-    /// Each entry owns its backing buffer for the duration of the write.
-    write_queue: VecDeque<WriteChunk>,
-    /// Coalescing buffer used to batch small writes.
-    coalesce_buf: BytesMut,
-    /// Pool of reusable BytesMut buffers for coalescing.
-    coalesce_pool: Vec<BytesMut>,
-
-    write_io: AsyncIo,
-    /// Whether a WriteFile is currently in-flight.
-    write_pending: bool,
-
-    /// When Some, a resize fires after this instant.
     resize_deadline: Option<Instant>,
-    /// Latest resize request — earlier ones are discarded (last-wins).
-    pending_resize: Option<WindowSize>,
-    /// When Some, the sync-output safety timer fires after this instant.
+    pending_resize: Option<TerminalDimensions>,
     sync_output_deadline: Option<Instant>,
-}
-
-/// Owned write chunk with current progress offset.
-struct WriteChunk {
-    bytes: Bytes,
-    offset: usize,
 }
 
 impl IoThread {
     fn new(
-        writer: PtyWriter,
-        terminal: Arc<Mutex<Terminal>>,
-        read_notify: Arc<ReadThreadNotify>,
+        console_session: Arc<ConPTY>,
+        terminal: Arc<Terminal>,
         io_notify: Arc<IoThreadNotify>,
-        signal_tx: Sender<()>,
     ) -> Self {
         Self {
-            writer,
+            console_session,
             terminal,
-            read_notify,
             io_notify,
-            signal_tx,
             renderer_tx: None,
-            write_queue: VecDeque::with_capacity(8),
-            coalesce_buf: BytesMut::with_capacity(WRITE_CHUNK),
-            coalesce_pool: Vec::new(),
-            write_io: AsyncIo::new(),
-            write_pending: false,
             resize_deadline: None,
             pending_resize: None,
             sync_output_deadline: None,
@@ -154,7 +99,7 @@ impl IoThread {
     /// Queue-driven IO loop.
     ///
     /// Uses one alertable wait primitive to unify timer wakeups,
-    /// mailbox wakeups (`NtAlertThread`), and write APC completions.
+    /// queue wakeups (`NtAlertThread`), and write APC completions.
     fn run(&mut self) {
         loop {
             while let Some(msg) = self.io_notify.queue.pop() {
@@ -169,16 +114,10 @@ impl IoThread {
                 if self.handle_msg(msg) {
                     return;
                 }
-                while let Some(msg) = self.io_notify.queue.pop() {
-                    if self.handle_msg(msg) {
-                        return;
-                    }
-                }
                 continue;
             }
 
             self.fire_timers();
-            self.flush_writes();
 
             let wake = alertable_wait(self.next_timer_timeout_100ns());
             if wake != STATUS_SUCCESS
@@ -193,15 +132,12 @@ impl IoThread {
 
     fn handle_msg(&mut self, msg: IoMsg) -> bool {
         match msg {
-            IoMsg::InputInline { len, buf } => {
-                self.enqueue_inline(&buf[..len as usize]);
-            }
-            IoMsg::Input(bytes) => {
-                self.enqueue_bytes(bytes);
-            }
-            IoMsg::Reply(bytes) => {
-                self.enqueue_bytes(bytes);
-            }
+            IoMsg::Input(input) => match input {
+                IoInput::Key(event) => self.console_session.send_key(event),
+                IoInput::Mouse(event) => self.console_session.send_mouse(event),
+                IoInput::Focus(focused) => self.console_session.send_focus(focused),
+                IoInput::Paste(text) => self.console_session.send_paste(&text),
+            },
             IoMsg::Resize(size) => {
                 self.pending_resize = Some(size);
                 self.resize_deadline =
@@ -233,6 +169,7 @@ impl IoThread {
             (Some(a), None) | (None, Some(a)) => a,
             (None, None) => return i64::MIN,
         };
+
         let d = deadline.saturating_duration_since(Instant::now());
         let ticks = d
             .as_secs()
@@ -250,11 +187,7 @@ impl IoThread {
         {
             self.resize_deadline = None;
             if let Some(size) = self.pending_resize.take() {
-                self.read_notify.set_resize(size);
-                self.read_notify.signal();
-                if let Some(sender) = self.renderer_tx.as_ref() {
-                    sender.try_send(RendererMessage::Wake).ok();
-                }
+                self.apply_resize(size);
             }
         }
 
@@ -262,231 +195,41 @@ impl IoThread {
             && now >= deadline
         {
             self.sync_output_deadline = None;
-            {
-                #[cfg(feature = "profiler")]
-                let _c = tracy_client::span!("reset_sync_output:contention", 32);
-                let mut term = self.terminal.lock().expect("terminal mutex poisoned");
-                #[cfg(feature = "profiler")]
-                let _h = tracy_client::span!("reset_sync_output:hold", 32);
-                term.reset_synchronized_output();
+            self.terminal.reset_synchronized_output();
+            if let Some(sender) = self.renderer_tx.as_ref() {
+                let _ = sender.try_send(RendererMessage::Wake);
             }
-            self.signal_tx.try_send(()).ok();
         }
     }
 
-    /// Apply viewport scroll under terminal mutex.
+    /// Apply viewport scroll on the shared terminal.
     fn apply_scroll(&self, op: ScrollOp) {
-        {
-            #[cfg(feature = "profiler")]
-            let _c = tracy_client::span!("apply_scroll:contention", 32);
-            let mut term = self.terminal.lock().expect("terminal mutex poisoned");
-            #[cfg(feature = "profiler")]
-            let _h = tracy_client::span!("apply_scroll:hold", 32);
-            match op {
-                ScrollOp::Delta(delta) => term.scroll_viewport(delta),
-                ScrollOp::Top => term.scroll_to_top(),
-                ScrollOp::Bottom => term.scroll_to_bottom(),
-            }
+        match op {
+            ScrollOp::Delta(delta) => self.terminal.scroll_viewport(delta),
+            ScrollOp::Top => self.terminal.scroll_to_top(),
+            ScrollOp::Bottom => self.terminal.scroll_to_bottom(),
         }
-        self.signal_tx.try_send(()).ok();
+        if let Some(sender) = self.renderer_tx.as_ref() {
+            let _ = sender.try_send(RendererMessage::Wake);
+        }
     }
 
-    /// Ordered shutdown:
-    /// - mark closing, wake read thread,
-    /// - drain mailbox (flush input only),
-    /// - flush outstanding writes,
-    /// - close HPCON under resize/close lock.
+    fn apply_resize(&self, dimensions: TerminalDimensions) {
+        let rows = (dimensions.screen_height_px / dimensions.cell_height_px) as u16;
+        let cols = (dimensions.screen_width_px / dimensions.cell_width_px) as u16;
+
+        self.terminal.resize(cols.max(1), rows.max(1));
+        self.terminal.set_dimensions(dimensions);
+        self.console_session.send_resize(cols.max(1), rows.max(1));
+        if let Some(sender) = self.renderer_tx.as_ref() {
+            let _ = sender.try_send(RendererMessage::Wake);
+        }
+    }
+
     fn handle_close(&mut self) {
-        self.read_notify.closing.store(true, Ordering::Release);
         self.pending_resize = None;
         self.resize_deadline = None;
         self.sync_output_deadline = None;
-        self.read_notify.signal();
-
-        while let Some(msg) = self.io_notify.queue.pop() {
-            match msg {
-                IoMsg::InputInline { len, buf } => {
-                    self.enqueue_inline(&buf[..len as usize]);
-                }
-                IoMsg::Input(bytes) => self.enqueue_bytes(bytes),
-                IoMsg::Reply(_) => {}
-                IoMsg::Resize(_) => {}
-                IoMsg::Scroll(_) => {}
-                IoMsg::StartSyncOutput => {}
-                IoMsg::AttachRenderer(_) => {}
-                IoMsg::DetachRenderer => {}
-                IoMsg::Close => {}
-            }
-        }
-
-        // Best-effort flush only: do not block shutdown on conin completion.
-        self.flush_writes();
-
-        {
-            let _guard = self.read_notify.hpcon_op.lock().unwrap();
-            self.writer.backend.close_async();
-        }
-        // unlock hpcon_op — IO loop exits after this
-    }
-
-    /// Queue bytes for write coalescing/chunking.
-    fn enqueue_bytes(&mut self, bytes: Bytes) {
-        if bytes.is_empty() {
-            return;
-        }
-        if bytes.len() >= WRITE_CHUNK {
-            self.flush_coalesce_into_queue();
-            self.write_queue.push_back(WriteChunk { bytes, offset: 0 });
-            return;
-        }
-        self.append_small(&bytes);
-    }
-
-    /// Queue tiny inline bytes without allocating a `Bytes` owner.
-    fn enqueue_inline(&mut self, bytes: &[u8]) {
-        self.append_small(bytes);
-    }
-
-    /// Append a small slice to the coalesce buffer, flushing first if full.
-    fn append_small(&mut self, src: &[u8]) {
-        if src.is_empty() {
-            return;
-        }
-        if self.coalesce_buf.len() + src.len() > WRITE_CHUNK {
-            self.flush_coalesce_into_queue();
-        }
-        self.coalesce_buf.extend_from_slice(src);
-    }
-
-    /// Move coalesced bytes into the write queue.
-    fn flush_coalesce_into_queue(&mut self) {
-        if self.coalesce_buf.is_empty() {
-            return;
-        }
-        let replacement = self.take_pool_buf();
-        let full = std::mem::replace(&mut self.coalesce_buf, replacement);
-        self.write_queue.push_back(WriteChunk {
-            bytes: full.freeze(),
-            offset: 0,
-        });
-    }
-
-    /// Take a buffer from the recycle pool (or allocate a fresh one).
-    fn take_pool_buf(&mut self) -> BytesMut {
-        if let Some(mut buf) = self.coalesce_pool.pop() {
-            buf.clear();
-            buf
-        } else {
-            BytesMut::with_capacity(WRITE_CHUNK)
-        }
-    }
-
-    /// Recycle small write buffers back to local pool.
-    fn recycle_bytes(&mut self, bytes: Bytes) {
-        if let Ok(mut buf) = bytes.try_into_mut()
-            && buf.capacity() <= WRITE_CHUNK * 2
-        {
-            buf.clear();
-            self.coalesce_pool.push(buf);
-        }
-    }
-
-    /// Pop and recycle the front chunk.
-    fn retire_front(&mut self) {
-        if let Some(front) = self.write_queue.pop_front() {
-            self.recycle_bytes(front.bytes);
-        }
-    }
-
-    /// Advance front queued chunk by bytes written.
-    fn advance_front(&mut self, bytes_written: usize) {
-        if let Some(front) = self.write_queue.front_mut() {
-            front.offset += bytes_written;
-            if front.offset >= front.bytes.len() {
-                self.retire_front();
-            }
-        }
-    }
-
-    /// Consume one completed in-flight write if APC flagged done.
-    fn complete_inflight(&mut self) {
-        if !self.write_pending || !self.write_io.done {
-            return;
-        }
-
-        let status = self.write_io.iosb.status();
-        let bytes_written = self.write_io.iosb.information;
-        self.write_pending = false;
-
-        if status == STATUS_SUCCESS && bytes_written > 0 {
-            self.advance_front(bytes_written);
-            return;
-        }
-
-        if status != STATUS_SUCCESS
-            && status != STATUS_CANCELLED
-            && status != STATUS_END_OF_FILE
-            && status != STATUS_PIPE_BROKEN
-        {
-            log::warn!("io_thread: NtWriteFile completion failed: 0x{status:08X}");
-        }
-        self.retire_front();
-    }
-
-    /// Issue next write when no write is currently in-flight.
-    fn flush_writes(&mut self) {
-        self.complete_inflight();
-        if self.write_pending {
-            return;
-        }
-
-        self.flush_coalesce_into_queue();
-        let (ptr, len) = match self.write_queue.front() {
-            Some(front) => {
-                let remaining = front.bytes.len() - front.offset;
-                if remaining == 0 {
-                    self.retire_front();
-                    return;
-                }
-                let to_send = remaining.min(WRITE_CHUNK);
-                (unsafe { front.bytes.as_ptr().add(front.offset) }, to_send)
-            }
-            None => return,
-        };
-
-        let status =
-            unsafe { async_write(self.writer.conin.raw(), &mut self.write_io, ptr, len as u32) };
-        match status {
-            STATUS_SUCCESS | STATUS_PENDING => {
-                self.write_pending = true;
-            }
-            _ => {
-                log::warn!("io_thread: NtWriteFile failed: 0x{status:08X}");
-                self.retire_front();
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resize_deadline_starts_on_first_resize() {
-        let now = Instant::now();
-        let deadline = resize_deadline_after(None, now);
-        assert_eq!(deadline, now + RESIZE_COALESCE);
-    }
-
-    #[test]
-    fn resize_deadline_does_not_extend_while_active() {
-        let now = Instant::now();
-        let existing = now + RESIZE_COALESCE;
-        let later = now + Duration::from_millis(5);
-
-        let deadline = resize_deadline_after(Some(existing), later);
-
-        assert_eq!(deadline, existing);
+        while self.io_notify.queue.pop().is_some() {}
     }
 }

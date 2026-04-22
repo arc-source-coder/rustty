@@ -1,11 +1,11 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FONT_AXIS_TAG_WEIGHT, DWRITE_FONT_AXIS_VALUE, DWRITE_FONT_PROPERTY,
-    DWRITE_FONT_PROPERTY_ID_FAMILY_NAME, DWRITE_FONT_SIMULATIONS_NONE, IDWriteFactory6,
-    IDWriteFontFace2, IDWriteFontResource, IDWriteFontSet1,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, IDWriteFactory, IDWriteFactory6,
+    IDWriteFontCollection, IDWriteFontFace2,
 };
 use windows::core::PCWSTR;
-use windows_core::Interface;
+use windows_core::{BOOL, Interface};
 
 use crate::types::{FontAxisSpec, Style};
 
@@ -20,11 +20,7 @@ pub struct StyleVariationRequest<'a> {
     pub axes: FontAxisSpec,
 }
 
-/// Resolve one face per style using DirectWrite font-set APIs available on
-/// Windows 10 build 16299 (`dwrite_3.h`).
-///
-/// This intentionally avoids runtime `MapCharacters` axis mutation and binds
-/// variation coordinates at face-construction time.
+/// Resolve one face per style using WT-style DirectWrite collection APIs.
 ///
 /// Ghostty reference:
 /// - Config/lifecycle-owned variation identity in `SharedGridSet.Key`
@@ -33,19 +29,47 @@ pub fn resolve_primary_faces(
     factory: &IDWriteFactory6,
     requests: &[StyleVariationRequest<'_>; Style::COUNT],
 ) -> Result<[IDWriteFontFace2; Style::COUNT]> {
-    let system_set = unsafe { factory.GetSystemFontSet(false) }?;
+    let first_collection = system_font_collection(factory, false)?;
+    match resolve_primary_faces_in_collection(&first_collection, requests) {
+        Ok(faces) => Ok(faces),
+        Err(first_err) => {
+            let refreshed_collection = system_font_collection(factory, true)?;
+            resolve_primary_faces_in_collection(&refreshed_collection, requests).with_context(
+                || format!("failed resolving primary faces after retry: {first_err:#}"),
+            )
+        }
+    }
+}
+
+fn resolve_primary_faces_in_collection(
+    collection: &IDWriteFontCollection,
+    requests: &[StyleVariationRequest<'_>; Style::COUNT],
+) -> Result<[IDWriteFontFace2; Style::COUNT]> {
     let mut out: [Option<IDWriteFontFace2>; Style::COUNT] = std::array::from_fn(|_| None);
 
     for style in Style::ALL {
         let req = &requests[style as usize];
-        out[style as usize] = Some(resolve_style_face(&system_set, style, req)?);
+        out[style as usize] =
+            Some(resolve_style_face(collection, style, req).with_context(|| {
+                format!("failed to resolve style={style:?} family='{}'", req.family)
+            })?);
     }
 
     Ok(out.map(|v| v.expect("all styles resolved")))
 }
 
+fn system_font_collection(
+    factory: &IDWriteFactory6,
+    check_for_updates: bool,
+) -> Result<IDWriteFontCollection> {
+    let factory_base = factory.cast::<IDWriteFactory>()?;
+    let mut out = None;
+    unsafe { factory_base.GetSystemFontCollection(&mut out, check_for_updates) }?;
+    out.ok_or_else(|| anyhow!("DirectWrite returned no system font collection"))
+}
+
 fn resolve_style_face(
-    system_set: &IDWriteFontSet1,
+    system_collection: &IDWriteFontCollection,
     style: Style,
     request: &StyleVariationRequest<'_>,
 ) -> Result<IDWriteFontFace2> {
@@ -53,65 +77,58 @@ fn resolve_style_face(
         return Err(anyhow!("empty family name for style {style:?}"));
     }
 
-    let mut family_utf16 = request.family.encode_utf16().collect::<Vec<u16>>();
+    if let Ok(face) = resolve_style_face_for_family(system_collection, style, request.family) {
+        return Ok(face);
+    }
+
+    if !request.family.eq_ignore_ascii_case("Consolas") {
+        if let Ok(face) = resolve_style_face_for_family(system_collection, style, "Consolas") {
+            return Ok(face);
+        }
+    }
+
+    Err(anyhow!(
+        "no usable face for style={style:?} after trying '{}'{}",
+        request.family,
+        if request.family.eq_ignore_ascii_case("Consolas") {
+            ""
+        } else {
+            " and 'Consolas'"
+        }
+    ))
+}
+
+fn resolve_style_face_for_family(
+    system_collection: &IDWriteFontCollection,
+    style: Style,
+    family_name: &str,
+) -> Result<IDWriteFontFace2> {
+    let mut family_utf16 = family_name.encode_utf16().collect::<Vec<u16>>();
     family_utf16.push(0);
-    let property = DWRITE_FONT_PROPERTY {
-        propertyId: DWRITE_FONT_PROPERTY_ID_FAMILY_NAME,
-        propertyValue: PCWSTR(family_utf16.as_ptr()),
-        localeName: PCWSTR::null(),
-    };
-
-    // Start matching from explicitly configured axes only; style defaults are
-    // applied later against the selected font resource defaults.
-    let matched_axes = request.axes.values.clone();
-
-    let matched = unsafe {
-        system_set.GetMatchingFonts(
-            Some(&property as *const DWRITE_FONT_PROPERTY),
-            &matched_axes,
-        )
-    }?;
-    let count = unsafe { matched.GetFontCount() };
-    if count == 0 {
+    let mut index = 0;
+    let mut exists = BOOL(0);
+    let family_name_w = PCWSTR(family_utf16.as_ptr());
+    unsafe { system_collection.FindFamilyName(family_name_w, &mut index, &mut exists) }?;
+    if !exists.as_bool() {
         return Err(anyhow!(
-            "no matching face for family='{}' style={style:?}",
-            request.family
+            "no matching family for family='{family_name}' style={style:?}"
         ));
     }
 
-    // Create a font resource for the selected instance, then derive defaults
-    // from that resource and apply style/user overrides before creating the
-    // final face.
-    //
-    // Ghostty reference:
-    // style/variation config is applied at face-load time in DeferredFace.
-    //
-    // Windows 10 RS3-compatible path:
-    // we intentionally avoid IDWriteFontSet4::ConvertWeightStretchStyleToFontAxisValues
-    // (newer API) and instead build from IDWriteFontResource defaults.
-    // Ghostty parity: choose the first/best match from discovery results rather
-    // than scanning all candidates with additional heuristics.
-    let resource = unsafe { matched.CreateFontResource(0) }?;
-    let mut resolved_axes = font_resource_default_axes(&resource)?;
-    let default_weight = resolved_axes
-        .iter()
-        .find(|v| v.axisTag == DWRITE_FONT_AXIS_TAG_WEIGHT)
-        .map(|v| v.value.max(0.0).round() as u16)
-        .unwrap_or(400);
-    request
-        .axes
-        .resolve_with_variant_defaults_into(style, default_weight, &mut resolved_axes);
-    let face5 = unsafe { resource.CreateFontFace(DWRITE_FONT_SIMULATIONS_NONE, &resolved_axes) }?;
-    Ok(face5.cast::<IDWriteFontFace2>()?)
-}
+    let family = unsafe { system_collection.GetFontFamily(index) }?;
+    let weight = if style.is_bold() {
+        DWRITE_FONT_WEIGHT_BOLD
+    } else {
+        DWRITE_FONT_WEIGHT_NORMAL
+    };
+    let font_style = if style.is_italic() {
+        DWRITE_FONT_STYLE_ITALIC
+    } else {
+        DWRITE_FONT_STYLE_NORMAL
+    };
 
-fn font_resource_default_axes(
-    resource: &IDWriteFontResource,
-) -> Result<Vec<DWRITE_FONT_AXIS_VALUE>> {
-    let axis_count = unsafe { resource.GetFontAxisCount() } as usize;
-    let mut axes = vec![DWRITE_FONT_AXIS_VALUE::default(); axis_count];
-    if axis_count > 0 {
-        unsafe { resource.GetDefaultFontAxisValues(&mut axes) }?;
-    }
-    Ok(axes)
+    let font =
+        unsafe { family.GetFirstMatchingFont(weight, DWRITE_FONT_STRETCH_NORMAL, font_style) }?;
+    let face = unsafe { font.CreateFontFace() }?;
+    Ok(face.cast::<IDWriteFontFace2>()?)
 }

@@ -1,6 +1,7 @@
+use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_channel::Sender as AsyncSender;
@@ -28,6 +29,8 @@ use super::scene::{
 use super::shared_grid_ptr::shared_grid_ref;
 use super::terminal_renderer::{RendererTextConfig, RendererUiUpdate};
 use super::types::RenderBatch;
+
+const WAKE_COALESCE_WINDOW: Duration = Duration::from_millis(1);
 
 fn dwrite_shared_grid_set() -> &'static SharedGridSet<DWriteGridKey> {
     static GRID_SET: OnceLock<SharedGridSet<DWriteGridKey>> = OnceLock::new();
@@ -57,12 +60,12 @@ impl Drop for RendererThreadHandle {
 pub fn spawn(
     device: ID3D11Device,
     swap_chain: IDXGISwapChain1,
-    terminal: Arc<Mutex<Terminal>>,
+    terminal: Arc<Terminal>,
     text_config: RendererTextConfig,
     ui_tx: AsyncSender<RendererUiUpdate>,
     slot_rx: Receiver<CompositionSlotEvent>,
 ) -> RendererThreadHandle {
-    let (tx, rx) = crossbeam_channel::bounded::<RendererMessage>(64);
+    let (tx, rx) = crossbeam_channel::bounded::<RendererMessage>(1);
 
     let join = std::thread::Builder::new()
         .name("terminal-renderer".into())
@@ -83,7 +86,7 @@ pub fn spawn(
 
 struct RendererThread {
     backend: D3D11Backend,
-    terminal: Arc<Mutex<Terminal>>,
+    terminal: Arc<Terminal>,
     config: RendererTextConfig,
     shared_grid: SharedGridPtr,
     shaper: Shaper,
@@ -117,7 +120,7 @@ impl RendererThread {
     fn new(
         device: ID3D11Device,
         swap_chain: IDXGISwapChain1,
-        terminal: Arc<Mutex<Terminal>>,
+        terminal: Arc<Terminal>,
         text_config: RendererTextConfig,
         ui_tx: AsyncSender<RendererUiUpdate>,
     ) -> Result<Self> {
@@ -228,6 +231,11 @@ impl RendererThread {
                 false
             };
 
+            if pending_wake {
+                // Hack to workaround powershell cursor flickering when typing
+                pending_wake = coalesce_wakes(&rx, WAKE_COALESCE_WINDOW);
+            }
+
             let should_present = (pending_wake || slot_needs_present) && self.backend.has_target();
             if !should_present {
                 continue;
@@ -241,13 +249,22 @@ impl RendererThread {
     }
 
     fn draw_and_present(&mut self) -> Result<()> {
-        let (frame, scrollbar) = {
+        let (frame, scrollbar) = unsafe {
             #[cfg(feature = "profiler")]
             let _c = tracy_client::span!("draw_and_present:contention", 32);
-            let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
+
+            // SAFETY: `render_frame()` and `scrollbar_info()` require the caller
+            // to hold the Zig-owned terminal mutex. This is the one renderer
+            // path that needs a coherent snapshot across both queries, so we
+            // take the lock explicitly, gather both values, then unlock before
+            // any heavier frame build or present work.
+            self.terminal.lock();
             #[cfg(feature = "profiler")]
             let _h = tracy_client::span!("draw_and_present:hold", 32);
-            (terminal.render_frame(), terminal.scrollbar_info())
+            let frame = self.terminal.render_frame();
+            let scrollbar = self.terminal.scrollbar_info();
+            self.terminal.unlock();
+            (frame, scrollbar)
         };
 
         if scrollbar_changed(self.last_scrollbar, scrollbar) {
@@ -278,6 +295,26 @@ impl RendererThread {
             frame,
             &mut self.batch,
         )
+    }
+}
+
+fn coalesce_wakes(rx: &Receiver<RendererMessage>, window: Duration) -> bool {
+    let deadline = Instant::now() + window;
+
+    loop {
+        match rx.try_recv() {
+            Ok(RendererMessage::Wake) => continue,
+            Ok(RendererMessage::Quit) => return false,
+            Err(TryRecvError::Disconnected) => return false,
+            Err(TryRecvError::Empty) => {}
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return true;
+        }
+
+        std::thread::sleep(deadline - now);
     }
 }
 

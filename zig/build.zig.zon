@@ -4,17 +4,23 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "lib.zig",
+        "ghostty_shim.zig",
+        "tests.zig",
+        "tests",
+        "src",
+        "zconpty_shim.zig",
+        "ghostty",
     },
     .fingerprint = 0x3aeba3d822a162af,
     .dependencies = .{
+        .zconpty = .{ .path = "../vendor/zconpty", .lazy = false },
         .uucode = .{
             // jacobsandlund/uucode — same version as vendored Ghostty 1.3.x
             .url = "https://deps.files.ghostty.org/uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9.tar.gz",
             .hash = "uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9",
         },
-        .simdutf = .{ .path = "./ghostty/pkg/simdutf", .lazy = true },
-        .highway = .{ .path = "./ghostty/pkg/highway", .lazy = true },
-        .utfcpp = .{ .path = "./ghostty/pkg/utfcpp", .lazy = true },
+        .simdutf = .{ .path = "./ghostty/pkg/simdutf", .lazy = false },
+        .highway = .{ .path = "./ghostty/pkg/highway", .lazy = false },
+        .utfcpp = .{ .path = "./ghostty/pkg/utfcpp", .lazy = false },
     },
 }

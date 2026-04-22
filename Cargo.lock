@@ -1971,6 +1971,9 @@ dependencies = [
 [[package]]
 name = "ghostty"
 version = "0.1.0"
+dependencies = [
+ "async-channel 2.5.0",
+]
 
 [[package]]
 name = "gif"
@@ -3186,15 +3189,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "miow"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
-dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "moxcms"
 version = "0.7.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3968,15 +3962,6 @@ checksum = "d11f2fedc3b7dafdc2851bc52f277377c5473d378859be234bc7ebb593144d01"
 dependencies = [
  "ar_archive_writer",
  "cc",
-]
-
-[[package]]
-name = "pty"
-version = "0.1.0"
-dependencies = [
- "log",
- "miow",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5208,9 +5193,9 @@ dependencies = [
  "ghostty",
  "gpui",
  "log",
- "pty",
  "tracy-client",
  "windows-sys 0.59.0",
+ "zconpty",
 ]
 
 [[package]]
@@ -6972,6 +6957,10 @@ dependencies = [
  "winnow",
  "zvariant",
 ]
+
+[[package]]
+name = "zconpty"
+version = "0.1.0"
 
 [[package]]
 name = "zed-font-kit"

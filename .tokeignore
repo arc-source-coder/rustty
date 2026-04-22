@@ -4,3 +4,5 @@ docs/
 vendor/zed/
 # Vendored Ghostty submodule
 zig/ghostty/
+# Vendored zconpty source
+vendor/zconpty

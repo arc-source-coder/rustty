@@ -13,7 +13,7 @@ zigdoc std.posix.getuid
 zigdoc vaxis.Window
 ```
 
-After zig work, run `ziglint` and `zig fmt` on the changed files.
+After zig work, run `zig fmt` and `ziglint` on the changed files.
 
 ## Current Zig Patterns
 

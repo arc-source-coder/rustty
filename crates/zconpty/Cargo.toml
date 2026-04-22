@@ -1,0 +1,4 @@
+[package]
+name = "zconpty"
+version.workspace = true
+edition.workspace = true

@@ -2,3 +2,6 @@
 name = "ghostty"
 version.workspace = true
 edition.workspace = true
+
+[dependencies]
+async-channel.workspace = true

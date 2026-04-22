@@ -3,76 +3,68 @@ use std::{
     ops::Deref,
 };
 
-use core::ffi::{c_int, c_void};
+use core::ffi::c_void;
 
 use crate::*;
 
 /// Events produced by the terminal during `feed()`.
-/// Consumed via `Terminal::drain_events()` after each feed cycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VtEvent {
+pub enum Event {
     Bell,
     TitleChanged(String),
-    DeviceResponse(Vec<u8>),
 }
 
-// C callback trampolines — push to the Vec<VtEvent> via userdata pointer.
-// Safety: these are only called during `feed()`, which holds `&mut self`
-// on the single UI thread — no concurrent access to the queue.
-// Wrapped in catch_unwind to prevent unwinding across the FFI boundary.
+struct CallbackSink {
+    event_tx: async_channel::Sender<Event>,
+    wake: Box<dyn Fn() + Send + Sync>,
+}
+
+pub struct CallbackHandle {
+    terminal: NonNull<c_void>,
+    _sink: Box<CallbackSink>,
+}
 
 unsafe extern "C" fn bell_trampoline(userdata: *mut c_void) {
     let _ = std::panic::catch_unwind(|| {
-        let events = unsafe { &mut *(userdata as *mut Vec<VtEvent>) };
-        events.push(VtEvent::Bell);
+        let sink = unsafe { &*(userdata as *const CallbackSink) };
+        let _ = sink.event_tx.try_send(Event::Bell);
     });
 }
 
 unsafe extern "C" fn title_trampoline(userdata: *mut c_void, ptr: *const u8, len: usize) {
     let _ = std::panic::catch_unwind(|| {
-        let events = unsafe { &mut *(userdata as *mut Vec<VtEvent>) };
+        let sink = unsafe { &*(userdata as *const CallbackSink) };
         // Guard: from_raw_parts requires non-null ptr even when len == 0.
         // Zig slices always have non-null .ptr, but defend against edge cases.
-        let title = if len == 0 || ptr.is_null() {
+        let title = if ptr.is_null() || len == 0 {
             String::new()
         } else {
             let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
             String::from_utf8_lossy(bytes).into_owned()
         };
-        events.push(VtEvent::TitleChanged(title));
+        let _ = sink.event_tx.try_send(Event::TitleChanged(title));
     });
 }
 
-unsafe extern "C" fn response_trampoline(userdata: *mut c_void, ptr: *const u8, len: usize) {
+unsafe extern "C" fn output_trampoline(userdata: *mut c_void) {
     let _ = std::panic::catch_unwind(|| {
-        let events = unsafe { &mut *(userdata as *mut Vec<VtEvent>) };
-        if len == 0 || ptr.is_null() {
-            return;
-        }
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
-        events.push(VtEvent::DeviceResponse(bytes.to_vec()));
+        let sink = unsafe { &*(userdata as *const CallbackSink) };
+        (sink.wake)();
     });
 }
 
 /// Safe wrapper around the Ghostty VT terminal handle.
 ///
-/// `Send` but not `Sync` — all access must go through an external
-/// `Mutex<Terminal>` when shared between threads.
-/// All mutating operations take `&mut self`; read operations take `&self`.
-/// Use `render_frame()` to access render state.
+/// Thread-safe handle wrapper around the shared Zig terminal.
+/// Zig owns the terminal mutex, the feed callback path, and device-response routing.
 pub struct Terminal {
-    handle: *mut c_void,
-    #[allow(clippy::box_collection)] // Zig FFI needs a stable pointer
-    events: Box<Vec<VtEvent>>,
+    handle: NonNull<c_void>,
 }
 
-// Safety: Terminal wraps a Zig-allocated handle that is not thread-safe.
-// However, all access is protected by an external Mutex<Terminal>
-// Only one thread accesses the handle at a time.
-// The Box<Vec<VtEvent>> callback target is heap-stable across moves.
-// Cell<bool> is Send. The raw *mut c_void is not Send by default, but
-// the Mutex guarantees no concurrent access.
+// Safety: Zig owns the terminal mutex and locks internally on
+// mutating operations, so the raw handle can be shared.
 unsafe impl Send for Terminal {}
+unsafe impl Sync for Terminal {}
 
 impl Terminal {
     /// Create a new terminal with the given dimensions and default colors.
@@ -85,89 +77,102 @@ impl Terminal {
             return None;
         }
 
-        let mut events = Box::new(Vec::new());
+        let h = unsafe { NonNull::new_unchecked(handle) };
+        Some(Terminal { handle: h })
+    }
 
-        // Register callbacks with a pointer to the heap-stable Vec.
-        // The Box indirection ensures the Vec's address is stable
-        // even if Terminal is moved.
-        let userdata = &mut *events as *mut Vec<VtEvent> as *mut c_void;
+    /// Borrow the underlying Ghostty handle for integration layers such as zconpty.
+    pub fn handle(&self) -> *mut c_void {
+        self.handle.as_ptr()
+    }
+
+    /// Acquire the Zig-owned terminal mutex.
+    ///
+    /// SAFETY: The caller must pair this with [`Terminal::unlock`] on the same
+    /// terminal and must not call methods that lock internally while the mutex is held.
+    pub unsafe fn lock(&self) {
+        unsafe {
+            ghostty_terminal_lock(self.handle);
+        }
+    }
+
+    /// Release the Zig-owned terminal mutex.
+    ///
+    /// SAFETY: The caller must currently hold the terminal mutex for this terminal.
+    pub unsafe fn unlock(&self) {
+        unsafe {
+            ghostty_terminal_unlock(self.handle);
+        }
+    }
+
+    /// Register bell/title/output callbacks.
+    /// Locks internally.
+    pub fn set_event_sender(
+        &self,
+        event_tx: async_channel::Sender<Event>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> CallbackHandle {
+        let mut sink = Box::new(CallbackSink {
+            event_tx,
+            wake: Box::new(wake),
+        });
+        let userdata = (&mut *sink as *mut CallbackSink).cast::<c_void>();
+
         unsafe {
             ghostty_terminal_set_callbacks(
-                handle,
+                self.handle,
                 userdata,
-                Some(bell_trampoline as BellCallback),
-                Some(title_trampoline as TitleCallback),
-                Some(response_trampoline as ResponseCallback),
+                Some(bell_trampoline),
+                Some(title_trampoline),
+                Some(output_trampoline),
             );
         }
 
-        Some(Terminal { handle, events })
-    }
-
-    /// Feed raw bytes (PTY output) to the terminal emulator.
-    /// Side-effect events (bell, title change) are queued internally;
-    /// call `drain_events()` after feeding to process them.
-    pub fn feed(&mut self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
-        unsafe {
-            ghostty_terminal_feed(self.handle, bytes.as_ptr(), bytes.len());
+        CallbackHandle {
+            terminal: self.handle,
+            _sink: sink,
         }
     }
 
     /// Resize the terminal grid.
-    pub fn resize(&mut self, cols: u16, rows: u16) {
+    /// Locks internally.
+    pub fn resize(&self, cols: u16, rows: u16) {
         unsafe {
             ghostty_terminal_resize(self.handle, cols, rows);
         }
     }
 
-    /// Set cell pixel dimensions. Called by the renderer whenever
-    /// font metrics change. Needed for size report responses (CSI 14t, 16t).
-    pub fn set_cell_size(&mut self, width_px: u16, height_px: u16) {
-        unsafe {
-            ghostty_terminal_set_cell_size(self.handle, width_px, height_px);
-        }
-    }
+    /// Set dimensions for rendering. Called by the renderer whenever
+    /// font metrics change. Needed for size report responses (CSI 14t, 16t),
+    /// Kitty Graphics Protocol, and mouse event encoding.
+    /// Locks internally.
+    pub fn set_dimensions(&self, dimensions: TerminalDimensions) {
+        let screen_width_px = dimensions.screen_width_px.max(1);
+        let screen_height_px = dimensions.screen_height_px.max(1);
+        let cell_width_px = dimensions.cell_width_px.max(1);
+        let cell_height_px = dimensions.cell_height_px.max(1);
 
-    /// Drain all events produced during the last `feed()` call(s).
-    /// Writes events to the provided bufer and clears the internal queue.
-    ///
-    /// Note: cannot be called while a `RenderFrame` is alive —
-    /// the frame borrows `&self` and `drain_events` needs `&mut self`.
-    /// This is enforced statically by the borrow checker.
-    pub fn drain_events(&mut self, buf: &mut Vec<VtEvent>) {
-        buf.clear();
-        std::mem::swap(&mut *self.events, buf);
+        unsafe {
+            ghostty_terminal_set_render_dimensions(
+                self.handle,
+                screen_width_px,
+                screen_height_px,
+                cell_width_px,
+                cell_height_px,
+            );
+        }
     }
 
     /// Update the persistent render state and return a detached frame accessor.
     ///
-    /// Calls `render_update()` then constructs a `RenderFrame` holding the
-    /// raw handle pointer. The frame can be used after the `MutexGuard<Terminal>`
-    /// that gave us `&mut self` is dropped — the caller controls the lock scope.
+    /// This does not lock internally. Callers must hold the terminal mutex so
+    /// they can gather any other frame-coherent terminal data in the same critical
+    /// section before unlocking.
     ///
-    /// The caller MUST query any non-RenderState fields (`scrollbar_info`,
-    /// `is_alternate_screen`, etc.) before the guard drops.
-    /// `frame.*()` calls are safe after the lock drops because RenderState
-    /// is only mutated by render_update() on the UI thread.
-    ///
-    /// SAFETY: `render_frame()` takes `&mut self`, so the borrow checker prevents
-    /// creating a second frame while the `MutexGuard<Terminal>` is still held.
-    /// However, once the guard drops the frame becomes detached, and the borrow
-    /// checker can no longer prevent a second `render_frame()` call on the same
-    /// guard (in a subsequent lock scope) before the first frame is dropped.
-    ///
-    /// Callers MUST ensure the previous `RenderFrame` is dropped before calling
-    /// `render_frame()` again. Violating this causes the first frame's `Drop` to clear
-    /// dirty flags that the second frame still needs, producing incorrect rendering.
-    ///
-    /// The architectural invariant (only prepaint creates frames, and prepaint drops
-    /// the frame before its next invocation) satisfies this requirement.
-    ///
-    /// When `RenderFrame` is dropped, dirty flags are cleared automatically.
-    pub fn render_frame(&mut self) -> RenderFrame {
+    /// SAFETY: The caller must hold the terminal mutex via [`Terminal::lock`].
+    /// Callers must still avoid overlapping frames on the same terminal
+    /// because `RenderFrame::drop()` clears shared dirty flags.
+    pub unsafe fn render_frame(&self) -> RenderFrame {
         // Ignore return: a failed update (allocation error inside Ghostty)
         // leaves RenderState in its previous valid state. We hand out a
         // frame over stale-but-consistent data rather than crashing or
@@ -183,107 +188,84 @@ impl Terminal {
 
     // --- Mode flag queries (read-only, &self) ---
 
-    /// Current mouse event reporting mode.
-    pub fn mouse_mode(&self) -> MouseMode {
-        MouseMode::from_raw(unsafe { ghostty_terminal_get_mouse_mode(self.handle) })
-    }
-
-    /// Current mouse coordinate format.
-    pub fn mouse_format(&self) -> MouseFormat {
-        MouseFormat::from_raw(unsafe { ghostty_terminal_get_mouse_format(self.handle) })
-    }
-
-    /// Whether bracketed paste mode is active.
-    pub fn is_bracketed_paste(&self) -> bool {
-        unsafe { ghostty_terminal_is_bracketed_paste(self.handle) != 0 }
-    }
-
-    /// Kitty keyboard protocol flags (5-bit bitfield).
-    pub fn kitty_keyboard_flags(&self) -> u8 {
-        unsafe { ghostty_terminal_get_kitty_keyboard_flags(self.handle) }
-    }
-
     /// Whether synchronized output mode (DEC 2026) is active.
+    /// Locks internally.
     pub fn is_synchronized_output(&self) -> bool {
-        unsafe { ghostty_terminal_is_synchronized_output(self.handle) != 0 }
+        unsafe { ghostty_terminal_is_synchronized_output(self.handle) }
     }
 
     /// Reset synchronized output mode (DEC 2026).
     /// Used by the sync-output safety timer to unfreeze misbehaving programs.
-    pub fn reset_synchronized_output(&mut self) {
+    /// Locks internally.
+    pub fn reset_synchronized_output(&self) {
         unsafe { ghostty_terminal_reset_synchronized_output(self.handle) }
     }
 
     /// Whether focus event mode (DEC 1004) is active.
+    /// Locks internally.
     pub fn is_focus_event_mode(&self) -> bool {
-        unsafe { ghostty_terminal_is_focus_event_mode(self.handle) != 0 }
+        unsafe { ghostty_terminal_is_focus_event_mode(self.handle) }
     }
 
     /// Whether the alternate screen is active.
+    /// Locks internally.
     pub fn is_alternate_screen(&self) -> bool {
-        unsafe { ghostty_terminal_is_alternate_screen(self.handle) != 0 }
+        unsafe { ghostty_terminal_is_alternate_screen(self.handle) }
+    }
+
+    /// Whether mouse reporting is enabled
+    /// Locks internally.
+    pub fn is_mouse_reporting(&self) -> bool {
+        unsafe { ghostty_terminal_is_mouse_reporting(self.handle) }
     }
 
     /// Whether alternate scroll mode (DEC 1007) is active.
+    /// Locks internally.
     pub fn mouse_alternate_scroll_enabled(&self) -> bool {
-        unsafe { ghostty_terminal_is_mouse_alternate_scroll(self.handle) != 0 }
+        unsafe { ghostty_terminal_is_mouse_alternate_scroll(self.handle) }
     }
 
-    /// Snapshot all input-relevant mode flags into an [`InputOpts`].
-    ///
-    /// Must be called under the terminal mutex. The returned value is
-    /// plain data — no terminal reference is retained. Callers can drop
-    /// the lock immediately after this call and encode outside the lock
-    /// using [`encode_key`] / [`encode_mouse`].
-    pub fn input_opts(&self) -> InputOpts {
-        let raw = unsafe { ghostty_terminal_get_input_opts(self.handle) };
-        InputOpts {
-            cursor_key_application: raw.cursor_key_application != 0,
-            keypad_key_application: raw.keypad_key_application != 0,
-            ignore_keypad_with_numlock: raw.ignore_keypad_with_numlock != 0,
-            alt_esc_prefix: raw.alt_esc_prefix != 0,
-            modify_other_keys_state_2: raw.modify_other_keys_state_2 != 0,
-            kitty_flags: raw.kitty_flags,
-            mouse_event: MouseMode::from_raw(raw.mouse_event),
-            mouse_format: MouseFormat::from_raw(raw.mouse_format),
-            bracketed_paste: raw.bracketed_paste != 0,
-            focus_event_mode: raw.focus_event_mode != 0,
-        }
-    }
-
-    // --- Viewport scroll (mutating, &mut self) ---
+    // --- Viewport scroll (mutating terminal state, `&self`) ---
 
     /// Scroll the viewport by delta rows.
     /// Negative = up (towards history), positive = down.
-    pub fn scroll_viewport(&mut self, delta: i32) {
+    /// Locks internally.
+    pub fn scroll_viewport(&self, delta: i32) {
         unsafe { ghostty_terminal_scroll_viewport(self.handle, delta) }
     }
 
     /// Scroll the viewport to the top of scrollback.
-    pub fn scroll_to_top(&mut self) {
+    /// Locks internally.
+    pub fn scroll_to_top(&self) {
         unsafe { ghostty_terminal_scroll_viewport_top(self.handle) }
     }
 
     /// Scroll the viewport to the bottom (active area).
-    pub fn scroll_to_bottom(&mut self) {
+    /// Locks internally.
+    pub fn scroll_to_bottom(&self) {
         unsafe { ghostty_terminal_scroll_viewport_bottom(self.handle) }
     }
 
     /// Scroll viewport to an absolute row offset from the top of scrollback.
-    pub fn scroll_to_row(&mut self, row: u64) {
+    /// Locks internally.
+    pub fn scroll_to_row(&self, row: u64) {
         unsafe { ghostty_terminal_scroll_to_row(self.handle, row) }
     }
 
     /// Read-only - Whether the viewport is at the bottom (active area).
+    /// Locks internally.
     pub fn viewport_is_bottom(&self) -> bool {
-        unsafe { ghostty_terminal_viewport_is_bottom(self.handle) != 0 }
+        unsafe { ghostty_terminal_viewport_is_bottom(self.handle) }
     }
 
     /// Query scrollbar positioning info (total rows, viewport offset, viewport size).
-    /// Read-only - Can be called under the mutex for snapshot coherence.
-    pub fn scrollbar_info(&self) -> ScrollbarInfo {
+    /// This does not lock internally.
+    ///
+    /// SAFETY: The caller must hold the terminal mutex via [`Terminal::lock`].
+    pub unsafe fn scrollbar_info(&self) -> ScrollbarInfo {
         let mut out = ScrollbarInfo::default();
-        unsafe { ghostty_terminal_scrollbar_info(self.handle, &mut out) };
+        let out_ptr = unsafe { NonNull::new_unchecked(&mut out) };
+        unsafe { ghostty_terminal_scrollbar_info(self.handle, out_ptr) };
         out
     }
 
@@ -291,8 +273,9 @@ impl Terminal {
 
     /// Set a selection in viewport coordinates (0-indexed).
     /// Returns `true` on success.
+    /// Locks internally.
     pub fn set_selection(
-        &mut self,
+        &self,
         start_x: u16,
         start_y: u32,
         end_x: u16,
@@ -315,7 +298,8 @@ impl Terminal {
     /// Select the word at viewport coordinates (0-indexed) using Ghostty's
     /// terminal-side word selection semantics.
     /// Returns `true` if a selection was created.
-    pub fn select_word_at(&mut self, x: u16, y: u32) -> bool {
+    /// Locks internally.
+    pub fn select_word_at(&self, x: u16, y: u32) -> bool {
         let rc = unsafe { ghostty_terminal_select_word_at(self.handle, x, y) };
         rc == 0
     }
@@ -323,7 +307,8 @@ impl Terminal {
     /// Select the (soft-wrapped) line at viewport coordinates (0-indexed)
     /// using Ghostty's terminal-side line selection semantics.
     /// Returns `true` if a selection was created.
-    pub fn select_line_at(&mut self, x: u16, y: u32) -> bool {
+    /// Locks internally.
+    pub fn select_line_at(&self, x: u16, y: u32) -> bool {
         let rc = unsafe { ghostty_terminal_select_line_at(self.handle, x, y) };
         rc == 0
     }
@@ -331,7 +316,8 @@ impl Terminal {
     /// Select shell output at viewport coordinates (0-indexed) using
     /// Ghostty's semantic prompt integration.
     /// Returns `true` if a selection was created.
-    pub fn select_output_at(&mut self, x: u16, y: u32) -> bool {
+    /// Locks internally.
+    pub fn select_output_at(&self, x: u16, y: u32) -> bool {
         let rc = unsafe { ghostty_terminal_select_output_at(self.handle, x, y) };
         rc == 0
     }
@@ -339,13 +325,8 @@ impl Terminal {
     /// Update selection during a double-click drag using Ghostty terminal
     /// semantics (`selectWordBetween`).
     /// Returns `true` if a selection was produced.
-    pub fn select_word_drag(
-        &mut self,
-        click_x: u16,
-        click_y: u32,
-        drag_x: u16,
-        drag_y: u32,
-    ) -> bool {
+    /// Locks internally.
+    pub fn select_word_drag(&self, click_x: u16, click_y: u32, drag_x: u16, drag_y: u32) -> bool {
         let rc = unsafe {
             ghostty_terminal_select_word_drag(self.handle, click_x, click_y, drag_x, drag_y)
         };
@@ -355,13 +336,8 @@ impl Terminal {
     /// Update selection during a triple-click drag using Ghostty terminal
     /// semantics (line-wise expansion).
     /// Returns `true` if a selection was produced.
-    pub fn select_line_drag(
-        &mut self,
-        click_x: u16,
-        click_y: u32,
-        drag_x: u16,
-        drag_y: u32,
-    ) -> bool {
+    /// Locks internally.
+    pub fn select_line_drag(&self, click_x: u16, click_y: u32, drag_x: u16, drag_y: u32) -> bool {
         let rc = unsafe {
             ghostty_terminal_select_line_drag(self.handle, click_x, click_y, drag_x, drag_y)
         };
@@ -369,19 +345,27 @@ impl Terminal {
     }
 
     /// Clear any active selection.
-    pub fn clear_selection(&mut self) {
+    /// Locks internally.
+    pub fn clear_selection(&self) {
         unsafe { ghostty_terminal_clear_selection(self.handle) }
     }
 
     /// Get the currently selected text. Returns `None` if no selection.
     /// The returned `SelectionText` frees its memory on drop.
+    /// Locks internally.
     pub fn selection_text(&self) -> Option<SelectionText> {
         let mut len: usize = 0;
-        let ptr = unsafe { ghostty_terminal_get_selection_text(self.handle, &mut len) };
+        let len_ptr = unsafe { NonNull::new_unchecked(&mut len) };
+        let ptr = unsafe { ghostty_terminal_get_selection_text(self.handle, len_ptr) };
         if ptr.is_null() {
             return None;
         }
-        Some(SelectionText { ptr, len })
+        let p = unsafe { NonNull::new_unchecked(ptr.cast_mut()) };
+        Some(SelectionText {
+            terminal: self.handle,
+            ptr: p,
+            len,
+        })
     }
 }
 
@@ -395,20 +379,19 @@ impl Drop for Terminal {
 
 /// Detached render state accessor — holds a raw Zig handle pointer.
 ///
-/// Created by `Terminal::render_frame()` which calls `render_update()` and
-/// returns this with the mutex already dropped. The handle pointer is
-/// Zig-allocated and heap-stable.
+/// Created by `Terminal::render_frame()` while the caller holds the terminal
+/// mutex. The handle pointer is Zig-allocated and heap-stable.
 ///
 /// Cell and style data returned by `row_raw()` and `row_styles()` are
 /// zero-copy slices into RenderState memory. These pointers are stable
 /// from the moment `render_frame()` returns until the next `render_update()`.
 /// Thus, it is stable for the entire frame (when frame drops, dirty flags clear).
 ///
-/// This detached design allows the mutex to be dropped immediately after
-/// `render_update()`, so the read thread can call `feed()` without blocking
-/// on text run building or cursor generation.
+/// The intended pattern is: lock → `render_frame()` + any other coherent
+/// queries → unlock. This detached design keeps text run building and
+/// present work outside the terminal critical section.
 pub struct RenderFrame {
-    handle: *mut c_void,
+    handle: NonNull<c_void>,
 }
 
 impl RenderFrame {
@@ -419,7 +402,8 @@ impl RenderFrame {
     /// that is stable for the lifetime of this RenderFrame.
     pub fn row_raw(&self, y: u16) -> Option<&[RawCell]> {
         let mut len: u16 = 0;
-        let ptr = unsafe { ghostty_terminal_render_row_raw(self.handle, y, &mut len) };
+        let len_ptr = unsafe { NonNull::new_unchecked(&mut len) };
+        let ptr = unsafe { ghostty_terminal_render_row_raw(self.handle, y, len_ptr) };
         if ptr.is_null() || len == 0 {
             return None;
         }
@@ -436,7 +420,8 @@ impl RenderFrame {
     /// RawCell's style_id != 0 or content_tag is bg_color_*.
     pub fn row_styles(&self, y: u16) -> Option<&[CellStyle]> {
         let mut len: u16 = 0;
-        let ptr = unsafe { ghostty_terminal_render_row_styles(self.handle, y, &mut len) };
+        let len_ptr = unsafe { NonNull::new_unchecked(&mut len) };
+        let ptr = unsafe { ghostty_terminal_render_row_styles(self.handle, y, len_ptr) };
         if ptr.is_null() || len == 0 {
             return None;
         }
@@ -466,7 +451,8 @@ impl RenderFrame {
     /// is stable for the frame lifetime (until the next `render_update()`).
     pub fn row_graphemes(&self, row: u16) -> Option<&[GraphemeSlice]> {
         let mut len: u16 = 0;
-        let ptr = unsafe { ghostty_terminal_render_row_graphemes(self.handle, row, &mut len) };
+        let len_ptr = unsafe { NonNull::new_unchecked(&mut len) };
+        let ptr = unsafe { ghostty_terminal_render_row_graphemes(self.handle, row, len_ptr) };
         if ptr.is_null() || len == 0 {
             return None;
         }
@@ -497,7 +483,7 @@ impl RenderFrame {
     /// Whether a specific row has changed since last clear.
     #[inline(always)]
     pub fn row_dirty(&self, y: u16) -> bool {
-        unsafe { ghostty_terminal_render_row_dirty(self.handle, y) != 0 }
+        unsafe { ghostty_terminal_render_row_dirty(self.handle, y) }
     }
 
     /// Get selection range for a row. Returns `Some((start_x, end_x))` if
@@ -505,20 +491,19 @@ impl RenderFrame {
     pub fn row_selection(&self, y: u16) -> Option<(u16, u16)> {
         let mut start_x: u16 = 0;
         let mut end_x: u16 = 0;
-        let has = unsafe {
-            ghostty_terminal_render_row_selection(self.handle, y, &mut start_x, &mut end_x)
-        };
-        if has != 0 {
-            Some((start_x, end_x))
-        } else {
-            None
-        }
+
+        let start_ptr = unsafe { NonNull::new_unchecked(&mut start_x) };
+        let end_ptr = unsafe { NonNull::new_unchecked(&mut end_x) };
+        let has =
+            unsafe { ghostty_terminal_render_row_selection(self.handle, y, start_ptr, end_ptr) };
+        if has { Some((start_x, end_x)) } else { None }
     }
 
     /// Current cursor state.
     pub fn cursor(&self) -> CursorState {
         let mut out = CursorState::default();
-        unsafe { ghostty_terminal_render_cursor(self.handle, &mut out) };
+        let out_ptr = unsafe { NonNull::new_unchecked(&mut out) };
+        unsafe { ghostty_terminal_render_cursor(self.handle, out_ptr) };
         out
     }
 
@@ -538,9 +523,18 @@ impl Drop for RenderFrame {
     }
 }
 
+impl Drop for CallbackHandle {
+    fn drop(&mut self) {
+        unsafe {
+            ghostty_terminal_set_callbacks(self.terminal, std::ptr::null_mut(), None, None, None);
+        }
+    }
+}
+
 /// Owned selection text. Frees the underlying Zig-allocated buffer on drop.
 pub struct SelectionText {
-    ptr: *const u8,
+    terminal: NonNull<c_void>,
+    ptr: NonNull<u8>,
     len: usize,
 }
 
@@ -549,7 +543,9 @@ impl SelectionText {
     pub fn as_str(&self) -> &str {
         // Safety: Ghostty produces valid UTF-8 selection text (stores
         // codepoints internally and serializes via std.unicode.utf8Encode).
-        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.ptr, self.len)) }
+        unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.ptr.as_ptr(), self.len))
+        }
     }
 }
 
@@ -570,135 +566,6 @@ impl Debug for SelectionText {
 
 impl Drop for SelectionText {
     fn drop(&mut self) {
-        unsafe { ghostty_terminal_bytes_free(self.ptr, self.len) }
+        unsafe { ghostty_terminal_bytes_free(self.terminal, self.ptr, self.len) }
     }
-}
-
-/// Snapshot of all terminal input mode flags.
-///
-/// Captured once under the terminal mutex via [`Terminal::input_opts()`].
-/// Encoding functions take this by value — all encoding work is lock-free.
-///
-/// This is a throwaway created fresh per input event, never stored.
-#[derive(Clone, Copy, Debug)]
-pub struct InputOpts {
-    // Key encoding — mirrors key_encode.Options fields
-    pub cursor_key_application: bool,
-    pub keypad_key_application: bool,
-    pub ignore_keypad_with_numlock: bool,
-    pub alt_esc_prefix: bool,
-    pub modify_other_keys_state_2: bool,
-    /// Kitty keyboard protocol flags (packed u5, widened to u8).
-    pub kitty_flags: u8,
-    // Mouse encoding
-    pub mouse_event: MouseMode,
-    pub mouse_format: MouseFormat,
-    // Other
-    pub bracketed_paste: bool,
-    pub focus_event_mode: bool,
-}
-
-impl InputOpts {
-    fn to_c(self) -> InputOptsC {
-        InputOptsC {
-            cursor_key_application: self.cursor_key_application as u8,
-            keypad_key_application: self.keypad_key_application as u8,
-            ignore_keypad_with_numlock: self.ignore_keypad_with_numlock as u8,
-            alt_esc_prefix: self.alt_esc_prefix as u8,
-            modify_other_keys_state_2: self.modify_other_keys_state_2 as u8,
-            kitty_flags: self.kitty_flags,
-            mouse_event: self.mouse_event.to_raw(),
-            mouse_format: self.mouse_format.to_raw(),
-            bracketed_paste: self.bracketed_paste as u8,
-            focus_event_mode: self.focus_event_mode as u8,
-        }
-    }
-}
-
-/// Encode a key event using a pre-captured [`InputOpts`] snapshot.
-/// No terminal handle or lock needed — pure computation.
-///
-/// Returns the number of bytes written into `buf`, or 0 if the event
-/// produces no terminal output.
-pub fn encode_key(
-    opts: InputOpts,
-    key: i32,
-    mods: u16,
-    action: u8,
-    text: &[u8],
-    unshifted_codepoint: u32,
-    buf: &mut [u8],
-) -> usize {
-    let text_ptr = if text.is_empty() {
-        std::ptr::null()
-    } else {
-        text.as_ptr()
-    };
-    unsafe {
-        ghostty_terminal_encode_key(
-            opts.to_c(),
-            key as c_int,
-            mods,
-            action,
-            text_ptr,
-            text.len(),
-            unshifted_codepoint,
-            buf.as_mut_ptr(),
-            buf.len(),
-        )
-    }
-}
-
-/// Encode a mouse event using a pre-captured [`InputOpts`] snapshot.
-/// No terminal handle or lock needed — pure computation.
-///
-/// Returns the number of bytes written into `buf`, or 0 if mouse
-/// reporting is disabled or the event produces no output.
-pub fn encode_mouse(
-    opts: InputOpts,
-    button: u8,
-    action: u8,
-    mods: u8,
-    x: u16,
-    y: u16,
-    buf: &mut [u8],
-) -> usize {
-    unsafe {
-        ghostty_terminal_encode_mouse(
-            opts.to_c(),
-            button,
-            action,
-            mods,
-            x,
-            y,
-            buf.as_mut_ptr(),
-            buf.len(),
-        )
-    }
-}
-
-/// Encode paste bytes using Ghostty's paste encoder.
-/// Returns the number of bytes written into `buf`.
-pub fn encode_paste(opts: InputOpts, text: &[u8], buf: &mut [u8]) -> usize {
-    unsafe {
-        ghostty_terminal_encode_paste(
-            opts.to_c(),
-            text.as_ptr(),
-            text.len(),
-            buf.as_mut_ptr(),
-            buf.len(),
-        )
-    }
-}
-
-/// Resolve a W3C key code string to a Ghostty Key enum value (c_int).
-/// Returns `None` if the code is unrecognized.
-///
-/// This is a pure function — it doesn't need a terminal instance.
-/// Thread-safe (no mutable state).
-///
-/// Example W3C codes: "KeyA", "Enter", "ArrowLeft", "F1", "Digit0"
-pub fn key_from_w3c(code: &str) -> Option<i32> {
-    let result = unsafe { ghostty_terminal_key_from_w3c(code.as_ptr(), code.len()) };
-    if result < 0 { None } else { Some(result) }
 }

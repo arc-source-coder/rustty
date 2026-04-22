@@ -3,8 +3,15 @@ use core::ffi::c_void;
 pub(crate) type BellCallback = unsafe extern "C" fn(userdata: *mut c_void);
 pub(crate) type TitleCallback =
     unsafe extern "C" fn(userdata: *mut c_void, ptr: *const u8, len: usize);
-pub(crate) type ResponseCallback =
-    unsafe extern "C" fn(userdata: *mut c_void, ptr: *const u8, len: usize);
+pub(crate) type OutputCallback = unsafe extern "C" fn(userdata: *mut c_void);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TerminalDimensions {
+    pub screen_width_px: u32,
+    pub screen_height_px: u32,
+    pub cell_width_px: u32,
+    pub cell_height_px: u32,
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -329,67 +336,5 @@ impl DirtyState {
 
     pub fn is_dirty(self) -> bool {
         self != DirtyState::Clean
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MouseMode {
-    None,
-    X10,
-    Normal,
-    Button,
-    Any,
-}
-
-impl MouseMode {
-    pub(crate) fn from_raw(value: u8) -> Self {
-        match value {
-            0 => MouseMode::None,
-            1 => MouseMode::X10,
-            2 => MouseMode::Normal,
-            3 => MouseMode::Button,
-            _ => MouseMode::Any,
-        }
-    }
-
-    pub(crate) fn to_raw(self) -> u8 {
-        match self {
-            MouseMode::None => 0,
-            MouseMode::X10 => 1,
-            MouseMode::Normal => 2,
-            MouseMode::Button => 3,
-            MouseMode::Any => 4,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MouseFormat {
-    X10,
-    Utf8,
-    Sgr,
-    Urxvt,
-    SgrPixels,
-}
-
-impl MouseFormat {
-    pub(crate) fn from_raw(value: u8) -> Self {
-        match value {
-            0 => MouseFormat::X10,
-            1 => MouseFormat::Utf8,
-            2 => MouseFormat::Sgr,
-            3 => MouseFormat::Urxvt,
-            _ => MouseFormat::SgrPixels,
-        }
-    }
-
-    pub(crate) fn to_raw(self) -> u8 {
-        match self {
-            MouseFormat::X10 => 0,
-            MouseFormat::Utf8 => 1,
-            MouseFormat::Sgr => 2,
-            MouseFormat::Urxvt => 3,
-            MouseFormat::SgrPixels => 4,
-        }
     }
 }

@@ -704,7 +704,7 @@ impl GlyphPipeline {
             write_buffer(context, &self.globals_buffer, cast_slice(&[globals]))?;
             self.last_globals = Some(globals);
         }
-        self.sync_from_array_lists(context, target, fg_lists, total_instances)?;
+        self.sync_from_array_lists(context, target, fg_lists)?;
 
         unsafe {
             if self.static_state_dirty {
@@ -767,10 +767,7 @@ impl GlyphPipeline {
         context: &ID3D11DeviceContext,
         target: &RenderTarget,
         fg_lists: &[Vec<QuadInstance>],
-        total_instances: usize,
     ) -> Result<()> {
-        #[cfg(debug_assertions)]
-        let mut copied_bytes: usize = 0;
         unsafe {
             let mut mapped = std::mem::zeroed();
             context.Map(
@@ -786,10 +783,6 @@ impl GlyphPipeline {
             let background_bytes = cast_slice(slice::from_ref(&background));
             std::ptr::copy_nonoverlapping(background_bytes.as_ptr(), dst, background_bytes.len());
             dst = dst.add(background_bytes.len());
-            #[cfg(debug_assertions)]
-            {
-                copied_bytes += background_bytes.len();
-            }
             for lane in fg_lists {
                 let lane_slice = lane.as_slice();
                 if lane_slice.is_empty() {
@@ -798,19 +791,8 @@ impl GlyphPipeline {
                 let lane_bytes = cast_slice(lane_slice);
                 std::ptr::copy_nonoverlapping(lane_bytes.as_ptr(), dst, lane_bytes.len());
                 dst = dst.add(lane_bytes.len());
-                #[cfg(debug_assertions)]
-                {
-                    copied_bytes += lane_bytes.len();
-                }
             }
             context.Unmap(&self.instance_buffer, 0);
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            debug_assert_eq!(copied_bytes % size_of::<QuadInstance>(), 0);
-            let copied_instances = copied_bytes / size_of::<QuadInstance>();
-            debug_assert_eq!(copied_instances, total_instances);
         }
 
         Ok(())

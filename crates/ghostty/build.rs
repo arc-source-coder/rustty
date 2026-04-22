@@ -1,28 +1,32 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // zig/ lives at the workspace root, two levels above crates/ghostty/
-    let zig_dir = manifest_dir.join("../../zig");
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("unexpected crate layout");
 
-    println!(
-        "cargo:rerun-if-changed={}",
-        zig_dir.join("build.zig").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        zig_dir.join("build.zig.zon").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        zig_dir.join("lib.zig").display()
-    );
-    emit_rerun_for_zig_sources(&zig_dir);
+    let zig_dir = workspace_root.join("zig");
 
     let ghostty_dir = zig_dir.join("ghostty");
     if !ghostty_dir.exists() {
         panic!("zig/ghostty is missing; run `git submodule update --init --recursive` and retry");
+    }
+
+    let zig_paths: Vec<PathBuf> = vec![
+        workspace_root.join("zig/src"),
+        workspace_root.join("zig/ghostty"),
+        workspace_root.join("zig/ghostty_shim.zig"),
+        workspace_root.join("zig/zconpty_shim.zig"),
+        workspace_root.join("zig/build.zig"),
+        workspace_root.join("zig/build.zig.zon"),
+    ];
+
+    for path in zig_paths {
+        println!("cargo:rerun-if-changed={}", &path.display());
     }
 
     let zig_version = Command::new("zig").arg("version").output().ok();
@@ -30,6 +34,7 @@ fn main() {
         panic!("Zig 0.15.2 is required");
     }
 
+    let zig_target = zig_target();
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let prefix = out_dir.join("zig-out");
 
@@ -37,7 +42,7 @@ fn main() {
         .current_dir(&zig_dir)
         .arg("build")
         .arg("-Doptimize=ReleaseFast")
-        .arg("-Dtarget=x86_64-windows-msvc")
+        .arg(format!("-Dtarget={zig_target}"))
         .arg("--prefix")
         .arg(&prefix)
         .status()
@@ -46,48 +51,22 @@ fn main() {
         panic!("zig build failed");
     }
 
-    // Static library always lands in lib/ on all platforms.
-    // Each Zig dependency (simdutf, highway, utfcpp) is also installed
-    // here by its own build.zig.  Link them all.
     let lib_dir = prefix.join("lib");
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-
-    for entry in std::fs::read_dir(&lib_dir).expect("zig-out/lib/ not found") {
-        let path = entry.expect("failed to read zig-out/lib/").path();
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-        // Match "ghostty_shim.lib", "libghostty_shim.a", etc.
-        let stem = if let Some(s) = name.strip_suffix(".lib") {
-            s
-        } else if let Some(s) = name.strip_prefix("lib").and_then(|s| s.strip_suffix(".a")) {
-            s
-        } else {
-            continue;
-        };
-        println!("cargo:rustc-link-lib=static={stem}");
-    }
+    println!("cargo:rustc-link-lib=static=ghostty_shim");
 }
 
-fn emit_rerun_for_zig_sources(root: &Path) {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
+fn zig_target() -> &'static str {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        panic!("ghostty shim only supports Windows targets");
+    }
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        panic!("ghostty shim only supports MSVC targets");
+    }
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-
-            if path.extension().is_some_and(|ext| ext == "zig") {
-                println!("cargo:rerun-if-changed={}", path.display());
-            }
-        }
+    match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86_64") => "x86_64-windows-msvc",
+        Ok("aarch64") => "aarch64-windows-msvc",
+        arch => panic!("unsupported target arch for ghostty shim: {arch:?}"),
     }
 }

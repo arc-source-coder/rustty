@@ -1,6 +1,11 @@
 # PTY Threading v3: ntdll APC-Based IO
 
 > Supersedes the IOCP/OVERLAPPED model in [11-pty-threading-v2.md](11-pty-threading-v2.md).
+> **IMPORTANT:** This document describes the external-ConPTY transport model.
+> The end-state Windows architecture is superseded by
+> [16-in-process-conpty.md](16-in-process-conpty.md), which removes the pipe/
+> `HPCON` transport boundary. The APC material here remains relevant only where
+> the in-process server still chooses to use ntdll async IO against ConDrv.
 
 ## Motivation
 

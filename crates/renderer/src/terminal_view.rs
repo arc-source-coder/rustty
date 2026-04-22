@@ -4,11 +4,12 @@ use std::rc::Rc;
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle, ElementId, Entity,
     FocusHandle, FocusOutEvent, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
-    Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Point, Render, ScrollWheelEvent, Styled, Subscription, Window, div, px,
+    KeyUpEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, Styled, Subscription,
+    Window, div, px,
 };
 use gpui::{AsyncApp, Task, WeakEntity};
-use terminal::{AppAction, TerminalSession};
+use terminal::{AppAction, MousePosition, TerminalSession};
 use ui::scrollbar::ScrollbarState;
 
 use crate::gpu::{RendererCellMetrics, RendererTextConfig, RendererUiUpdate, TerminalRenderer};
@@ -67,7 +68,7 @@ impl TerminalView {
         let scrollbar = cx.new(|_cx| ScrollbarState::new(session.clone()));
 
         let renderer = {
-            let terminal = session.read(cx).terminal_mutex().clone();
+            let terminal = session.read(cx).terminal().clone();
             let render_config = session.read(cx).render_config().read(cx).clone();
             let (ui_tx, ui_rx) = async_channel::bounded(8);
             let renderer = TerminalRenderer::new(
@@ -164,15 +165,13 @@ impl TerminalView {
         }
     }
 
-    fn pixel_to_cell(
-        &mut self,
-        position: Point<Pixels>,
-        _window: &Window,
+    fn mouse_position(
+        &self,
         cx: &Context<Self>,
-    ) -> Option<(u16, u16)> {
-        // Lazily populate metrics. After first render, this is always Some.
+        position: Point<Pixels>,
+        scale_factor: f32,
+    ) -> Option<MousePosition> {
         let metrics = self.cell_metrics?;
-
         // `event.position` is window-relative; subtract the element's origin
         // (derived from surface bounds) to get a position local to the terminal surface.
         let origin = self
@@ -180,19 +179,24 @@ impl TerminalView {
             .get()
             .map(|b| b.origin)
             .unwrap_or_default();
-        let x_px = f32::from(position.x) - f32::from(origin.x);
-        let y_px = f32::from(position.y) - f32::from(origin.y);
+        let x_px = position.x.as_f32() - f32::from(origin.x);
+        let y_px = position.y.as_f32() - f32::from(origin.y);
         if x_px < 0.0 || y_px < 0.0 {
             return None;
         }
 
         let grid = self.session.read(cx).current_size();
-        if grid.cols == 0 || grid.rows == 0 {
-            return None;
-        }
-        let col = (x_px / metrics.cell_width).floor() as u16;
-        let row = (y_px / metrics.line_height).floor() as u16;
-        Some((col.min(grid.cols - 1), row.min(grid.rows - 1)))
+
+        let col = (x_px / metrics.cell_width).floor() as u32;
+        let row = (y_px / metrics.line_height).floor() as u32;
+
+        Some(MousePosition {
+            // These will never be 0 because all grid construction sites clamp to min 1.
+            x: col.min((grid.cols - 1) as u32),
+            y: row.min((grid.rows - 1) as u32),
+            x_px: x_px * scale_factor,
+            y_px: y_px * scale_factor,
+        })
     }
 
     fn handle_left_mouse_down(
@@ -209,12 +213,12 @@ impl TerminalView {
         }
 
         window.focus(&self.focus_handle, cx);
-        let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
+        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
             return;
         };
 
         let needs_notify = self.session.update(cx, |session, _cx| {
-            session.handle_left_mouse_down((x, y), event.click_count as u8, &event.modifiers)
+            session.handle_left_mouse_down(position, event.click_count as u8, &event.modifiers)
         });
         if needs_notify {
             cx.notify();
@@ -228,11 +232,11 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
-        let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
+        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
             return;
         };
         let needs_notify = self.session.update(cx, |session, _cx| {
-            session.handle_right_mouse_down((x, y), &event.modifiers)
+            session.handle_right_mouse_down(position, &event.modifiers)
         });
         if needs_notify {
             cx.notify();
@@ -246,11 +250,11 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
-        let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
+        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
             return;
         };
         let needs_notify = self.session.update(cx, |session, _cx| {
-            session.handle_middle_mouse_down((x, y), &event.modifiers)
+            session.handle_middle_mouse_down(position, &event.modifiers)
         });
         if needs_notify {
             cx.notify();
@@ -268,9 +272,9 @@ impl TerminalView {
             return;
         }
 
-        let pos = self.pixel_to_cell(event.position, window, cx);
+        let position = self.mouse_position(&cx, event.position, window.scale_factor());
         let needs_notify = self.session.update(cx, |session, _cx| {
-            session.handle_left_mouse_up(pos, &event.modifiers)
+            session.handle_left_mouse_up(position, &event.modifiers)
         });
         if needs_notify {
             cx.notify();
@@ -283,11 +287,11 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pos = self.pixel_to_cell(event.position, window, cx);
+        let position = self.mouse_position(&cx, event.position, window.scale_factor());
         let mut action = None;
         let mut emit = |next| action = Some(next);
         let needs_notify = self.session.update(cx, |session, _cx| {
-            session.handle_right_mouse_up(pos, &event.modifiers, &mut emit)
+            session.handle_right_mouse_up(position, &event.modifiers, &mut emit)
         });
         if let Some(action) = action {
             self.handle_app_action(action, window, cx);
@@ -303,11 +307,11 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
+        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
             return;
         };
         let needs_notify = self.session.update(cx, |session, _cx| {
-            session.handle_middle_mouse_up((x, y), &event.modifiers)
+            session.handle_middle_mouse_up(position, &event.modifiers)
         });
         if needs_notify {
             cx.notify();
@@ -325,16 +329,23 @@ impl TerminalView {
             return;
         }
 
-        let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
+        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
             return;
         };
-        let button = event
-            .pressed_button
-            .and_then(mouse_button_code)
-            .unwrap_or(3);
+
+        // Map GPUI mouse buttons to zconpty / Ghostty mouse buttons.
+        let button: terminal::MouseButton = match event.pressed_button {
+            Some(b) => match b {
+                MouseButton::Left => terminal::MouseButton::Left,
+                MouseButton::Right => terminal::MouseButton::Right,
+                MouseButton::Middle => terminal::MouseButton::Middle,
+                _ => terminal::MouseButton::Unknown,
+            },
+            None => terminal::MouseButton::None,
+        };
 
         let needs_notify = self.session.update(cx, |session, _cx| {
-            session.handle_mouse_move((x, y), button, &event.modifiers)
+            session.handle_mouse_move(position, button, &event.modifiers)
         });
         if needs_notify {
             cx.notify();
@@ -347,7 +358,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((x, y)) = self.pixel_to_cell(event.position, window, cx) else {
+        let Some(position) = self.mouse_position(&cx, event.position, window.scale_factor()) else {
             return;
         };
 
@@ -356,7 +367,7 @@ impl TerminalView {
         let mut action = None;
         let mut emit = |next| action = Some(next);
         let needs_notify = self.session.update(cx, |session, _cx| {
-            session.handle_scroll_wheel((x, y), event.delta, cell_h, &event.modifiers, &mut emit)
+            session.handle_scroll_wheel(position, event.delta, cell_h, &event.modifiers, &mut emit)
         });
         if let Some(action) = action {
             self.handle_app_action(action, window, cx);
@@ -366,15 +377,23 @@ impl TerminalView {
         }
     }
 
-    fn handle_paste(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_paste(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(clipboard) = cx.read_from_clipboard() else {
-            return;
+            return false;
         };
-        let Some(text) = clipboard.text() else { return };
+
+        let Some(text) = clipboard.text() else {
+            // Non-text clipboard payloads (e.g. images) should not be swallowed.
+            // Let Ctrl+V propagate so TUI apps can handle native clipboard paste flows.
+            return false;
+        };
+
         if text.is_empty() {
-            return;
+            return false;
         }
+
         self.session.read(cx).send_paste(&text);
+        true
     }
 
     fn handle_copy(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -450,8 +469,7 @@ impl Render for TerminalView {
 
                 // Intercept paste: Ctrl+V (Windows) or Ctrl+Shift+V (Linux) or Cmd+V (macOS)
                 let is_paste = (mods.control || mods.platform) && key == "v";
-                if is_paste {
-                    this.handle_paste(window, cx);
+                if is_paste && this.handle_paste(window, cx) {
                     return;
                 }
 
@@ -459,10 +477,28 @@ impl Render for TerminalView {
                     return;
                 }
 
+                this.session.read(cx).send_key_down(
+                    &event.keystroke,
+                    event.native_key,
+                    event.is_held,
+                );
+            }))
+            .on_key_up(cx.listener(|this, event: &KeyUpEvent, _window, cx| {
                 this.session
                     .read(cx)
-                    .send_key_event(&event.keystroke, event.is_held);
+                    .send_key_up(&event.keystroke, event.native_key);
             }))
+            .on_modifiers_changed(cx.listener(
+                |this, event: &ModifiersChangedEvent, _window, cx| {
+                    let Some(native_key) = event.changed_native_key else {
+                        return;
+                    };
+
+                    this.session
+                        .read(cx)
+                        .send_modifier_change(&event.modifiers, native_key);
+                },
+            ))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_left_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_left_mouse_up))
             .on_mouse_down(
@@ -482,14 +518,5 @@ impl Render for TerminalView {
             .on_scroll_wheel(cx.listener(Self::handle_scroll_wheel))
             .child(terminal_element)
             .child(self.scrollbar.clone())
-    }
-}
-
-fn mouse_button_code(button: MouseButton) -> Option<u8> {
-    match button {
-        MouseButton::Left => Some(0),
-        MouseButton::Middle => Some(1),
-        MouseButton::Right => Some(2),
-        _ => None,
     }
 }

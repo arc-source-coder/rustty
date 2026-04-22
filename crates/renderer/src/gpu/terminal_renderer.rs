@@ -3,7 +3,7 @@ use async_channel::Sender;
 use crossbeam_channel::unbounded;
 use ghostty::{ScrollbarInfo, Terminal};
 use gpui::{CompositionSlot, CompositionSlotEvent, Pixels, Window};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use terminal::RendererMessage;
 use windows::Win32::{
     Foundation::{CloseHandle, HANDLE},
@@ -68,7 +68,7 @@ impl Drop for TerminalRenderer {
 impl TerminalRenderer {
     pub fn new(
         window: &Window,
-        terminal: Arc<Mutex<Terminal>>,
+        terminal: Arc<Terminal>,
         text_config: RendererTextConfig,
         ui_tx: Sender<RendererUiUpdate>,
     ) -> Result<Self> {

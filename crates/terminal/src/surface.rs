@@ -1,10 +1,11 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
-use ghostty::{MouseMode, Terminal};
+use ghostty::Terminal;
 use gpui::{Modifiers, ScrollDelta};
+use zconpty::{KeyEvent, MouseAction, MouseButton, MouseEvent, MousePosition, key_from_w3c};
 
-use crate::input::{ENCODE_BUF_SIZE, encode_mouse_event};
-use crate::types::{IoMsg, IoThreadNotify, ScrollOp};
+use crate::input::pack_mouse_mods;
+use crate::types::{IoInput, IoMsg, IoThreadNotify, ScrollOp};
 
 #[derive(Debug, Clone)]
 pub enum AppAction {
@@ -19,7 +20,7 @@ enum GestureTarget {
 }
 
 pub struct TerminalSurface {
-    drag_anchor: Option<(u16, u16)>,
+    drag_anchor: Option<MousePosition>,
     left_click_count: u8,
     gesture_target: Option<GestureTarget>,
     pending_scroll_y: f32,
@@ -43,18 +44,13 @@ impl TerminalSurface {
 
     pub fn handle_left_mouse_down(
         &mut self,
-        terminal: &Arc<Mutex<Terminal>>,
+        term: &Arc<Terminal>,
         io_notify: &Arc<IoThreadNotify>,
-        pos: (u16, u16),
+        position: MousePosition,
         click_count: u8,
         mods: &Modifiers,
     ) -> bool {
-        let mouse_reporting = {
-            let term = lock_terminal(terminal);
-            term.input_opts().mouse_event != MouseMode::None
-        };
-
-        let target = if mouse_reporting && !mods.shift {
+        let target = if term.is_mouse_reporting() && !mods.shift {
             GestureTarget::Pty
         } else {
             GestureTarget::HostSelect {
@@ -68,30 +64,36 @@ impl TerminalSurface {
             GestureTarget::Pty => {
                 self.drag_anchor = None;
                 self.left_click_count = 0;
-                Self::send_mouse_event(terminal, io_notify, 0, 0, mods, pos)
+                Self::send_mouse_event(
+                    term,
+                    io_notify,
+                    MouseButton::Left,
+                    MouseAction::Press,
+                    mods,
+                    position,
+                )
             }
             GestureTarget::HostSelect { .. } => {
                 self.left_click_count = click_count;
-                let mut term = lock_terminal(terminal);
                 match click_count {
                     1 => {
                         let had_selection = term.selection_text().is_some();
                         term.clear_selection();
-                        self.drag_anchor = Some(pos);
+                        self.drag_anchor = Some(position);
                         had_selection
                     }
                     2 => {
-                        let selected = term.select_word_at(pos.0, pos.1 as u32);
-                        self.drag_anchor = Some(pos);
+                        let selected = term.select_word_at(position.x as u16, position.y as u32);
+                        self.drag_anchor = Some(position);
                         selected
                     }
                     3 => {
                         let selected = if mods.control || mods.platform {
-                            term.select_output_at(pos.0, pos.1 as u32)
+                            term.select_output_at(position.x as u16, position.y as u32)
                         } else {
-                            term.select_line_at(pos.0, pos.1 as u32)
+                            term.select_line_at(position.x as u16, position.y as u32)
                         };
-                        self.drag_anchor = Some(pos);
+                        self.drag_anchor = Some(position);
                         selected
                     }
                     _ => false,
@@ -102,42 +104,57 @@ impl TerminalSurface {
 
     pub fn handle_right_mouse_down(
         &mut self,
-        terminal: &Arc<Mutex<Terminal>>,
+        terminal: &Arc<Terminal>,
         io_notify: &Arc<IoThreadNotify>,
-        pos: (u16, u16),
+        position: MousePosition,
         mods: &Modifiers,
     ) -> bool {
-        let mouse_reporting = {
-            let term = lock_terminal(terminal);
-            term.input_opts().mouse_event != MouseMode::None
-        };
-        if mouse_reporting && !mods.shift {
-            return Self::send_mouse_event(terminal, io_notify, 2, 0, mods, pos);
+        if terminal.is_mouse_reporting() && !mods.shift {
+            return Self::send_mouse_event(
+                terminal,
+                io_notify,
+                MouseButton::Right,
+                MouseAction::Press,
+                mods,
+                position,
+            );
         }
         false
     }
 
     pub fn handle_middle_mouse_down(
         &mut self,
-        terminal: &Arc<Mutex<Terminal>>,
+        terminal: &Arc<Terminal>,
         io_notify: &Arc<IoThreadNotify>,
-        pos: (u16, u16),
+        position: MousePosition,
         mods: &Modifiers,
     ) -> bool {
-        Self::send_mouse_event(terminal, io_notify, 1, 0, mods, pos)
+        Self::send_mouse_event(
+            terminal,
+            io_notify,
+            MouseButton::Middle,
+            MouseAction::Press,
+            mods,
+            position,
+        )
     }
 
     pub fn handle_left_mouse_up(
         &mut self,
-        terminal: &Arc<Mutex<Terminal>>,
+        terminal: &Arc<Terminal>,
         io_notify: &Arc<IoThreadNotify>,
-        pos: Option<(u16, u16)>,
+        position: Option<MousePosition>,
         mods: &Modifiers,
     ) -> bool {
-        let consumed = match (self.gesture_target, pos) {
-            (Some(GestureTarget::Pty), Some(pos)) => {
-                Self::send_mouse_event(terminal, io_notify, 0, 1, mods, pos)
-            }
+        let consumed = match (self.gesture_target, position) {
+            (Some(GestureTarget::Pty), Some(pos)) => Self::send_mouse_event(
+                terminal,
+                io_notify,
+                MouseButton::Left,
+                MouseAction::Release,
+                mods,
+                pos,
+            ),
             _ => false,
         };
         self.drag_anchor = None;
@@ -148,23 +165,28 @@ impl TerminalSurface {
 
     pub fn handle_right_mouse_up(
         &mut self,
-        terminal: &Arc<Mutex<Terminal>>,
+        terminal: &Arc<Terminal>,
         io_notify: &Arc<IoThreadNotify>,
-        pos: Option<(u16, u16)>,
+        position: Option<MousePosition>,
         mods: &Modifiers,
         emit: &mut dyn FnMut(AppAction),
     ) -> bool {
-        let mouse_reporting = {
-            let term = lock_terminal(terminal);
-            term.input_opts().mouse_event != MouseMode::None
-        };
-
-        if mouse_reporting && !mods.shift {
-            return pos.is_some_and(|p| Self::send_mouse_event(terminal, io_notify, 2, 1, mods, p));
+        if terminal.is_mouse_reporting() && !mods.shift {
+            return position.is_some_and(|pos| {
+                Self::send_mouse_event(
+                    terminal,
+                    io_notify,
+                    MouseButton::Right,
+                    MouseAction::Release,
+                    mods,
+                    pos,
+                )
+            });
         }
 
+        // Locks internally.
         let copied = {
-            let mut term = lock_terminal(terminal);
+            let term = terminal;
             let text = term.selection_text().map(|s| s.as_str().to_owned());
             if text.is_some() {
                 term.clear_selection();
@@ -182,51 +204,81 @@ impl TerminalSurface {
 
     pub fn handle_middle_mouse_up(
         &mut self,
-        terminal: &Arc<Mutex<Terminal>>,
+        terminal: &Arc<Terminal>,
         io_notify: &Arc<IoThreadNotify>,
-        pos: (u16, u16),
+        position: MousePosition,
         mods: &Modifiers,
     ) -> bool {
-        Self::send_mouse_event(terminal, io_notify, 1, 1, mods, pos)
+        Self::send_mouse_event(
+            terminal,
+            io_notify,
+            MouseButton::Middle,
+            MouseAction::Release,
+            mods,
+            position,
+        )
     }
 
     pub fn handle_mouse_move(
         &mut self,
-        terminal: &Arc<Mutex<Terminal>>,
+        term: &Arc<Terminal>,
         io_notify: &Arc<IoThreadNotify>,
-        pos: (u16, u16),
-        pressed_button: u8,
+        position: MousePosition,
+        pressed_button: MouseButton,
         mods: &Modifiers,
     ) -> bool {
         match self.gesture_target {
             Some(GestureTarget::HostSelect { rectangular }) => {
-                if let Some((ax, ay)) = self.drag_anchor {
-                    let mut term = lock_terminal(terminal);
+                // Locks internally.
+                if let Some(pos) = self.drag_anchor {
                     match (rectangular, self.left_click_count) {
                         (false, 2) => {
-                            let _ = term.select_word_drag(ax, ay as u32, pos.0, pos.1 as u32);
+                            let _ = term.select_word_drag(
+                                pos.x as u16,
+                                pos.y,
+                                position.x as u16,
+                                position.y,
+                            );
                         }
                         (false, 3) => {
-                            let _ = term.select_line_drag(ax, ay as u32, pos.0, pos.1 as u32);
+                            let _ = term.select_line_drag(
+                                pos.x as u16,
+                                pos.y,
+                                position.x as u16,
+                                position.y,
+                            );
                         }
                         _ => {
-                            term.set_selection(ax, ay as u32, pos.0, pos.1 as u32, rectangular);
+                            term.set_selection(
+                                pos.x as u16,
+                                pos.y,
+                                position.x as u16,
+                                position.y,
+                                rectangular,
+                            );
                         }
                     }
                     return true;
                 }
                 false
             }
-            _ => Self::send_mouse_event(terminal, io_notify, pressed_button, 2, mods, pos),
+            _ => Self::send_mouse_event(
+                term,
+                io_notify,
+                pressed_button,
+                MouseAction::Move,
+                mods,
+                position,
+            ),
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn handle_scroll_wheel(
         &mut self,
-        terminal: &Arc<Mutex<Terminal>>,
+        terminal: &Arc<Terminal>,
         io_notify: &Arc<IoThreadNotify>,
-        pos: (u16, u16),
+        position: MousePosition,
         delta: ScrollDelta,
         cell_height: f32,
         mods: &Modifiers,
@@ -255,54 +307,50 @@ impl TerminalSurface {
             ScrollDelta::Pixels(pixels) => f32::from(pixels.y) > 0.0,
         };
 
-        let context = {
-            let mut term = lock_terminal(terminal);
-            let opts = term.input_opts();
-            let is_alternate_screen = term.is_alternate_screen();
-            let mouse_alternate_scroll = term.mouse_alternate_scroll_enabled();
-            let mut selection_cleared = false;
+        // Locks internally.
+        let is_mouse_reporting = terminal.is_mouse_reporting();
+        let is_alternate_screen = terminal.is_alternate_screen();
+        let mouse_alternate_scroll = terminal.mouse_alternate_scroll_enabled();
 
-            if (opts.mouse_event != MouseMode::None
-                || (is_alternate_screen && mouse_alternate_scroll))
-                && term.selection_text().is_some()
-            {
-                term.clear_selection();
-                selection_cleared = true;
-            }
+        let mut selection_cleared = false;
 
-            ScrollContext {
-                opts,
-                is_alternate_screen,
-                mouse_alternate_scroll,
-                selection_cleared,
-            }
+        if (is_mouse_reporting || (is_alternate_screen && mouse_alternate_scroll))
+            && terminal.selection_text().is_some()
+        {
+            terminal.clear_selection();
+            selection_cleared = true;
+        }
+
+        let mut notify = selection_cleared;
+        let button = if scroll_up {
+            MouseButton::WheelUp
+        } else {
+            MouseButton::WheelDown
         };
 
-        let mut notify = context.selection_cleared;
-        let button = if scroll_up { 64 } else { 65 };
-
-        if context.opts.mouse_event != MouseMode::None {
+        if is_mouse_reporting {
             for _ in 0..rows {
-                Self::send_mouse_event_with_opts(io_notify, context.opts, button, 0, mods, pos);
+                Self::send_mouse_event(
+                    terminal,
+                    io_notify,
+                    button,
+                    MouseAction::Press,
+                    mods,
+                    position,
+                );
             }
             return notify;
         }
 
-        if context.is_alternate_screen && context.mouse_alternate_scroll {
-            let seq = if context.opts.cursor_key_application {
-                if scroll_up {
-                    b"\x1bOA".as_slice()
-                } else {
-                    b"\x1bOB".as_slice()
-                }
-            } else if scroll_up {
-                b"\x1b[A".as_slice()
+        if is_alternate_screen && mouse_alternate_scroll {
+            let code = if scroll_up {
+                key_from_w3c(b"arrow_up").expect("arrow_up should resolve")
             } else {
-                b"\x1b[B".as_slice()
+                key_from_w3c(b"arrow_down").expect("arrow_down should resolve")
             };
 
             for _ in 0..rows {
-                write_small_to_pty(io_notify, seq);
+                io_notify.send_lossless(IoMsg::Input(IoInput::Key(KeyEvent::press(code))));
             }
             return true;
         }
@@ -318,17 +366,15 @@ impl TerminalSurface {
 
     pub fn handle_scroll_key(
         &mut self,
-        terminal: &Arc<Mutex<Terminal>>,
+        terminal: &Arc<Terminal>,
         io_notify: &Arc<IoThreadNotify>,
         key: &str,
         mods: &Modifiers,
         page_rows: u16,
         emit: &mut dyn FnMut(AppAction),
     ) -> bool {
-        let is_alternate_screen = {
-            let term = lock_terminal(terminal);
-            term.is_alternate_screen()
-        };
+        // Locks internally.
+        let is_alternate_screen = { terminal.is_alternate_screen() };
         let scroll_op = match key {
             k if (k.eq_ignore_ascii_case("pageup") || k.eq_ignore_ascii_case("page_up"))
                 && (mods.shift || !is_alternate_screen) =>
@@ -357,61 +403,26 @@ impl TerminalSurface {
     }
 
     fn send_mouse_event(
-        terminal: &Arc<Mutex<Terminal>>,
+        terminal: &Arc<Terminal>,
         io_notify: &Arc<IoThreadNotify>,
-        button: u8,
-        action: u8,
-        mods: &Modifiers,
-        pos: (u16, u16),
+        button: MouseButton,
+        action: MouseAction,
+        modifiers: &Modifiers,
+        position: MousePosition,
     ) -> bool {
-        let opts = {
-            let term = lock_terminal(terminal);
-            term.input_opts()
-        };
-        Self::send_mouse_event_with_opts(io_notify, opts, button, action, mods, pos)
-    }
-
-    fn send_mouse_event_with_opts(
-        io_notify: &Arc<IoThreadNotify>,
-        opts: ghostty::InputOpts,
-        button: u8,
-        action: u8,
-        mods: &Modifiers,
-        pos: (u16, u16),
-    ) -> bool {
-        let mut buf = [0u8; ENCODE_BUF_SIZE];
-        if let Some(bytes) = encode_mouse_event(
-            opts,
+        if !terminal.is_mouse_reporting() {
+            return false;
+        }
+        let event = MouseEvent {
             button,
             action,
-            mods.shift,
-            mods.alt,
-            mods.control,
-            pos.0,
-            pos.1,
-            &mut buf,
-        ) {
-            write_small_to_pty(io_notify, bytes);
-            true
-        } else {
-            false
-        }
+            mods: pack_mouse_mods(modifiers),
+            position,
+        };
+        io_notify.send_lossless(IoMsg::Input(IoInput::Mouse(event)));
+
+        true
     }
-}
-
-struct ScrollContext {
-    opts: ghostty::InputOpts,
-    is_alternate_screen: bool,
-    mouse_alternate_scroll: bool,
-    selection_cleared: bool,
-}
-
-fn lock_terminal(terminal: &Arc<Mutex<Terminal>>) -> MutexGuard<'_, Terminal> {
-    terminal.lock().expect("terminal mutex poisoned")
-}
-
-fn write_small_to_pty(io_notify: &Arc<IoThreadNotify>, data: &[u8]) {
-    io_notify.try_send_input_small(data);
 }
 
 fn queue_scroll(io_notify: &Arc<IoThreadNotify>, op: ScrollOp) {

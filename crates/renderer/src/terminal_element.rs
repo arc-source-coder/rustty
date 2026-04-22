@@ -4,19 +4,11 @@ use std::rc::Rc;
 use gpui::{
     App, Bounds, CompositionSlot, DefiniteLength, DevicePixels, Element, ElementId, Entity,
     GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, Length,
-    Pixels, Size, Style, Window, point, size,
+    Pixels, Style, Window, point, size,
 };
 use terminal::TerminalSession;
 
 use crate::gpu::RendererCellMetrics;
-
-/// Grid dimensions derived from bounds + cell metrics.
-#[derive(Debug, Clone, Copy)]
-pub struct GridDimensions {
-    pub cols: u16,
-    pub rows: u16,
-    pub metrics: RendererCellMetrics,
-}
 
 /// The layout state produced by prepaint, consumed by paint.
 pub struct LayoutState {
@@ -27,10 +19,8 @@ pub struct LayoutState {
 /// State persisted across frames via with_element_state.
 struct TerminalElementState {
     /// Grid dimensions at last prepaint.
-    last_cols: u16,
-    last_rows: u16,
-    last_cell_width_px: u16,
-    last_cell_height_px: u16,
+    last_cell_width_px: u32,
+    last_cell_height_px: u32,
     last_device_bounds: Bounds<DevicePixels>,
 }
 
@@ -60,21 +50,6 @@ impl TerminalElement {
             bounds_out,
             composition_slot,
             cell_metrics,
-        }
-    }
-
-    /// Compute grid dimensions from available bounds + cell metrics.
-    fn compute_grid(bounds_size: Size<Pixels>, metrics: RendererCellMetrics) -> GridDimensions {
-        let cols = (f32::from(bounds_size.width) / metrics.cell_width)
-            .floor()
-            .max(1.0) as u16;
-        let rows = (f32::from(bounds_size.height) / metrics.line_height)
-            .floor()
-            .max(1.0) as u16;
-        GridDimensions {
-            cols,
-            rows,
-            metrics,
         }
     }
 
@@ -136,7 +111,6 @@ impl Element for TerminalElement {
                 .filter(|m| m.cell_width > 0.0 && m.line_height > 0.0)
                 .unwrap_or_else(|| Self::fallback_metrics(render_config.font_size));
 
-            let grid = Self::compute_grid(bounds.size, metrics);
             let scale_factor = window.scale_factor();
             let device_bounds = Bounds::new(
                 point(
@@ -155,25 +129,28 @@ impl Element for TerminalElement {
                 self.composition_slot.set_bounds(device_bounds);
             }
 
-            let cell_w = metrics.cell_width.max(1.0).round() as u16;
-            let cell_h = metrics.line_height.max(1.0).round() as u16;
+            let cell_w = (metrics.cell_width.max(1.0) * scale_factor).round() as u32;
+            let cell_h = (metrics.line_height.max(1.0) * scale_factor).round() as u32;
 
             let size_changed = prev_state
                 .as_ref()
-                .is_none_or(|s| s.last_cols != grid.cols || s.last_rows != grid.rows);
+                .is_none_or(|s| s.last_device_bounds.size != device_bounds.size);
             let metrics_changed = prev_state
                 .as_ref()
                 .is_none_or(|s| s.last_cell_width_px != cell_w || s.last_cell_height_px != cell_h);
             if size_changed || metrics_changed {
                 session.update(cx, |s, _cx| {
-                    s.request_resize(grid.cols, grid.rows, cell_w, cell_h);
+                    s.request_resize(
+                        device_bounds.size.width.0 as u32,
+                        device_bounds.size.height.0 as u32,
+                        cell_w,
+                        cell_h,
+                    );
                 });
             }
 
             let layout = LayoutState { _hitbox: hitbox };
             let new_state = TerminalElementState {
-                last_cols: grid.cols,
-                last_rows: grid.rows,
                 last_cell_width_px: cell_w,
                 last_cell_height_px: cell_h,
                 last_device_bounds: device_bounds,

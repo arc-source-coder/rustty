@@ -1,12 +1,12 @@
 use std::time::{Duration, Instant};
 
-use terminal::ScrollbarInfo;
 use gpui::{
     App, BorderStyle, Bounds, Context, Corners, CursorStyle, DispatchPhase, Edges, Element,
     ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
     IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     Point, Position, Render, Size, Style, Task, Window, px, quad, relative, size,
 };
+use terminal::ScrollbarInfo;
 use terminal::TerminalSession;
 
 /// Delay before the scrollbar starts fading out after the last scroll event.

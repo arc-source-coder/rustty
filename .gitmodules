@@ -1,3 +1,6 @@
+[submodule "vendor/zconpty"]
+	path = vendor/zconpty
+	url = https://github.com/arc-source-coder/zconpty/
 [submodule "vendor/zed"]
 	path = vendor/zed
 	url = https://github.com/arc-source-coder/zed/
