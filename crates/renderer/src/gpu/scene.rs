@@ -565,10 +565,9 @@ fn add_glyph(
         return Ok(());
     }
 
-    let pen_x = (f32::from(run.offset + cell.x) * cell_metrics.cell_width
-        + f32::from(cell.x_offset))
-        * scale_factor;
-    let pen_y = (baseline_y + f32::from(cell.y_offset)) * scale_factor;
+    let pen_x =
+        (f32::from(run.offset + cell.x) * cell_metrics.cell_width + cell.x_offset) * scale_factor;
+    let pen_y = (baseline_y + cell.y_offset) * scale_factor;
     let origin = [pen_x + cached.offset_x as f32, pen_y + cached.offset_y as f32];
     let size = [cached.width as f32, cached.height as f32];
 

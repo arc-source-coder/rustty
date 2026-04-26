@@ -89,8 +89,8 @@ mod tests {
     fn cell(x: u16, glyph: u32) -> Cell {
         Cell {
             x,
-            x_offset: 0,
-            y_offset: 0,
+            x_offset: 0.0,
+            y_offset: 0.0,
             glyph_index: glyph,
         }
     }

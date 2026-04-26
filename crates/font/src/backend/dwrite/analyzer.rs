@@ -349,8 +349,8 @@ impl DWriteAnalyzer {
             for i in 0..text_len {
                 *cell_ptr.add(i) = Cell {
                     x: cluster_to_cell_x(*codepoints.add(i)),
-                    x_offset: 0,
-                    y_offset: 0,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
                     glyph_index: *glyph_idx_ptr.add(i) as u32,
                 };
                 *adv_ptr.add(i) = cell_width;
@@ -406,12 +406,12 @@ impl DWriteAnalyzer {
                 debug_assert!(glyph_cluster < text_len);
                 *dst_cell.add(glyph_index) = Cell {
                     x: cluster_min_x,
-                    x_offset: off.advance_offset.round() as i16,
+                    x_offset: off.advance_offset,
                     // DirectWrite defines positive ascenderOffset as moving the glyph up.
                     // Our Cell.y_offset follows Ghostty's screen-space convention where
                     // positive Y moves the glyph down when added during rendering, so
                     // we normalize the sign here once at the boundary.
-                    y_offset: (-off.ascender_offset).round() as i16,
+                    y_offset: -off.ascender_offset,
                     glyph_index: *src_idx.add(glyph_index) as u32,
                 };
             }

@@ -151,7 +151,7 @@ impl DWriteGlyphRasterizer {
         font_size: f32,
         scale_factor: f32,
     ) -> Result<RasterizedGlyph> {
-        if let Some(color) = self.rasterize_color(face2, glyph_index, font_size)? {
+        if let Some(color) = self.rasterize_color(face2, glyph_index, font_size, scale_factor)? {
             return Ok(color);
         }
         self.rasterize_grayscale(face2, glyph_index, font_size, scale_factor)
@@ -162,8 +162,11 @@ impl DWriteGlyphRasterizer {
         face2: &IDWriteFontFace2,
         glyph_index: u16,
         font_size: f32,
+        scale_factor: f32,
     ) -> Result<Option<RasterizedGlyph>> {
-        if let Some(bitmap) = self.rasterize_bitmap_color(face2, glyph_index, font_size)? {
+        if let Some(bitmap) =
+            self.rasterize_bitmap_color(face2, glyph_index, font_size, scale_factor)?
+        {
             return Ok(Some(bitmap));
         }
 
@@ -253,11 +256,12 @@ impl DWriteGlyphRasterizer {
         face2: &IDWriteFontFace2,
         glyph_index: u16,
         font_size: f32,
+        scale_factor: f32,
     ) -> Result<Option<RasterizedGlyph>> {
         let Some(face4) = face2.cast::<IDWriteFontFace4>().ok() else {
             return Ok(None);
         };
-        let ppem = font_size.round().max(1.0) as u32;
+        let ppem = (font_size * scale_factor).round().max(1.0) as u32;
         let formats = unsafe { face4.GetGlyphImageFormats(glyph_index, ppem, ppem) }?;
 
         for format in [

@@ -405,7 +405,7 @@ pub struct TextRun {
     pub font_index: FontIndex,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct Cell {
     /// Cell-local X position relative to `TextRun.offset`.
     ///
@@ -416,12 +416,12 @@ pub struct Cell {
     ///
     /// Ghostty reference:
     /// `zig/ghostty/src/font/shape.zig` (`Cell.x_offset`).
-    pub x_offset: i16,
+    pub x_offset: f32,
     /// Additional Y offset applied at render time.
     ///
     /// Ghostty reference:
     /// `zig/ghostty/src/font/shape.zig` (`Cell.y_offset`).
-    pub y_offset: i16,
+    pub y_offset: f32,
     /// Glyph id/index in the mapped font face.
     ///
     /// Ghostty reference:
