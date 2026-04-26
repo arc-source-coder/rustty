@@ -13,6 +13,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_RENDERING_MODE_OUTLINE,
     DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, DWRITE_TEXTURE_ALIASED_1x1, IDWriteFactory2,
     IDWriteFactory4, IDWriteFontFace, IDWriteFontFace2, IDWriteFontFace4, IDWriteGlyphRunAnalysis,
+    IDWriteRenderingParams,
 };
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
@@ -130,17 +131,20 @@ pub struct DWriteGlyphRasterizer {
     factory: IDWriteFactory2,
     factory4: Option<IDWriteFactory4>,
     wic_factory: Option<IWICImagingFactory>,
+    rendering_params: Option<IDWriteRenderingParams>,
 }
 
 impl DWriteGlyphRasterizer {
     pub fn new(factory: IDWriteFactory2) -> Self {
         let factory4 = factory.cast::<IDWriteFactory4>().ok();
+        let rendering_params = unsafe { factory.CreateRenderingParams() }.ok();
         let wic_factory =
             unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }.ok();
         Self {
             factory,
             factory4,
             wic_factory,
+            rendering_params,
         }
     }
 
@@ -512,7 +516,7 @@ impl DWriteGlyphRasterizer {
                 false,
                 DWRITE_OUTLINE_THRESHOLD_ANTIALIASED,
                 DWRITE_MEASURING_MODE_NATURAL,
-                None,
+                self.rendering_params.as_ref(),
                 &mut rendering_mode,
                 &mut grid_fit_mode,
             )?;
