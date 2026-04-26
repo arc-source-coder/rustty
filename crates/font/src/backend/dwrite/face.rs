@@ -8,7 +8,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_GLYPH_IMAGE_FORMATS_JPEG, DWRITE_GLYPH_IMAGE_FORMATS_PNG,
     DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8, DWRITE_GLYPH_IMAGE_FORMATS_SVG,
     DWRITE_GLYPH_IMAGE_FORMATS_TIFF, DWRITE_GLYPH_IMAGE_FORMATS_TRUETYPE, DWRITE_GLYPH_METRICS,
-    DWRITE_GLYPH_OFFSET, DWRITE_GLYPH_RUN, DWRITE_GRID_FIT_MODE_DEFAULT,
+    DWRITE_GLYPH_OFFSET, DWRITE_GLYPH_RUN, DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_MATRIX,
     DWRITE_MEASURING_MODE_NATURAL, DWRITE_OUTLINE_THRESHOLD_ANTIALIASED,
     DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_RENDERING_MODE_OUTLINE,
     DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, DWRITE_TEXTURE_ALIASED_1x1, IDWriteFactory2,
@@ -149,11 +149,12 @@ impl DWriteGlyphRasterizer {
         face2: &IDWriteFontFace2,
         glyph_index: u16,
         font_size: f32,
+        scale_factor: f32,
     ) -> Result<RasterizedGlyph> {
         if let Some(color) = self.rasterize_color(face2, glyph_index, font_size)? {
             return Ok(color);
         }
-        self.rasterize_grayscale(face2, glyph_index, font_size)
+        self.rasterize_grayscale(face2, glyph_index, font_size, scale_factor)
     }
 
     fn rasterize_color(
@@ -387,8 +388,9 @@ impl DWriteGlyphRasterizer {
         face2: &IDWriteFontFace2,
         glyph_index: u16,
         font_size: f32,
+        scale_factor: f32,
     ) -> Result<RasterizedGlyph> {
-        let glyph_analysis = self.create_analysis(face2, glyph_index, font_size)?;
+        let glyph_analysis = self.create_analysis(face2, glyph_index, font_size, scale_factor)?;
         let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1) }?;
         let width = (bounds.right - bounds.left).max(0) as u32;
         let height = (bounds.bottom - bounds.top).max(0) as u32;
@@ -467,6 +469,7 @@ impl DWriteGlyphRasterizer {
         face2: &IDWriteFontFace2,
         glyph_index: u16,
         font_size: f32,
+        scale_factor: f32,
     ) -> Result<IDWriteGlyphRunAnalysis> {
         let face = face2.cast::<IDWriteFontFace>()?;
         let glyph_indices = [glyph_index];
@@ -483,6 +486,17 @@ impl DWriteGlyphRasterizer {
             bidiLevel: 0,
         };
 
+        // Prepare the transform.
+        let scale = scale_factor.max(1.0);
+        let transform = DWRITE_MATRIX {
+            m11: scale,
+            m12: 0.0,
+            m21: 0.0,
+            m22: scale,
+            dx: 0.0,
+            dy: 0.0,
+        };
+
         let mut rendering_mode = DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC;
         let mut grid_fit_mode = DWRITE_GRID_FIT_MODE_DEFAULT;
         unsafe {
@@ -490,7 +504,7 @@ impl DWriteGlyphRasterizer {
                 font_size,
                 96.0,
                 96.0,
-                None,
+                Some(&transform),
                 false,
                 DWRITE_OUTLINE_THRESHOLD_ANTIALIASED,
                 DWRITE_MEASURING_MODE_NATURAL,
@@ -506,7 +520,7 @@ impl DWriteGlyphRasterizer {
         Ok(unsafe {
             self.factory.CreateGlyphRunAnalysis(
                 &glyph_run,
-                None,
+                Some(&transform),
                 rendering_mode,
                 DWRITE_MEASURING_MODE_NATURAL,
                 grid_fit_mode,

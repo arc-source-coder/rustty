@@ -75,7 +75,8 @@ pub struct SharedGrid {
 #[cfg(target_os = "windows")]
 struct DWriteSharedGrid {
     rasterizer: DWriteGlyphRasterizer,
-    raster_em_size: f32,
+    raster_font_size: f32,
+    raster_scale_factor: f32,
     raster_cell_width: f32,
 }
 
@@ -141,7 +142,7 @@ impl SharedGrid {
         factory: &IDWriteFactory6,
         requests: &[StyleVariationRequest<'_>; Style::COUNT],
         metric_config: DWriteGridMetricsConfig,
-        raster_em_size: f32,
+        raster_scale_factor: f32,
         fallback: Option<FontFallbackContext>,
         locale: &str,
     ) -> Result<()> {
@@ -168,14 +169,11 @@ impl SharedGrid {
         }
 
         let factory2 = factory.cast::<IDWriteFactory2>()?;
-        let raster_scale = if metric_config.font_size > 0.0 {
-            raster_em_size / metric_config.font_size
-        } else {
-            1.0
-        };
+        let raster_scale = raster_scale_factor.max(1.0);
         self.dwrite = Some(DWriteSharedGrid {
             rasterizer: DWriteGlyphRasterizer::new(factory2),
-            raster_em_size,
+            raster_font_size: metric_config.font_size,
+            raster_scale_factor: raster_scale,
             raster_cell_width: (metrics.cell_width * raster_scale).round().max(1.0),
         });
         Ok(())
@@ -316,10 +314,12 @@ impl SharedGrid {
                 .glyphs
                 .insert_or_get_existing(key, CachedGlyph::default()));
         };
-        let raster =
-            dwrite
-                .rasterizer
-                .rasterize(&face2, key.glyph_index() as u16, dwrite.raster_em_size)?;
+        let raster = dwrite.rasterizer.rasterize(
+            &face2,
+            key.glyph_index() as u16,
+            dwrite.raster_font_size,
+            dwrite.raster_scale_factor,
+        )?;
         if raster.width == 0 || raster.height == 0 {
             return Ok(inner
                 .glyphs

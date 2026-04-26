@@ -352,7 +352,7 @@ fn build_renderer_text_state(
     let mut grid_config =
         DWriteGridConfig::with_single_family(text_config.font_family.as_ref(), "en-US");
     grid_config.font_size = text_config.font_size.as_f32();
-    grid_config.raster_em_size = text_config.font_size.as_f32() * text_config.scale_factor.max(1.0);
+    grid_config.raster_scale_factor = text_config.scale_factor.max(1.0);
     grid_config.cell_width = text_config.cell_width.as_f32();
     grid_config.line_height = text_config.line_height.as_f32();
     grid_config.baseline = text_config.baseline.as_f32();
