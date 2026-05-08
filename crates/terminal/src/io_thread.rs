@@ -61,7 +61,12 @@ unsafe extern "system" fn io_thread_entry(context: *mut std::ffi::c_void) -> u32
 
     // SAFETY: context comes from Box::into_raw in spawn_suspended.
     let ctx = unsafe { Box::from_raw(context as *mut IoThreadContext) };
-    let mut thread = IoThread::new(ctx.console_session, ctx.terminal, ctx.io_notify, ctx.renderer_wake);
+    let mut thread = IoThread::new(
+        ctx.console_session,
+        ctx.terminal,
+        ctx.io_notify,
+        ctx.renderer_wake,
+    );
     thread.run();
     0
 }

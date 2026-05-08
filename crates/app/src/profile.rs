@@ -2,6 +2,14 @@ use terminal::SpawnConfig;
 
 use crate::types::ProfileId;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileIconKind {
+    PowerShell,
+    CommandPrompt,
+    Linux,
+    Terminal,
+}
+
 /// Semantic shell type — enables UI grouping, icons, and display logic
 /// without parsing the shell_program string.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +49,21 @@ impl Profile {
             name,
             shell_kind,
             spawn_config,
+        }
+    }
+
+    pub fn profile_icon_kind(&self) -> ProfileIconKind {
+        self.shell_kind.profile_icon_kind()
+    }
+}
+
+impl ShellKind {
+    pub fn profile_icon_kind(&self) -> ProfileIconKind {
+        match self {
+            Self::PowerShell | Self::Pwsh => ProfileIconKind::PowerShell,
+            Self::CommandPrompt => ProfileIconKind::CommandPrompt,
+            Self::Wsl { .. } | Self::UnixShell => ProfileIconKind::Linux,
+            Self::Custom => ProfileIconKind::Terminal,
         }
     }
 }

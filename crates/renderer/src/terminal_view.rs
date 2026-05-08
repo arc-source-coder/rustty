@@ -10,7 +10,7 @@ use gpui::{
 };
 use gpui::{AsyncApp, Task, WeakEntity};
 use terminal::{AppAction, MousePosition, TerminalSession};
-use ui::scrollbar::ScrollbarState;
+use ui::scrollbar::{ScrollbarEvent, ScrollbarState};
 
 use crate::gpu::{RendererCellMetrics, RendererTextConfig, RendererUiUpdate, TerminalRenderer};
 use crate::terminal_element::TerminalElement;
@@ -59,7 +59,10 @@ impl TerminalView {
             ElementId::Name(format!("terminal-{}", s.id.as_u64()).into())
         };
 
-        let scrollbar = cx.new(|_cx| ScrollbarState::new(session.clone()));
+        let scrollbar = cx.new(|_cx| ScrollbarState::new());
+        let scrollbar_sub = cx.subscribe(&scrollbar, |this, _scrollbar, event, cx| {
+            this.handle_scrollbar_event(event, cx);
+        });
 
         let renderer = {
             let terminal = session.read(cx).terminal().clone();
@@ -114,7 +117,7 @@ impl TerminalView {
             cell_metrics: None,
             surface_bounds: Rc::new(Cell::new(None)),
             scrollbar,
-            _subscriptions: vec![focus_in_sub, focus_out_sub],
+            _subscriptions: vec![focus_in_sub, focus_out_sub, scrollbar_sub],
             renderer: renderer.0,
             _renderer_update_task: renderer.1,
         }
@@ -132,7 +135,7 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.session.update(cx, |session, _cx| {
+        self.session.update(cx, |session, _session_cx| {
             session.surface_focus_out();
         });
         self.session.read(cx).send_focus_change(false);
@@ -155,6 +158,32 @@ impl TerminalView {
             AppAction::ViewportScrolled => {
                 self.scrollbar
                     .update(cx, |state, cx| state.on_scroll(window, cx));
+            }
+        }
+    }
+
+    fn update_session_with_action(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        update: impl FnOnce(&mut TerminalSession, &mut dyn FnMut(AppAction)) -> bool,
+    ) {
+        let mut action = None;
+        self.session.update(cx, |session, _session_cx| {
+            let mut emit = |next| action = Some(next);
+            update(session, &mut emit);
+        });
+        if let Some(action) = action {
+            self.handle_app_action(action, window, cx);
+        }
+    }
+
+    fn handle_scrollbar_event(&mut self, event: &ScrollbarEvent, cx: &mut Context<Self>) {
+        match event {
+            ScrollbarEvent::ScrollToRow(row) => {
+                self.session.update(cx, |session, _session_cx| {
+                    session.scroll_to_row(*row);
+                });
             }
         }
     }
@@ -212,12 +241,9 @@ impl TerminalView {
             return;
         };
 
-        let needs_notify = self.session.update(cx, |session, _cx| {
+        self.session.update(cx, |session, _session_cx| {
             session.handle_left_mouse_down(position, event.click_count as u8, &event.modifiers)
         });
-        if needs_notify {
-            cx.notify();
-        }
     }
 
     fn handle_right_mouse_down(
@@ -230,12 +256,9 @@ impl TerminalView {
         let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
             return;
         };
-        let needs_notify = self.session.update(cx, |session, _cx| {
+        self.session.update(cx, |session, _session_cx| {
             session.handle_right_mouse_down(position, &event.modifiers)
         });
-        if needs_notify {
-            cx.notify();
-        }
     }
 
     fn handle_middle_mouse_down(
@@ -248,12 +271,9 @@ impl TerminalView {
         let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
             return;
         };
-        let needs_notify = self.session.update(cx, |session, _cx| {
+        self.session.update(cx, |session, _session_cx| {
             session.handle_middle_mouse_down(position, &event.modifiers)
         });
-        if needs_notify {
-            cx.notify();
-        }
     }
 
     fn handle_left_mouse_up(
@@ -268,12 +288,9 @@ impl TerminalView {
         }
 
         let position = self.mouse_position(event.position, window.scale_factor());
-        let needs_notify = self.session.update(cx, |session, _cx| {
+        self.session.update(cx, |session, _session_cx| {
             session.handle_left_mouse_up(position, &event.modifiers)
         });
-        if needs_notify {
-            cx.notify();
-        }
     }
 
     fn handle_right_mouse_up(
@@ -283,17 +300,9 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         let position = self.mouse_position(event.position, window.scale_factor());
-        let mut action = None;
-        let mut emit = |next| action = Some(next);
-        let needs_notify = self.session.update(cx, |session, _cx| {
-            session.handle_right_mouse_up(position, &event.modifiers, &mut emit)
+        self.update_session_with_action(window, cx, |session, emit| {
+            session.handle_right_mouse_up(position, &event.modifiers, emit)
         });
-        if let Some(action) = action {
-            self.handle_app_action(action, window, cx);
-        }
-        if needs_notify {
-            cx.notify();
-        }
     }
 
     fn handle_middle_mouse_up(
@@ -305,12 +314,9 @@ impl TerminalView {
         let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
             return;
         };
-        let needs_notify = self.session.update(cx, |session, _cx| {
+        self.session.update(cx, |session, _session_cx| {
             session.handle_middle_mouse_up(position, &event.modifiers)
         });
-        if needs_notify {
-            cx.notify();
-        }
     }
 
     fn handle_mouse_move(
@@ -339,12 +345,9 @@ impl TerminalView {
             None => terminal::MouseButton::None,
         };
 
-        let needs_notify = self.session.update(cx, |session, _cx| {
+        self.session.update(cx, |session, _session_cx| {
             session.handle_mouse_move(position, button, &event.modifiers)
         });
-        if needs_notify {
-            cx.notify();
-        }
     }
 
     fn handle_scroll_wheel(
@@ -359,17 +362,9 @@ impl TerminalView {
 
         let cell_h = self.cell_metrics.map(|m| m.line_height).unwrap_or(16.0);
 
-        let mut action = None;
-        let mut emit = |next| action = Some(next);
-        let needs_notify = self.session.update(cx, |session, _cx| {
-            session.handle_scroll_wheel(position, event.delta, cell_h, &event.modifiers, &mut emit)
+        self.update_session_with_action(window, cx, |session, emit| {
+            session.handle_scroll_wheel(position, event.delta, cell_h, &event.modifiers, emit)
         });
-        if let Some(action) = action {
-            self.handle_app_action(action, window, cx);
-        }
-        if needs_notify {
-            cx.notify();
-        }
     }
 
     fn handle_paste(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -392,10 +387,8 @@ impl TerminalView {
     }
 
     fn handle_copy(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.session.read(cx).copy_selection() {
+        if let Some(text) = self.session.read(cx).take_selection_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.session.read(cx).clear_selection();
-            cx.notify();
         }
     }
 

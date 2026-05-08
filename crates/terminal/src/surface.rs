@@ -42,6 +42,14 @@ impl TerminalSurface {
         self.gesture_target = None;
     }
 
+    pub fn take_selection_text(&self, terminal: &Arc<Terminal>) -> Option<String> {
+        let text = terminal.selection_text().map(|s| s.as_str().to_owned());
+        if text.is_some() {
+            terminal.clear_selection();
+        }
+        text
+    }
+
     pub fn handle_left_mouse_down(
         &mut self,
         term: &Arc<Terminal>,
@@ -185,16 +193,7 @@ impl TerminalSurface {
         }
 
         // Locks internally.
-        let copied = {
-            let term = terminal;
-            let text = term.selection_text().map(|s| s.as_str().to_owned());
-            if text.is_some() {
-                term.clear_selection();
-            }
-            text
-        };
-
-        if let Some(text) = copied {
+        if let Some(text) = self.take_selection_text(terminal) {
             emit(AppAction::WriteClipboard(text));
             return true;
         }

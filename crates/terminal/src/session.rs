@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crossbeam_queue::ArrayQueue;
-use gpui::{AsyncApp, Context, Entity, Keystroke, Modifiers, Task, WeakEntity};
+use gpui::{AsyncApp, Context, Entity, EventEmitter, Keystroke, Modifiers, Task, WeakEntity};
 
 use crate::config::{RenderConfig, SpawnConfig};
 use crate::input::{normalize_key_event, normalize_modifier_event};
@@ -33,6 +33,7 @@ pub struct TerminalSession {
     /// Sender for user input and resize commands to the IO thread.
     io_notify: Arc<IoThreadNotify>,
     renderer_wake: Arc<RendererWake>,
+    default_background: ColorRGB,
     metadata: SessionMetadata,
     process_state: ProcessState,
     surface: TerminalSurface,
@@ -40,6 +41,12 @@ pub struct TerminalSession {
     io_thread: Option<PlatformThread>,
     _event_task: Task<()>,
 }
+
+pub enum SessionEvent {
+    TitleChanged,
+}
+
+impl EventEmitter<SessionEvent> for TerminalSession {}
 
 impl TerminalSession {
     pub fn new(
@@ -128,6 +135,7 @@ impl TerminalSession {
             render_config,
             io_notify,
             renderer_wake,
+            default_background: default_bg,
             metadata: SessionMetadata::default(),
             process_state: ProcessState::Running,
             surface: TerminalSurface::new(),
@@ -171,6 +179,23 @@ impl TerminalSession {
         &self.metadata
     }
 
+    pub fn display_title(&self) -> &str {
+        self.metadata
+            .title
+            .as_deref()
+            .unwrap_or(self.spawn_config.shell_program.as_str())
+    }
+
+    // TODO: Wire up actual terminal background.
+    pub fn default_background_rgba(&self) -> u32 {
+        u32::from_be_bytes([
+            self.default_background.r(),
+            self.default_background.g(),
+            self.default_background.b(),
+            0xff,
+        ])
+    }
+
     /// Mark output as read (e.g., when the tab becomes active).
     pub fn mark_output_read(&mut self) {
         self.metadata.has_unread_output = false;
@@ -184,6 +209,7 @@ impl TerminalSession {
             }
             IoEvent::TitleChanged(title) => {
                 self.metadata.title = if title.is_empty() { None } else { Some(title) };
+                cx.emit(SessionEvent::TitleChanged);
             }
             IoEvent::Exited(status) => {
                 self.process_state = ProcessState::Exited(status);
@@ -206,12 +232,20 @@ impl TerminalSession {
             return;
         };
 
+        let mut needs_renderer_wake = false;
+
         if should_clear_selection_on_key_event(&event) && self.terminal.selection_text().is_some() {
             self.terminal.clear_selection();
+            needs_renderer_wake = true;
         }
 
         if should_reveal_key_input(action) && !self.terminal.viewport_is_bottom() {
             self.terminal.scroll_to_bottom();
+            needs_renderer_wake = true;
+        }
+
+        if needs_renderer_wake {
+            self.renderer_wake.wake();
         }
 
         self.io_notify
@@ -239,12 +273,20 @@ impl TerminalSession {
     }
 
     pub fn send_paste(&self, text: &str) {
+        let mut needs_renderer_wake = false;
+
         if self.terminal.selection_text().is_some() {
             self.terminal.clear_selection();
+            needs_renderer_wake = true;
         }
 
         if !self.terminal.viewport_is_bottom() {
             self.terminal.scroll_to_bottom();
+            needs_renderer_wake = true;
+        }
+
+        if needs_renderer_wake {
+            self.renderer_wake.wake();
         }
 
         self.io_notify
@@ -273,21 +315,18 @@ impl TerminalSession {
     pub fn set_selection(&self, start: (u16, u32), end: (u16, u32), rectangular: bool) {
         self.terminal
             .set_selection(start.0, start.1, end.0, end.1, rectangular);
+        self.renderer_wake.wake();
     }
 
-    /// Clear any active terminal selection.
-    /// Locks internally.
-    pub fn clear_selection(&self) {
-        self.terminal.clear_selection();
-    }
-
-    /// Copy the currently selected text. Returns None if no selection is active.
+    /// Copy the current selection and clear it.
     /// Caller is responsible for writing to the clipboard.
     /// Locks internally.
-    pub fn copy_selection(&self) -> Option<String> {
-        self.terminal
-            .selection_text()
-            .map(|s| s.as_str().to_owned())
+    pub fn take_selection_text(&self) -> Option<String> {
+        let text = self.surface.take_selection_text(&self.terminal);
+        if text.is_some() {
+            self.renderer_wake.wake();
+        }
+        text
     }
 
     /// Access the render config.
@@ -321,6 +360,7 @@ impl TerminalSession {
     /// Locks internally.
     pub fn scroll_to_row(&self, row: u64) {
         self.terminal.scroll_to_row(row);
+        self.renderer_wake.wake();
     }
 
     pub fn surface_focus_out(&mut self) {
@@ -333,13 +373,20 @@ impl TerminalSession {
         click_count: u8,
         mods: &Modifiers,
     ) -> bool {
-        self.surface.handle_left_mouse_down(
+        let changed = self.surface.handle_left_mouse_down(
             &self.terminal,
             &self.io_notify,
             position,
             click_count,
             mods,
-        )
+        );
+
+        if !self.terminal.is_mouse_reporting() || mods.shift {
+            if changed {
+                self.renderer_wake.wake();
+            }
+        }
+        changed
     }
 
     pub fn handle_right_mouse_down(&mut self, position: MousePosition, mods: &Modifiers) -> bool {
@@ -367,8 +414,20 @@ impl TerminalSession {
         mods: &Modifiers,
         emit: &mut dyn FnMut(AppAction),
     ) -> bool {
-        self.surface
-            .handle_right_mouse_up(&self.terminal, &self.io_notify, position, mods, emit)
+        let changed = self.surface.handle_right_mouse_up(
+            &self.terminal,
+            &self.io_notify,
+            position,
+            mods,
+            emit,
+        );
+
+        if !self.terminal.is_mouse_reporting() || mods.shift {
+            if changed {
+                self.renderer_wake.wake();
+            }
+        }
+        changed
     }
 
     pub fn handle_middle_mouse_up(&mut self, position: MousePosition, mods: &Modifiers) -> bool {
@@ -382,8 +441,22 @@ impl TerminalSession {
         pressed_button: MouseButton,
         mods: &Modifiers,
     ) -> bool {
-        self.surface
-            .handle_mouse_move(&self.terminal, &self.io_notify, pos, pressed_button, mods)
+        let changed = self.surface.handle_mouse_move(
+            &self.terminal,
+            &self.io_notify,
+            pos,
+            pressed_button,
+            mods,
+        );
+
+        if pressed_button == MouseButton::Left
+            && (!self.terminal.is_mouse_reporting() || mods.shift)
+        {
+            if changed {
+                self.renderer_wake.wake();
+            }
+        }
+        changed
     }
 
     pub fn handle_scroll_wheel(
@@ -462,11 +535,17 @@ fn should_clear_selection_on_key_event(event: &KeyEvent) -> bool {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        self.io_notify.send_lossless(IoMsg::Close);
-
         if let Some(handle) = self.io_thread.take() {
-            let _ = handle.alert();
-            handle.join();
+            let io_notify = self.io_notify.clone();
+            // Since zconpty is in-process v/s external process like conhost/OpenConsole.exe,
+            // spawn a thread to handle closing the console server and IO thread.
+            let builder = std::thread::Builder::new().name("terminal-io-reaper".into());
+            if let Err(err) = builder.spawn(move || {
+                io_notify.send_lossless(IoMsg::Close);
+                handle.join();
+            }) {
+                log::warn!("failed to spawn terminal-io-reaper: {err}");
+            }
         }
     }
 }

@@ -2,8 +2,8 @@ use crossbeam_queue::ArrayQueue;
 pub use ghostty::TerminalDimensions;
 use std::path::PathBuf;
 use std::process::ExitStatus;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use zconpty::{KeyEvent, MouseEvent};
 
 use crate::platform::windows::io::sleep_100ns;
