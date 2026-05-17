@@ -1,6 +1,8 @@
 const std = @import("std");
 const handle_mod = @import("src/handle.zig");
 
+pub const std_options: std.Options = .{ .log_level = .warn };
+
 comptime {
     _ = @import("src/modes.zig");
     _ = @import("src/scroll.zig");
