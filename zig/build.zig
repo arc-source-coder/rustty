@@ -233,6 +233,9 @@ pub fn build(b: *std.Build) !void {
     try configureGhosttyModule(b, zconpty_shim.root_module, ctx);
 
     b.installArtifact(zconpty_shim);
+    if (target.result.os.tag == .windows) {
+        b.installArtifact(zconpty_dep.artifact("wslz"));
+    }
 
     // ---- SIMD dependencies ----
     if (!terminal_options.simd) {

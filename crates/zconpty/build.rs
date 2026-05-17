@@ -1,6 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+fn cargo_profile_dir(out_dir: &Path) -> PathBuf {
+    out_dir
+        .ancestors()
+        .nth(3)
+        .expect("OUT_DIR should be target/<profile>/build/<pkg>/out")
+        .to_path_buf()
+}
+
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
@@ -63,6 +71,16 @@ fn main() {
             lib_dir.display()
         );
     }
+
+    let bin_dir = prefix.join("bin");
+    let wslz = bin_dir.join("wslz.exe");
+    if !wslz.exists() {
+        panic!("wslz.exe was not found at {}", bin_dir.display());
+    }
+
+    let profile_dir = cargo_profile_dir(&out_dir);
+    std::fs::copy(&wslz, profile_dir.join("wslz.exe"))
+        .expect("failed to copy wslz.exe next to final executable");
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static=zconpty_shim");
