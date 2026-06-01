@@ -58,6 +58,15 @@ impl From<W3cCode> for i32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mods(pub u16);
 
+impl Mods {
+    pub const MOD_SHIFT: u16 = 1 << 0;
+    pub const MOD_CTRL: u16 = 1 << 1;
+    pub const MOD_ALT: u16 = 1 << 2;
+    pub const MOD_SUPER: u16 = 1 << 3;
+    pub const MOD_CAPS_LOCK: u16 = 1 << 4;
+    pub const MOD_NUM_LOCK: u16 = 1 << 5;
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyEvent {

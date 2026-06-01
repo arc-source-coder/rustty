@@ -99,7 +99,7 @@ pub(crate) fn normalize_key_event(
     text[..text_len].copy_from_slice(&bytes[..text_len]);
 
     let mods = pack_key_mods(&keystroke.modifiers, native_key);
-    let consumed_mods = compute_consumed_mods(native_key, text_len);
+    let consumed_mods = compute_consumed_mods(&keystroke.modifiers, native_key, text_len);
 
     Some(KeyEvent {
         action: normalize_key_action(action, is_held),
@@ -147,9 +147,18 @@ pub(crate) fn normalize_modifier_event(
     }
 }
 
-fn compute_consumed_mods(native_key: Option<WindowsNativeKey>, text_len: usize) -> Mods {
+fn compute_consumed_mods(
+    modifiers: &gpui::Modifiers,
+    native_key: Option<WindowsNativeKey>,
+    text_len: usize,
+) -> Mods {
     if text_len == 0 {
         return Mods(0);
+    }
+
+    let mut consumed: u16 = 0;
+    if modifiers.shift {
+        consumed |= Mods::MOD_SHIFT;
     }
 
     // AltGr generates text while reporting Ctrl+Alt on Windows.
@@ -159,11 +168,11 @@ fn compute_consumed_mods(native_key: Option<WindowsNativeKey>, text_len: usize) 
         let state = native.control_key_state;
         let ctrl = LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED;
         if (state & RIGHT_ALT_PRESSED) != 0 && (state & ctrl) != 0 {
-            return Mods((1 << 1) | (1 << 2));
+            consumed |= Mods::MOD_CTRL | Mods::MOD_ALT;
         }
     }
 
-    Mods(0)
+    Mods(consumed)
 }
 
 fn normalize_key_action(action: KeyAction, is_held: bool) -> KeyAction {
