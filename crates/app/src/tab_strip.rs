@@ -122,11 +122,7 @@ pub struct TabDragUpdate {
 
 pub fn title_bar_metrics(window: &Window) -> TitleBarMetrics {
     let height = title_bar_height(window);
-    let top_gap = if window.is_maximized() {
-        px(4.)
-    } else {
-        px(8.)
-    };
+    let top_gap = if window.is_maximized() { px(4.) } else { px(8.) };
 
     TitleBarMetrics {
         height,
@@ -245,10 +241,7 @@ pub fn update_tab_drag_state(
     let tab_left_x = layout.positions.get(&dragged_tab_id).copied()?;
     let tab_width = layout.widths.get(&dragged_tab_id).copied()?;
 
-    if dragging
-        .as_ref()
-        .is_none_or(|drag_state| drag_state.tab_id != dragged_tab_id)
-    {
+    if dragging.as_ref().is_none_or(|drag_state| drag_state.tab_id != dragged_tab_id) {
         *dragging = Some(TabDragState {
             tab_id: dragged_tab_id,
             pointer_offset_x: (pointer_x - tab_left_x).clamp(px(0.), tab_width),
@@ -293,11 +286,7 @@ pub fn update_tab_drag_state(
         drag_state.last_reorder_left_x = drag_state.drag_left_x;
     }
 
-    Some(TabDragUpdate {
-        from_index,
-        to_index,
-        should_reorder,
-    })
+    Some(TabDragUpdate { from_index, to_index, should_reorder })
 }
 
 pub fn tab_drag_autoscroll_offset_x(
@@ -438,11 +427,8 @@ pub fn render_tab_visual(
     palette: TitleBarPalette,
     close_button: AnyElement,
 ) -> AnyElement {
-    let paint_width = if is_active {
-        full_width + ACTIVE_TAB_SHOULDER_WIDTH * 2.0
-    } else {
-        full_width
-    };
+    let paint_width =
+        if is_active { full_width + ACTIVE_TAB_SHOULDER_WIDTH * 2.0 } else { full_width };
     let paint_offset_x = if is_active {
         visual_style.surface_offset_x - ACTIVE_TAB_SHOULDER_WIDTH
     } else {
@@ -533,10 +519,7 @@ pub fn render_tab_visual(
 
 pub fn render_tab_close_button(is_active: bool, is_closing: bool) -> Div {
     if is_closing {
-        div()
-            .flex_none()
-            .w(TAB_CLOSE_BUTTON_SIZE)
-            .h(TAB_CLOSE_BUTTON_SIZE)
+        div().flex_none().w(TAB_CLOSE_BUTTON_SIZE).h(TAB_CLOSE_BUTTON_SIZE)
     } else {
         let foreground: Hsla = if is_active {
             rgba(ACTIVE_CLOSE_BUTTON_FOREGROUND).into()
@@ -620,11 +603,7 @@ pub fn tab_scroll_target_offset(
         }
     };
 
-    if (next_x - current_x).abs() < 0.5 {
-        None
-    } else {
-        Some(px(next_x))
-    }
+    if (next_x - current_x).abs() < 0.5 { None } else { Some(px(next_x)) }
 }
 
 pub fn scroll_tab_into_view(
@@ -711,10 +690,7 @@ fn paint_tab_background(
             window.paint_quad(
                 fill(
                     Bounds::new(
-                        point(
-                            bounds.origin.x + INACTIVE_TAB_HOVER_INSET_X,
-                            bounds.origin.y,
-                        ),
+                        point(bounds.origin.x + INACTIVE_TAB_HOVER_INSET_X, bounds.origin.y),
                         size(
                             (bounds.size.width - INACTIVE_TAB_HOVER_INSET_X * 2.0).max(px(0.)),
                             (bounds.size.height - INACTIVE_TAB_HOVER_INSET_BOTTOM).max(px(0.)),
@@ -863,11 +839,7 @@ fn contrast_foreground(background: Hsla) -> Hsla {
     let luminance =
         0.2126 * background_rgba.r + 0.7152 * background_rgba.g + 0.0722 * background_rgba.b;
 
-    if luminance > 0.58 {
-        rgba(0x161616e4).into()
-    } else {
-        rgba(0xfffffff2).into()
-    }
+    if luminance > 0.58 { rgba(0x161616e4).into() } else { rgba(0xfffffff2).into() }
 }
 
 fn blend_color(base: Hsla, overlay: Hsla) -> Hsla {
@@ -888,11 +860,7 @@ fn reorder_offset_x(entry: &TabEntry, now: Instant) -> Pixels {
 pub(crate) fn tab_animation_progress(start: Instant, duration: Duration, now: Instant) -> f32 {
     let elapsed = now.duration_since(start).as_secs_f32();
     let duration_s = duration.as_secs_f32();
-    let raw_progress = if duration_s == 0.0 {
-        1.0
-    } else {
-        (elapsed / duration_s).clamp(0.0, 1.0)
-    };
+    let raw_progress = if duration_s == 0.0 { 1.0 } else { (elapsed / duration_s).clamp(0.0, 1.0) };
 
     quint_ease_out(raw_progress)
 }
@@ -918,10 +886,7 @@ mod tests {
         let long = TabId::new();
         let titles = vec![
             (short, "A".to_string()),
-            (
-                long,
-                "A very long tab title that should not affect width".to_string(),
-            ),
+            (long, "A very long tab title that should not affect width".to_string()),
         ];
 
         let widths = resolve_tab_widths(&titles, px(300.), false);
@@ -952,11 +917,8 @@ mod tests {
         let second = TabId::new();
         let third = TabId::new();
         let tabs = vec![first, second, third];
-        let widths: HashMap<TabId, gpui::Pixels> = tabs
-            .iter()
-            .copied()
-            .map(|tab_id| (tab_id, px(100.)))
-            .collect();
+        let widths: HashMap<TabId, gpui::Pixels> =
+            tabs.iter().copied().map(|tab_id| (tab_id, px(100.))).collect();
 
         let target_index = tab_drag_target_index(&tabs, &widths, second, px(215.), px(4.));
 
@@ -1013,20 +975,13 @@ mod tests {
         let fourth = TabId::new();
         let fifth = TabId::new();
         let tabs = vec![first, second, third, fourth, fifth];
-        let widths: HashMap<TabId, gpui::Pixels> = tabs
-            .iter()
-            .copied()
-            .map(|tab_id| (tab_id, px(100.)))
-            .collect();
+        let widths: HashMap<TabId, gpui::Pixels> =
+            tabs.iter().copied().map(|tab_id| (tab_id, px(100.))).collect();
         let mut positions = tab_layout_positions(&tabs, &widths);
         for position in positions.values_mut() {
             *position += px(4.);
         }
-        let layout = TabDragLayout {
-            widths,
-            positions,
-            padding_left: px(4.),
-        };
+        let layout = TabDragLayout { widths, positions, padding_left: px(4.) };
         let mut dragging = None;
 
         update_tab_drag_state(&tabs, &mut dragging, &layout, second, px(114.), None);

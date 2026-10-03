@@ -222,19 +222,11 @@ impl Workspace {
     }
 
     fn open_tabs(&self) -> Vec<TabId> {
-        self.tabs
-            .iter()
-            .copied()
-            .filter(|tab_id| self.tab_is_selectable(*tab_id))
-            .collect()
+        self.tabs.iter().copied().filter(|tab_id| self.tab_is_selectable(*tab_id)).collect()
     }
 
     fn open_tab_count(&self) -> usize {
-        self.tabs
-            .iter()
-            .copied()
-            .filter(|tab_id| self.tab_is_selectable(*tab_id))
-            .count()
+        self.tabs.iter().copied().filter(|tab_id| self.tab_is_selectable(*tab_id)).count()
     }
 
     fn tab_is_selectable(&self, tab_id: TabId) -> bool {
@@ -268,11 +260,8 @@ impl Workspace {
 
         let pointer_viewport_x = (event.event.position.x - viewport_bounds.left())
             .clamp(px(0.), viewport_bounds.size.width);
-        let scroll_offset_x = if self.tab_strip_is_scrollable {
-            self.tab_scroll_handle.offset().x
-        } else {
-            px(0.)
-        };
+        let scroll_offset_x =
+            if self.tab_strip_is_scrollable { self.tab_scroll_handle.offset().x } else { px(0.) };
         let pointer_content_x = event.event.position.x - viewport_bounds.left() - scroll_offset_x;
 
         let position_changed = self.update_tab_drag_position(dragged_tab_id, pointer_content_x);
@@ -384,10 +373,7 @@ impl Workspace {
         if offset_is_effectively_zero(offset_x) {
             entry.reorder_animation = None;
         } else {
-            entry.reorder_animation = Some(TabReorderAnimation {
-                start: Instant::now(),
-                offset_x,
-            });
+            entry.reorder_animation = Some(TabReorderAnimation { start: Instant::now(), offset_x });
         }
     }
 
@@ -473,10 +459,7 @@ impl Workspace {
             self.dragging = None;
         }
 
-        if self
-            .hovered_tab
-            .is_some_and(|tab_id| !self.tab_entries.contains_key(&tab_id))
-        {
+        if self.hovered_tab.is_some_and(|tab_id| !self.tab_entries.contains_key(&tab_id)) {
             self.hovered_tab = None;
         }
 
@@ -516,13 +499,11 @@ impl Workspace {
         let current_offset = self.tab_scroll_handle.offset();
 
         if progress >= 1.0 || offset_is_effectively_zero(next_x - target_x) {
-            self.tab_scroll_handle
-                .set_offset(gpui::point(target_x, current_offset.y));
+            self.tab_scroll_handle.set_offset(gpui::point(target_x, current_offset.y));
             self.tab_scroll_animation = None;
             false
         } else {
-            self.tab_scroll_handle
-                .set_offset(gpui::point(next_x, current_offset.y));
+            self.tab_scroll_handle.set_offset(gpui::point(next_x, current_offset.y));
             true
         }
     }
@@ -554,8 +535,7 @@ impl Workspace {
             return false;
         };
 
-        self.tab_scroll_handle
-            .set_offset(gpui::point(next_offset_x, current_offset.y));
+        self.tab_scroll_handle.set_offset(gpui::point(next_offset_x, current_offset.y));
         let pointer_content_x = pointer_viewport_x - next_offset_x;
         self.update_tab_drag_position(dragged_tab_id, pointer_content_x);
         true
@@ -584,10 +564,7 @@ impl Workspace {
         let mut previous_widths = self.tab_widths_with_animations(&previous_target_widths, now);
         let new_tab_id = TabId::new();
         let entry = self.build_terminal_tab(
-            TabAnimationPhase::Opening {
-                start: now,
-                duration: TAB_OPEN_DURATION,
-            },
+            TabAnimationPhase::Opening { start: now, duration: TAB_OPEN_DURATION },
             window,
             cx,
         );
@@ -605,10 +582,7 @@ impl Workspace {
             TAB_OPEN_FAST_DURATION
         };
         if let Some(entry) = self.tab_entries.get_mut(&new_tab_id) {
-            entry.phase = TabAnimationPhase::Opening {
-                start: now,
-                duration,
-            };
+            entry.phase = TabAnimationPhase::Opening { start: now, duration };
         }
         self.start_tab_layout_animation(previous_widths, target_widths, duration, now);
 
@@ -662,10 +636,7 @@ impl Workspace {
         }
 
         let was_active = self.active_tab == tab_id;
-        let closing_title = self
-            .tab_entries
-            .get(&tab_id)
-            .map(|entry| self.tab_title(entry, cx));
+        let closing_title = self.tab_entries.get(&tab_id).map(|entry| self.tab_title(entry, cx));
         let now = Instant::now();
         let previous_target_widths = self.resolve_selectable_tab_widths(window, cx);
         let previous_widths = self.tab_widths_with_animations(&previous_target_widths, now);
@@ -674,20 +645,14 @@ impl Workspace {
                 tab_entry.title_fallback = title;
             }
             tab_entry.live_content = None;
-            tab_entry.phase = TabAnimationPhase::Closing {
-                start: now,
-                duration: TAB_CLOSE_DURATION,
-            };
+            tab_entry.phase =
+                TabAnimationPhase::Closing { start: now, duration: TAB_CLOSE_DURATION };
         }
         let mut target_widths = self.resolve_selectable_tab_widths(window, cx);
         target_widths.insert(tab_id, px(0.));
         self.start_tab_layout_animation(previous_widths, target_widths, TAB_CLOSE_DURATION, now);
 
-        if self
-            .dragging
-            .as_ref()
-            .is_some_and(|drag_state| drag_state.tab_id == tab_id)
-        {
+        if self.dragging.as_ref().is_some_and(|drag_state| drag_state.tab_id == tab_id) {
             self.dragging = None;
         }
 
@@ -761,10 +726,7 @@ impl Workspace {
             if offset_is_effectively_zero(offset_x) {
                 entry.reorder_animation = None;
             } else {
-                entry.reorder_animation = Some(TabReorderAnimation {
-                    start: now,
-                    offset_x,
-                });
+                entry.reorder_animation = Some(TabReorderAnimation { start: now, offset_x });
             }
         }
     }
@@ -775,9 +737,7 @@ impl Workspace {
             .copied()
             .filter(|tab_id| self.tab_is_selectable(*tab_id))
             .filter_map(|tab_id| {
-                self.tab_entries
-                    .get(&tab_id)
-                    .map(|entry| (tab_id, self.tab_title(entry, cx)))
+                self.tab_entries.get(&tab_id).map(|entry| (tab_id, self.tab_title(entry, cx)))
             })
             .collect()
     }
@@ -812,14 +772,9 @@ impl Workspace {
                 continue;
             }
 
-            let previous_width = previous_widths
-                .get(&tab_id)
-                .copied()
-                .unwrap_or(TAB_FALLBACK_WIDTH);
-            let target_width = target_widths
-                .get(&tab_id)
-                .copied()
-                .unwrap_or(TAB_FALLBACK_WIDTH);
+            let previous_width =
+                previous_widths.get(&tab_id).copied().unwrap_or(TAB_FALLBACK_WIDTH);
+            let target_width = target_widths.get(&tab_id).copied().unwrap_or(TAB_FALLBACK_WIDTH);
             if !offset_is_effectively_zero(previous_width - target_width) {
                 return true;
             }
@@ -836,34 +791,22 @@ impl Workspace {
         now: Instant,
     ) {
         for (tab_id, target_width) in target_widths {
-            let from_width = previous_widths
-                .get(&tab_id)
-                .copied()
-                .unwrap_or(TAB_FALLBACK_WIDTH);
+            let from_width = previous_widths.get(&tab_id).copied().unwrap_or(TAB_FALLBACK_WIDTH);
 
             if offset_is_effectively_zero(from_width - target_width) {
                 self.tab_layout_animations.remove(&tab_id);
                 continue;
             }
 
-            if self
-                .tab_layout_animations
-                .get(&tab_id)
-                .is_some_and(|animation| {
-                    offset_is_effectively_zero(animation.to_width - target_width)
-                })
-            {
+            if self.tab_layout_animations.get(&tab_id).is_some_and(|animation| {
+                offset_is_effectively_zero(animation.to_width - target_width)
+            }) {
                 continue;
             }
 
             self.tab_layout_animations.insert(
                 tab_id,
-                TabLayoutAnimation {
-                    start: now,
-                    duration,
-                    from_width,
-                    to_width: target_width,
-                },
+                TabLayoutAnimation { start: now, duration, from_width, to_width: target_width },
             );
         }
     }
@@ -978,10 +921,7 @@ impl Workspace {
             return;
         }
 
-        let current = open_tabs
-            .iter()
-            .position(|tab_id| *tab_id == self.active_tab)
-            .unwrap_or(0);
+        let current = open_tabs.iter().position(|tab_id| *tab_id == self.active_tab).unwrap_or(0);
         let next = wrapped_index(current, len, 1);
         self.select_tab_index(next, window, cx);
     }
@@ -993,23 +933,14 @@ impl Workspace {
             return;
         }
 
-        let current = open_tabs
-            .iter()
-            .position(|tab_id| *tab_id == self.active_tab)
-            .unwrap_or(0);
+        let current = open_tabs.iter().position(|tab_id| *tab_id == self.active_tab).unwrap_or(0);
         let previous = wrapped_index(current, len, -1);
         self.select_tab_index(previous, window, cx);
     }
 
     pub fn active_terminal_focus_handle(&self, cx: &App) -> FocusHandle {
-        let entry = self
-            .tab_entries
-            .get(&self.active_tab)
-            .expect("active tab exists");
-        let content = entry
-            .live_content
-            .as_ref()
-            .expect("active tab has live content");
+        let entry = self.tab_entries.get(&self.active_tab).expect("active tab exists");
+        let content = entry.live_content.as_ref().expect("active tab has live content");
         match content {
             TabContent::Terminal { view, .. } => view.read(cx).focus_handle(cx),
         }
@@ -1096,11 +1027,8 @@ impl Render for Workspace {
         );
         let is_scrollable = strip_layout_plan.scrollable;
         self.tab_strip_is_scrollable = is_scrollable;
-        let resolved_widths = resolve_tab_widths(
-            &tab_titles,
-            strip_layout_plan.tabs_available_width,
-            is_scrollable,
-        );
+        let resolved_widths =
+            resolve_tab_widths(&tab_titles, strip_layout_plan.tabs_available_width, is_scrollable);
         let animated_widths = self.tab_widths_with_animations(&resolved_widths, now);
         let tab_slot_widths = self.tab_slot_widths(&animated_widths, now);
         let mut tab_drag_positions = tab_layout_positions(&self.tabs, &tab_slot_widths);
@@ -1114,13 +1042,9 @@ impl Render for Workspace {
         });
 
         let selectable_tabs = self.open_tabs();
-        let active_tab_scroll_index = selectable_tabs
-            .iter()
-            .position(|tab_id| *tab_id == self.active_tab);
-        let active_tab_index = self
-            .tabs
-            .iter()
-            .position(|tab_id| *tab_id == self.active_tab);
+        let active_tab_scroll_index =
+            selectable_tabs.iter().position(|tab_id| *tab_id == self.active_tab);
+        let active_tab_index = self.tabs.iter().position(|tab_id| *tab_id == self.active_tab);
         let hovered_tab_index = self
             .hovered_tab
             .and_then(|hovered_tab| self.tabs.iter().position(|tab_id| *tab_id == hovered_tab));
@@ -1149,10 +1073,8 @@ impl Render for Workspace {
             self.scroll_active_tab_into_view = keep_scrolling_active_tab;
         }
 
-        let tab_drag_layout = self
-            .tab_drag_layout
-            .as_ref()
-            .expect("tab drag layout was just assigned");
+        let tab_drag_layout =
+            self.tab_drag_layout.as_ref().expect("tab drag layout was just assigned");
         let resolved_widths = &tab_drag_layout.widths;
 
         let scroll_offset_x = self.tab_scroll_handle.offset().x;
@@ -1189,14 +1111,9 @@ impl Render for Workspace {
             let is_hovered = self.hovered_tab == Some(tab_id);
             let is_closing = matches!(entry.phase, TabAnimationPhase::Closing { .. });
             let is_draggable = is_active && matches!(entry.phase, TabAnimationPhase::Open);
-            let is_dragged = self
-                .dragging
-                .as_ref()
-                .is_some_and(|drag_state| drag_state.tab_id == tab_id);
-            let full_width = resolved_widths
-                .get(&tab_id)
-                .copied()
-                .unwrap_or(TAB_FALLBACK_WIDTH);
+            let is_dragged =
+                self.dragging.as_ref().is_some_and(|drag_state| drag_state.tab_id == tab_id);
+            let full_width = resolved_widths.get(&tab_id).copied().unwrap_or(TAB_FALLBACK_WIDTH);
             let visual_style = tab_visual_style(entry, full_width, now);
             let show_separator = self.dragging.is_none()
                 && tab_separator_is_visible(tab_index, active_tab_index, hovered_tab_index);
@@ -1236,9 +1153,7 @@ impl Render for Workspace {
                 ));
 
             let tab_overlay_position = if is_dragged {
-                self.dragging
-                    .as_ref()
-                    .map(|drag_state| drag_state.visual_left_x)
+                self.dragging.as_ref().map(|drag_state| drag_state.visual_left_x)
             } else if is_active && entry.reorder_animation.is_some() {
                 self.tab_drag_layout
                     .as_ref()
@@ -1249,11 +1164,8 @@ impl Render for Workspace {
 
             if let Some(overlay_left_x) = tab_overlay_position {
                 tab_shell = tab_shell.invisible();
-                let overlay_left_x = if is_scrollable {
-                    overlay_left_x + scroll_offset_x
-                } else {
-                    overlay_left_x
-                };
+                let overlay_left_x =
+                    if is_scrollable { overlay_left_x + scroll_offset_x } else { overlay_left_x };
                 let overlay_style = if is_dragged {
                     TabVisualStyle {
                         slot_width: full_width,
@@ -1352,13 +1264,7 @@ impl Render for Workspace {
                             }))
                     });
 
-            div()
-                .flex_none()
-                .h_full()
-                .pr(TAB_SCROLL_BUTTON_GAP)
-                .flex()
-                .items_center()
-                .child(button)
+            div().flex_none().h_full().pr(TAB_SCROLL_BUTTON_GAP).flex().items_center().child(button)
         };
 
         let right_scroll_button = {
@@ -1377,13 +1283,7 @@ impl Render for Workspace {
                             }))
                     });
 
-            div()
-                .flex_none()
-                .h_full()
-                .pl(TAB_SCROLL_BUTTON_GAP)
-                .flex()
-                .items_center()
-                .child(button)
+            div().flex_none().h_full().pl(TAB_SCROLL_BUTTON_GAP).flex().items_center().child(button)
         };
 
         let title_bar_tabs = if is_scrollable {
@@ -1656,11 +1556,7 @@ fn tab_layout_animation_width(animation: TabLayoutAnimation, now: Instant) -> gp
 fn tab_scroll_animation_progress(start: Instant, now: Instant) -> f32 {
     let elapsed = now.duration_since(start).as_secs_f32();
     let duration = TAB_SCROLL_DURATION.as_secs_f32();
-    let progress = if duration == 0.0 {
-        1.0
-    } else {
-        (elapsed / duration).clamp(0.0, 1.0)
-    };
+    let progress = if duration == 0.0 { 1.0 } else { (elapsed / duration).clamp(0.0, 1.0) };
 
     1.0 - (1.0 - progress).powi(5)
 }
@@ -1769,12 +1665,8 @@ mod tests {
             px(360.),
             px(10.),
         ));
-        assert!(tab_drag_autoscroll_edge_reached(
-            px(204.),
-            px(100.),
-            px(-200.),
-            px(360.),
-            px(10.),
-        ));
+        assert!(
+            tab_drag_autoscroll_edge_reached(px(204.), px(100.), px(-200.), px(360.), px(10.),)
+        );
     }
 }
