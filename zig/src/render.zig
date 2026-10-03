@@ -5,6 +5,11 @@ const color = terminal.color;
 
 const TerminalHandle = handle_mod.TerminalHandle;
 
+const RenderStateHandle = struct {
+    alloc: std.mem.Allocator,
+    state: terminal.RenderState = .empty,
+};
+
 /// C/Rust mirror for `?color.RGB`.
 ///
 /// Layout is validated against Zig's optional representation in comptime
@@ -254,59 +259,80 @@ pub const CellStyle = extern struct {
     _pad: [2]u8 = undefined,
 };
 
-/// Update the persistent RenderState from current terminal state.
-/// The caller must already hold the terminal mutex.
+/// Allocate reusable RenderState storage owned by the renderer.
+pub export fn ghostty_render_state_new() callconv(.c) ?*anyopaque {
+    const alloc = std.heap.smp_allocator;
+    const handle = alloc.create(RenderStateHandle) catch return null;
+    handle.* = .{ .alloc = alloc };
+    return @ptrCast(handle);
+}
+
+pub export fn ghostty_render_state_free(ptr: *anyopaque) callconv(.c) void {
+    const handle: *RenderStateHandle = @ptrCast(@alignCast(ptr));
+    const alloc = handle.alloc;
+    handle.state.deinit(alloc);
+    alloc.destroy(handle);
+}
+
+/// Copy terminal-dependent data into RenderState.
+/// The caller must hold the terminal mutex.
 /// Returns 0 on success, 1 on allocation error.
-pub export fn ghostty_terminal_render_update(ptr: *anyopaque) callconv(.c) u8 {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    handle.render_state.update(handle.alloc, &handle.terminal_inst) catch return 1;
+pub export fn ghostty_render_state_begin_update(state_ptr: *anyopaque, terminal_ptr: *anyopaque) callconv(.c) u8 {
+    const state: *RenderStateHandle = @ptrCast(@alignCast(state_ptr));
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr));
+    state.state.beginUpdate(state.alloc, &handle.terminal_inst) catch return 1;
     return 0;
 }
 
-/// Returns dirty state: 0=false, 1=partial, 2=full.
-pub export fn ghostty_terminal_render_dirty(ptr: *anyopaque) callconv(.c) c_int {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    return @intFromEnum(handle.render_state.dirty);
+/// Complete deferred work using only RenderState-owned memory.
+pub export fn ghostty_render_state_end_update(ptr: *anyopaque) callconv(.c) void {
+    const handle: *RenderStateHandle = @ptrCast(@alignCast(ptr));
+    handle.state.endUpdate();
 }
 
-/// Clear the dirty state (call after rendering).
-pub export fn ghostty_terminal_render_clear_dirty(ptr: *anyopaque) callconv(.c) void {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    handle.render_state.dirty = .false;
-    // Also clear per-row dirty flags
-    const row_dirty = handle.render_state.row_data.items(.dirty);
+/// Returns dirty state: 0=false, 1=partial, 2=full.
+pub export fn ghostty_render_state_dirty(ptr: *anyopaque) callconv(.c) c_int {
+    const handle: *RenderStateHandle = @ptrCast(@alignCast(ptr));
+    return @intFromEnum(handle.state.dirty);
+}
+
+/// Clear both global and per-row dirty state after a frame is consumed.
+pub export fn ghostty_render_state_clear_dirty(ptr: *anyopaque) callconv(.c) void {
+    const handle: *RenderStateHandle = @ptrCast(@alignCast(ptr));
+    handle.state.dirty = .false;
+    const row_dirty = handle.state.row_data.items(.dirty);
     @memset(row_dirty, false);
 }
 
 /// Writes the number of rows and columns in the current render state.
-pub export fn ghostty_terminal_get_dimensions(
+pub export fn ghostty_render_state_get_dimensions(
     ptr: *anyopaque,
     // Safety: Rust passes &mut u16 references, which is noalias
     noalias rows: *u16,
     noalias cols: *u16,
 ) callconv(.c) void {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    rows.* = handle.render_state.rows;
-    cols.* = handle.render_state.cols;
+    const handle: *RenderStateHandle = @ptrCast(@alignCast(ptr));
+    rows.* = handle.state.rows;
+    cols.* = handle.state.cols;
 }
 
 /// Returns a pointer to `RenderState.cursor`.
-/// The pointer is valid until the next `render_update()` call.
-pub export fn ghostty_terminal_render_cursor(ptr: *anyopaque) callconv(.c) *const RenderCursor {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    return @ptrCast(&handle.render_state.cursor);
+/// The pointer is valid until the next `begin_update` call.
+pub export fn ghostty_render_state_cursor(ptr: *anyopaque) callconv(.c) *const RenderCursor {
+    const handle: *RenderStateHandle = @ptrCast(@alignCast(ptr));
+    return @ptrCast(&handle.state.cursor);
 }
 
 /// Returns a pointer to `RenderState.colors`
-/// The pointer is valid until the next `render_update()` call.
-pub export fn ghostty_terminal_render_colors(ptr: *anyopaque) callconv(.c) *const RenderColors {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    return @ptrCast(&handle.render_state.colors);
+/// The pointer is valid until the next `begin_update` call.
+pub export fn ghostty_render_state_colors(ptr: *anyopaque) callconv(.c) *const RenderColors {
+    const handle: *RenderStateHandle = @ptrCast(@alignCast(ptr));
+    return @ptrCast(&handle.state.colors);
 }
 
 /// Returns a pointer to the `std.MultiArrayList(Row)` in RenderState.
-/// The returned pointer is valid until the next `render_update()` call.
-pub export fn ghostty_terminal_render_row_data(ptr: *anyopaque) callconv(.c) *const ZigMultiArrayList {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    return @ptrCast(&handle.render_state.row_data);
+/// The returned pointer is valid until the next `begin_update` call.
+pub export fn ghostty_render_state_row_data(ptr: *anyopaque) callconv(.c) *const ZigMultiArrayList {
+    const handle: *RenderStateHandle = @ptrCast(@alignCast(ptr));
+    return @ptrCast(&handle.state.row_data);
 }

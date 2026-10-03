@@ -9,7 +9,9 @@ use font::shaper::Shaper;
 use font::shaper::run_iterator::{RunIterator, RunOptions};
 use font::shared_grid::SharedGrid;
 use font::types::{FontIndex, FontSize, FontStyle, ShapeOptions};
-use ghostty::{CellSize, CellView, ColorRGB, GridSize, ScreenSize, Terminal, TerminalDimensions};
+use ghostty::{
+    CellSize, CellView, ColorRGB, GridSize, RenderState, ScreenSize, Terminal, TerminalDimensions,
+};
 use utils::floats::NotNan;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FACE_TYPE_TRUETYPE, DWRITE_FONT_SIMULATIONS_NONE,
@@ -77,12 +79,11 @@ fn terminal_runs_shape_with_position_independent_hashes() {
         )
         .as_bytes(),
     );
-    let frame = unsafe {
-        terminal.lock();
-        let frame = terminal.render_frame();
-        terminal.unlock();
-        frame
-    };
+    let mut render_state = RenderState::new().unwrap();
+    let frame = terminal
+        .with_lock(|t| t.begin_update(&mut render_state))
+        .unwrap()
+        .finish();
     let rows = frame.render_rows();
     let mut shaper = Shaper::new(ShapeOptions { features: &[] }).unwrap();
 

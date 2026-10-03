@@ -66,6 +66,8 @@ pub export fn ghostty_terminal_get_base16_palette(
     out: *[16]RGB,
 ) callconv(.c) void {
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    const palette: *const [256]RGB = @ptrCast(&handle.render_state.colors.palette);
+    handle.lock();
+    defer handle.unlock();
+    const palette: *const [256]RGB = @ptrCast(&handle.terminal_inst.colors.palette.current);
     out.* = palette[0..16].*;
 }

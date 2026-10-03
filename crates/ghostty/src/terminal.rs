@@ -3,6 +3,7 @@ use utils::asserts::unreachable;
 use crate::zig::RowView;
 use crate::*;
 use core::ffi::c_void;
+use std::{marker::PhantomData, rc::Rc};
 
 /// Events produced by the terminal during `feed()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,23 +79,21 @@ impl Terminal {
         self.handle.as_ptr()
     }
 
-    /// Acquire the Zig-owned terminal mutex.
+    /// Run an operation while holding the terminal mutex.
     ///
-    /// # Safety
-    /// The caller must pair this with [`Terminal::unlock`] on the same
-    /// terminal and must not call methods that lock internally while the mutex is held.
+    /// The [`LockedTerminal`] passed to `f` exposes operations that require a
+    /// coherent view of terminal state. It cannot escape the closure, and the
+    /// mutex is released when the closure returns or unwinds.
+    ///
+    /// Caller must not call methods that lock internally inside the closure.
     #[inline]
-    pub unsafe fn lock(&self) {
+    pub fn with_lock<R>(&self, f: impl for<'lock> FnOnce(&mut LockedTerminal<'lock>) -> R) -> R {
         unsafe { ghostty_terminal_lock(self.handle) };
-    }
-
-    /// Release the Zig-owned terminal mutex.
-    ///
-    /// # Safety
-    /// The caller must currently hold the terminal mutex for this terminal.
-    #[inline]
-    pub unsafe fn unlock(&self) {
-        unsafe { ghostty_terminal_unlock(self.handle) };
+        let mut terminal = LockedTerminal {
+            terminal: self,
+            _not_send_or_sync: PhantomData,
+        };
+        f(&mut terminal)
     }
 
     /// Register bell/title/output callbacks.
@@ -139,31 +138,6 @@ impl Terminal {
     #[inline]
     pub fn resize(&self, dimensions: TerminalDimensions) {
         unsafe { ghostty_terminal_resize(self.handle, dimensions) };
-    }
-
-    /// Update the persistent render state and return a detached frame accessor.
-    ///
-    /// This does not lock internally. Callers must hold the terminal mutex so
-    /// they can gather any other frame-coherent terminal data in the same critical
-    /// section before unlocking.
-    ///
-    /// # Safety
-    /// The caller must hold the terminal mutex via [`Terminal::lock`].
-    /// Callers must still avoid overlapping frames on the same terminal
-    /// because `RenderFrame::drop()` clears shared dirty flags.
-    ///
-    /// The caller must also ensure the terminal outlives the returned frame.
-    #[inline]
-    pub unsafe fn render_frame(&self) -> RenderFrame {
-        // Ignore return: a failed update (allocation error inside Ghostty)
-        // leaves RenderState in its previous valid state. We hand out a
-        // frame over stale-but-consistent data rather than crashing or
-        // skipping the frame. The dirty flags are unchanged, so the next
-        // successful update will re-render the affected rows.
-        unsafe { ghostty_terminal_render_update(self.handle) };
-        RenderFrame {
-            handle: self.handle,
-        }
     }
 
     // --- Mode flag queries (read-only, &self) ---
@@ -233,16 +207,6 @@ impl Terminal {
     #[inline]
     pub fn viewport_is_bottom(&self) -> bool {
         unsafe { ghostty_terminal_viewport_is_bottom(self.handle) }
-    }
-
-    /// Query scrollbar positioning info (total rows, viewport offset, viewport size).
-    /// This does not lock internally.
-    ///
-    /// # Safety
-    /// The caller must hold the terminal mutex via [`Terminal::lock`].
-    #[inline]
-    pub unsafe fn scrollbar_info(&self) -> ScrollbarInfo {
-        unsafe { ghostty_terminal_scrollbar_info(self.handle) }
     }
 
     // --- Selection (send/reset mutate, text read is &self) ---
@@ -323,33 +287,120 @@ impl Drop for Terminal {
     }
 }
 
-/// Detached render state accessor — holds a raw Zig handle pointer.
+/// Scoped access to terminal operations that require its mutex to be held.
 ///
-/// Created by `Terminal::render_frame()` while the caller holds the terminal
-/// mutex. The handle pointer is Zig-allocated and heap-stable.
+/// Created only by [`Terminal::with_lock`]. The guard is neither sendable nor
+/// shareable, so the terminal is always unlocked on the thread that locked it.
+pub struct LockedTerminal<'a> {
+    terminal: &'a Terminal,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl LockedTerminal<'_> {
+    /// Copy terminal-dependent data into `state` and begin a frame update.
+    ///
+    /// The returned update no longer accesses the terminal, so it may be
+    /// completed after [`Terminal::with_lock`] releases the mutex.
+    #[inline]
+    pub fn begin_update<'a>(
+        &mut self,
+        state: &'a mut RenderState,
+    ) -> Result<PendingUpdate<'a>, RenderUpdateError> {
+        match unsafe { ghostty_render_state_begin_update(state.handle, self.terminal.handle) } {
+            0 => Ok(PendingUpdate { state: Some(state) }),
+            1 => Err(RenderUpdateError::OutOfMemory),
+            _ => unreachable(),
+        }
+    }
+
+    /// Query scrollbar positioning coherently with the frame update.
+    #[inline]
+    pub fn scrollbar_info(&mut self) -> ScrollbarInfo {
+        unsafe { ghostty_terminal_scrollbar_info(self.terminal.handle) }
+    }
+}
+
+impl Drop for LockedTerminal<'_> {
+    fn drop(&mut self) {
+        unsafe { ghostty_terminal_unlock(self.terminal.handle) };
+    }
+}
+
+/// Reusable storage for a renderer's snapshot of terminal state.
 ///
-/// `render_rows()` exposes a borrowed `RowView`; its cell lists provide
-/// `CellView` access to zero-copy cell and style columns in `RenderState`.
-/// These pointers are stable from the moment `render_frame()` returns
-/// until the next `render_update()`. Thus, it is stable for the entire
-/// frame (when frame drops, dirty flags clear).
+/// A render state is allocated independently from [`Terminal`] and retains its
+/// buffers between updates. [`LockedTerminal::begin_update`] refreshes it from
+/// a terminal, and [`PendingUpdate::finish`] makes the completed snapshot
+/// available as a [`RenderFrame`]. Keeping the storage separate lets frame
+/// processing continue after the terminal mutex has been released.
 ///
-/// The intended pattern is: lock → `render_frame()` + any other coherent
+/// The intended pattern is: lock → `begin_update()` + any other coherent
 /// queries → unlock. This detached design keeps text run building and
 /// present work outside the terminal critical section.
-// NOTE: This will be reworked soon to tie the frame to Terminal, encode the
-// lifetime/update protocol in the type system, and return Result on update failure.
-pub struct RenderFrame {
+pub struct RenderState {
     handle: NonNull<c_void>,
 }
 
-impl RenderFrame {
+impl RenderState {
+    /// Allocate an empty render state for reuse across frames.
+    pub fn new() -> Option<Self> {
+        NonNull::new(unsafe { ghostty_render_state_new() }).map(|handle| Self { handle })
+    }
+}
+
+impl Drop for RenderState {
+    fn drop(&mut self) {
+        unsafe { ghostty_render_state_free(self.handle) };
+    }
+}
+
+/// An update whose terminal-dependent phase has completed.
+///
+/// The render state is not readable until [`PendingUpdate::finish`] completes
+/// Ghostty's deferred work. Dropping this value also completes that work, so a
+/// successful begin is always paired with an end update during unwinding.
+pub struct PendingUpdate<'a> {
+    state: Option<&'a mut RenderState>,
+}
+
+impl<'a> PendingUpdate<'a> {
+    /// Complete deferred work and return a readable frame.
+    #[inline]
+    pub fn finish(mut self) -> RenderFrame<'a> {
+        let state = self.state.take().unwrap();
+        unsafe { ghostty_render_state_end_update(state.handle) };
+        RenderFrame { state }
+    }
+}
+
+impl Drop for PendingUpdate<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            unsafe { ghostty_render_state_end_update(state.handle) };
+        }
+    }
+}
+
+/// A read-only view of one completed render-state update.
+///
+/// Exposes a borrowed `RowView` and `CellView` for zero-copy access into the
+/// columns in `RenderState`. The frame's mutable borrow of [`RenderState`]
+/// keeps its zero-copy views stable and prevents overlapping updates.
+///
+/// Dropping a frame leaves its dirty flags intact; call [`RenderFrame::mark_clean`]
+/// only after successfully consuming them.
+pub struct RenderFrame<'a> {
+    state: &'a mut RenderState,
+}
+
+impl RenderFrame<'_> {
     /// Returns a view into the `std.MultiArrayList(terminal.RenderState.Row)`
     /// in Ghostty's `RenderState`, representing all rows in the viewport.
-    /// The view is valid until the next `render_update()` call.
+    /// The view is valid for this frame's borrow (until the next `begin_update` call).
     #[inline]
     pub fn render_rows(&self) -> RowView<'_> {
-        let rows = unsafe { ghostty_terminal_render_row_data(self.handle) };
+        let rows = unsafe { ghostty_render_state_row_data(self.state.handle) };
         // SAFETY: The header belongs to this frame's RenderState and the frame
         // protocol prohibits another render update while the view is alive.
         RowView::from(unsafe { &*rows })
@@ -358,7 +409,7 @@ impl RenderFrame {
     /// Current dirty state of the render data.
     #[inline]
     pub fn dirty(&self) -> Dirty {
-        match unsafe { ghostty_terminal_render_dirty(self.handle) } {
+        match unsafe { ghostty_render_state_dirty(self.state.handle) } {
             0 => Dirty::Clean,
             1 => Dirty::Partial,
             2 => Dirty::Full,
@@ -370,34 +421,48 @@ impl RenderFrame {
     #[inline]
     pub fn dimensions(&self) -> (u16, u16) {
         let (mut rows, mut cols) = (0, 0);
-        unsafe { ghostty_terminal_get_dimensions(self.handle, &mut rows, &mut cols) };
+        unsafe { ghostty_render_state_get_dimensions(self.state.handle, &mut rows, &mut cols) };
         (rows, cols)
     }
 
     /// Current cursor state from `RenderState`.
-    /// The view is valid until the next `render_update()` call.
+    /// The view is valid for this frame's borrow.
     #[inline]
     pub fn render_cursor(&self) -> &RenderCursor {
-        let ptr = unsafe { ghostty_terminal_render_cursor(self.handle) };
-        // Safety: Pointer is into `RenderState` memory, stable until next render_update().
+        let ptr = unsafe { ghostty_render_state_cursor(self.state.handle) };
+        // Safety: The frame's mutable borrow prevents another render state update.
         unsafe { &*ptr }
     }
 
     /// Current terminal colors (foreground, background, cursor).
     #[inline]
     pub fn colors(&self) -> &RenderColors {
-        let ptr = unsafe { ghostty_terminal_render_colors(self.handle) };
-        // Safety: pointer is into `RenderState` memory, stable until next render_update().
+        let ptr = unsafe { ghostty_render_state_colors(self.state.handle) };
+        // Safety: The frame's mutable borrow prevents another render state update.
         unsafe { &*ptr }
+    }
+
+    /// Mark this frame's global and per-row dirty state as consumed.
+    #[inline]
+    pub fn mark_clean(self) {
+        unsafe { ghostty_render_state_clear_dirty(self.state.handle) };
     }
 }
 
-impl Drop for RenderFrame {
-    #[inline]
-    fn drop(&mut self) {
-        unsafe { ghostty_terminal_render_clear_dirty(self.handle) };
+/// An error encountered while copying terminal data into a render state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenderUpdateError {
+    /// Ghostty could not grow one of the render-state buffers.
+    OutOfMemory,
+}
+
+impl std::fmt::Display for RenderUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Ghostty could not allocate render state")
     }
 }
+
+impl std::error::Error for RenderUpdateError {}
 
 impl Drop for CallbackHandle {
     fn drop(&mut self) {

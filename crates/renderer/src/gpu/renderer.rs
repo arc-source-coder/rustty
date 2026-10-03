@@ -10,7 +10,7 @@ use font::shaper::run_iterator::{RunIterator, RunOptions};
 use ghostty::sprite::{Sprite, SpriteRasterizer};
 use ghostty::{
     BoldColor, CellStyle, CellView, Color, CursorVisualStyle, Dirty, OptionalCursorViewport,
-    OptionalSelection, RawCell, RenderColors, RenderCursor, RenderFrame, ScrollbarInfo, Terminal,
+    OptionalSelection, RawCell, RenderColors, RenderCursor, RenderState, ScrollbarInfo, Terminal,
     UnderlineStyle, Width, ZigMultiArrayList,
 };
 use gpui::ExternalSurfaceState;
@@ -54,6 +54,8 @@ pub struct Renderer {
     rasterizer: Rasterizer,
     force_full_rebuild: bool,
 }
+
+type UpdateResult<T> = Result<T, ghostty::RenderUpdateError>;
 
 struct RendererState {
     metrics: FontMetrics,
@@ -180,19 +182,13 @@ impl Renderer {
         Ok(became_visible || needs_redraw)
     }
 
-    pub fn update_frame(&mut self, cursor_blink_visible: bool) -> Result<()> {
-        let (frame, scrollbar): (RenderFrame, ScrollbarInfo) = unsafe {
-            // SAFETY: `render_frame()` and `scrollbar_info()` require the caller
-            // to hold the Zig-owned terminal mutex. This is the one renderer
-            // path that needs a coherent snapshot across both queries, so we
-            // take the lock explicitly, gather both values, then unlock before
-            // any heavier frame build or present work.
-            self.terminal.lock();
-            let frame = self.terminal.render_frame();
-            let scrollbar = self.terminal.scrollbar_info();
-            self.terminal.unlock();
-            (frame, scrollbar)
-        };
+    pub fn update_frame(&mut self, state: &mut RenderState, blink_visible: bool) -> Result<()> {
+        let (pending, scrollbar) = self.terminal.with_lock(|terminal| -> UpdateResult<_> {
+            let pending = terminal.begin_update(state)?;
+            let scrollbar = terminal.scrollbar_info();
+            Ok((pending, scrollbar))
+        })?;
+        let frame = pending.finish();
 
         if self.state.last_scrollbar != Some(scrollbar) {
             self.state.last_scrollbar = Some(scrollbar);
@@ -235,7 +231,7 @@ impl Renderer {
         let cursor = frame.render_cursor();
         self.state.cursor_blinking =
             cursor.visible && cursor.blinking && cursor.viewport.into_option().is_some();
-        let cursor_style = cursor.effective_style(self.state.focused, cursor_blink_visible);
+        let cursor_style = cursor.effective_style(self.state.focused, blink_visible);
 
         // A full rebuild clears the retained CPU background buffer before rows
         // are rebuilt. Default cells also resolve to zero, so comparisons alone
@@ -315,6 +311,7 @@ impl Renderer {
             self.contents.bg_generation = self.contents.bg_generation.wrapping_add(1);
         }
 
+        frame.mark_clean();
         Ok(())
     }
 

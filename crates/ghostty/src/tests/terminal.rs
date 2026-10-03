@@ -19,29 +19,23 @@ fn terminal(columns: u16, rows: u16) -> Terminal {
     Terminal::new(dimensions, DEFAULT_FG, DEFAULT_BG).expect("failed to create terminal")
 }
 
-fn render_frame(terminal: &Terminal) -> RenderFrame {
-    unsafe {
-        terminal.lock();
-        let frame = terminal.render_frame();
-        terminal.unlock();
-        frame
-    }
+fn render_frame<'a>(terminal: &Terminal, state: &'a mut RenderState) -> RenderFrame<'a> {
+    terminal
+        .with_lock(|t| t.begin_update(state))
+        .expect("failed to update render state")
+        .finish()
 }
 
 fn scrollbar_info(terminal: &Terminal) -> ScrollbarInfo {
-    unsafe {
-        terminal.lock();
-        let info = terminal.scrollbar_info();
-        terminal.unlock();
-        info
-    }
+    terminal.with_lock(|terminal| terminal.scrollbar_info())
 }
 
 #[test]
 fn borrowed_render_rows_preserve_data_and_track_damage() {
     let terminal = terminal(8, 3);
+    let mut render_state = RenderState::new().expect("failed to allocate render state");
     // Clear the initial full damage so feeding text only dirties its row.
-    drop(render_frame(&terminal));
+    render_frame(&terminal, &mut render_state).mark_clean();
 
     terminal.feed(
         concat!(
@@ -52,7 +46,7 @@ fn borrowed_render_rows_preserve_data_and_track_damage() {
         .as_bytes(),
     );
 
-    let frame = render_frame(&terminal);
+    let frame = render_frame(&terminal, &mut render_state);
     assert_eq!(frame.dimensions(), (3, 8));
     assert_eq!(frame.dirty(), Dirty::Partial);
 
@@ -87,19 +81,19 @@ fn borrowed_render_rows_preserve_data_and_track_damage() {
     let cursor = frame.render_cursor();
     assert_eq!(cursor.active, CursorCoordinate { x: 5, y: 0 });
     assert_eq!(cursor.viewport.into_option().unwrap().x, 5);
-    drop(frame);
+    frame.mark_clean();
 
-    let frame = render_frame(&terminal);
+    let frame = render_frame(&terminal, &mut render_state);
     assert_eq!(frame.dirty(), Dirty::Clean);
     assert_eq!(frame.render_rows().dirty_rows(), &[false, false, false]);
-    drop(frame);
+    frame.mark_clean();
 
     // Cursor movement also dirties the row it leaves. Consume that separately
     // so the next frame isolates a text/style update to the second row.
     terminal.feed(b"\x1b[2;1H");
-    drop(render_frame(&terminal));
+    render_frame(&terminal, &mut render_state).mark_clean();
     terminal.feed(b"\x1b[48;2;91;82;73mZ");
-    let frame = render_frame(&terminal);
+    let frame = render_frame(&terminal, &mut render_state);
     assert_eq!(frame.dirty(), Dirty::Partial);
     let rows = frame.render_rows();
     assert_eq!(rows.dirty_rows(), &[false, true, false]);
@@ -116,9 +110,9 @@ fn borrowed_render_rows_preserve_data_and_track_damage() {
     assert_eq!(first.raw_cells()[4].codepoint(), 'e' as u32);
     let grapheme = unsafe { first.graphemes()[4].assume_init_ref().as_slice() }.unwrap();
     assert_eq!(grapheme[0].get(), '\u{301}' as u32);
-    drop(frame);
+    frame.mark_clean();
 
-    let frame = render_frame(&terminal);
+    let frame = render_frame(&terminal, &mut render_state);
     assert_eq!(frame.dirty(), Dirty::Clean);
     assert_eq!(frame.render_rows().dirty_rows(), &[false, false, false]);
 }

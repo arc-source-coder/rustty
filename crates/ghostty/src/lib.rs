@@ -14,7 +14,8 @@ pub use ffi::{
     OptionalCursorViewport, OptionalSelection, RenderColors, RenderCursor, StyleColor, U21,
     UnderlineStyle,
 };
-pub use terminal::{CallbackHandle, RenderFrame, Terminal, TerminalEvent};
+pub use terminal::{CallbackHandle, Terminal, TerminalEvent};
+pub use terminal::{LockedTerminal, PendingUpdate, RenderFrame, RenderState, RenderUpdateError};
 pub use types::{
     CellSize, ContentTag, CursorCoordinate, Dirty, GridSize, MouseMode, RawCell, ScreenSize,
     ScrollbarInfo, SelectionUpdate, TerminalDimensions, Width,
@@ -51,15 +52,18 @@ unsafe extern "C" {
     fn ghostty_terminal_viewport_is_bottom(terminal: NonNull<c_void>) -> bool;
     fn ghostty_terminal_scroll_to_row(terminal: NonNull<c_void>, row: u64);
 
-    fn ghostty_terminal_render_update(terminal: NonNull<c_void>) -> u8;
-    fn ghostty_terminal_render_dirty(terminal: NonNull<c_void>) -> c_int;
-    fn ghostty_terminal_render_clear_dirty(terminal: NonNull<c_void>);
-    fn ghostty_terminal_get_dimensions(terminal: NonNull<c_void>, rows: &mut u16, cols: &mut u16);
+    fn ghostty_render_state_new() -> *mut c_void;
+    fn ghostty_render_state_free(state: NonNull<c_void>);
+    fn ghostty_render_state_begin_update(state: NonNull<c_void>, terminal: NonNull<c_void>) -> u8;
+    fn ghostty_render_state_end_update(state: NonNull<c_void>);
+    fn ghostty_render_state_dirty(state: NonNull<c_void>) -> c_int;
+    fn ghostty_render_state_clear_dirty(state: NonNull<c_void>);
+    fn ghostty_render_state_get_dimensions(state: NonNull<c_void>, rows: &mut u16, cols: &mut u16);
 
-    fn ghostty_terminal_render_cursor(terminal: NonNull<c_void>) -> *const RenderCursor;
-    fn ghostty_terminal_render_colors(terminal: NonNull<c_void>) -> *const RenderColors;
+    fn ghostty_render_state_cursor(state: NonNull<c_void>) -> *const RenderCursor;
+    fn ghostty_render_state_colors(state: NonNull<c_void>) -> *const RenderColors;
 
-    fn ghostty_terminal_render_row_data(terminal: NonNull<c_void>) -> *const ZigMultiArrayList;
+    fn ghostty_render_state_row_data(state: NonNull<c_void>) -> *const ZigMultiArrayList;
 
     fn ghostty_terminal_gesture_press(
         terminal: NonNull<c_void>,

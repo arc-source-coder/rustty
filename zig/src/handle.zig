@@ -41,8 +41,6 @@ pub const TerminalHandle = struct {
 
     terminal_inst: terminal.Terminal,
     stream: terminal.TerminalStream,
-    render_state: terminal.RenderState,
-
     size: size.Size,
     gesture: terminal.SelectionGesture,
     /// This is passed to Ghostty's mouse encoder,
@@ -141,8 +139,6 @@ pub const TerminalHandle = struct {
             .terminal_inst = t,
             .stream = undefined,
             .gesture = .init,
-            .render_state = .empty,
-
             .event_callbacks = .{},
             .output_callback = .{},
             .write_input = .{},
@@ -176,7 +172,6 @@ pub const TerminalHandle = struct {
 
     pub fn deinit(self: *TerminalHandle) void {
         const alloc = self.alloc;
-        self.render_state.deinit(alloc);
         self.stream.deinit();
         self.gesture.deinit(&self.terminal_inst);
         self.terminal_inst.deinit(alloc);

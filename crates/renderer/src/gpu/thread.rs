@@ -12,7 +12,7 @@ use crate::types::{DerivedConfig, FrameOutcome};
 use anyhow::Result;
 use crossbeam_channel::Sender;
 use font::shared_grid::SharedGrid;
-use ghostty::{ScrollbarInfo, Terminal};
+use ghostty::{RenderState, ScrollbarInfo, Terminal};
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
@@ -35,6 +35,7 @@ pub enum RendererMessage {
 
 pub struct RendererThread {
     renderer: Renderer,
+    render_state: RenderState,
     cursor_blink_visible: bool,
     cursor_blink_deadline: Option<Instant>,
 }
@@ -65,10 +66,13 @@ impl RendererThread {
             .spawn(move || {
                 let renderer = Renderer::new(config, terminal, grid, ui_tx, options.focused)
                     .expect("Failed to start terminal renderer");
+                let render_state =
+                    RenderState::new().expect("Failed to allocate terminal render state");
                 tx.send(renderer.swap_chain().clone()).unwrap();
 
                 let mut thread = RendererThread {
                     renderer,
+                    render_state,
                     cursor_blink_visible: true,
                     cursor_blink_deadline: None,
                 };
@@ -231,7 +235,10 @@ impl RendererThread {
             }
 
             if pending_wake || needs_redraw {
-                if let Err(e) = self.renderer.update_frame(self.cursor_blink_visible) {
+                let update_result = self
+                    .renderer
+                    .update_frame(&mut self.render_state, self.cursor_blink_visible);
+                if let Err(e) = update_result {
                     log::error!("renderer frame update failed: {e:#}");
                     continue;
                 }
