@@ -185,7 +185,7 @@ pub fn build(b: *std.Build) !void {
             .link_libc = terminal_options.simd,
         }),
     });
-    lib.bundle_compiler_rt = true;
+    lib.bundle_compiler_rt = false;
     try configureGhosttyModule(b, lib.root_module, ctx);
 
     // Wire up generated unicode tables
