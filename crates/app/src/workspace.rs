@@ -142,6 +142,7 @@ impl Workspace {
         };
         let tab_entry = workspace.build_terminal_tab(TabAnimationPhase::Open, window, cx);
         workspace.tab_entries.insert(tab_id, tab_entry);
+        workspace.update_window_title(window, cx);
         workspace
     }
 
@@ -155,8 +156,11 @@ impl Workspace {
         let spawn_config = default_profile.spawn_config.clone();
         let view = cx.new(|cx| TerminalView::new(spawn_config, Config::default(), window, cx));
 
-        let title_subscription = cx.subscribe_in(&view, window, |_, _, event, _, cx| {
+        let title_sub = cx.subscribe_in(&view, window, |workspace, view, event, window, cx| {
             if matches!(event, TerminalViewEvent::TitleChanged) {
+                if workspace.active_terminal_view() == Some(view) {
+                    workspace.update_window_title(window, cx);
+                }
                 cx.notify();
             }
         });
@@ -167,7 +171,7 @@ impl Workspace {
             profile_icon: default_profile.profile_icon_kind(),
             phase,
             reorder_animation: None,
-            _title_subscription: title_subscription,
+            _title_subscription: title_sub,
         }
     }
 
@@ -202,6 +206,12 @@ impl Workspace {
         };
 
         title.unwrap_or_else(|| entry.title_fallback.clone())
+    }
+
+    fn update_window_title(&self, window: &mut Window, cx: &App) {
+        if let Some(entry) = self.tab_entries.get(&self.active_tab) {
+            window.set_window_title(&self.tab_title(entry, cx));
+        }
     }
 
     fn active_terminal_view(&self) -> Option<&Entity<TerminalView>> {
@@ -606,6 +616,7 @@ impl Workspace {
             view.update(cx, |view, _cx| view.mark_output_read());
         }
 
+        self.update_window_title(window, cx);
         self.focus_active_terminal(window, cx);
         cx.notify();
     }
@@ -626,6 +637,7 @@ impl Workspace {
 
         self.focus_active_terminal(window, cx);
         if changed {
+            self.update_window_title(window, cx);
             cx.notify();
         }
     }
@@ -694,6 +706,8 @@ impl Workspace {
                     view.update(cx, |view, _cx| view.mark_output_read());
                 }
             }
+
+            self.update_window_title(window, cx);
         }
 
         self.focus_active_terminal(window, cx);
