@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable, cast_slice};
 use font::cache::glyph_cache::GlyphAtlasKind;
 use font::shared_grid::SharedGrid;
@@ -30,7 +30,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, IDXGISwapChain1, IDXGISwapChain2,
 };
 use windows::Win32::System::Threading::WaitForSingleObjectEx;
-use windows::core::{Interface, s};
+use windows::core::{Interface as _, s};
 
 use super::shared_grid_ptr::shared_grid_ref;
 use super::types::{QuadInstance, RenderBatch};
@@ -406,7 +406,7 @@ impl AtlasTexture {
                     &self.texture,
                     0,
                     None,
-                    atlas.data.as_ptr() as _,
+                    atlas.data.as_ptr().cast(),
                     self.side * self.bytes_per_pixel,
                     0,
                 );
@@ -444,8 +444,8 @@ impl BackgroundCells {
         if self.cols != cols || self.rows != rows {
             self.texture = create_dynamic_texture(
                 device,
-                cols as u32,
-                rows as u32,
+                u32::from(cols),
+                u32::from(rows),
                 DXGI_FORMAT_R8G8B8A8_UNORM,
             )?;
             self.srv = create_shader_resource_view(device, &self.texture)?;
@@ -472,9 +472,9 @@ impl BackgroundCells {
                 0,
                 D3D11_MAP_WRITE_DISCARD,
                 0,
-                Some(&mut mapped),
+                Some(&raw mut mapped),
             )?;
-            let mut dst = mapped.pData as *mut u8;
+            let mut dst = mapped.pData.cast::<u8>();
             let dst_pitch = mapped.RowPitch as usize;
             for row in 0..rows as usize {
                 let src_start = row * row_bytes;
@@ -561,7 +561,10 @@ impl GlyphPipeline {
             _pad0: [0.0, 0.0],
             background_color: batch.clear_color,
             background_cell_size: batch.cell_size,
-            background_cell_count: [background_cells.cols as f32, background_cells.rows as f32],
+            background_cell_count: [
+                f32::from(background_cells.cols),
+                f32::from(background_cells.rows),
+            ],
         };
         if self.last_globals != Some(globals) {
             write_buffer(context, &self.globals_buffer, cast_slice(&[globals]))?;
@@ -619,9 +622,7 @@ impl GlyphPipeline {
             atlas_grayscale.srv.clone(),
             atlas_color.srv.clone(),
         ];
-        unsafe {
-            context.PSSetShaderResources(0, Some(&self.shader_resources_bind));
-        }
+        unsafe { context.PSSetShaderResources(0, Some(&self.shader_resources_bind)) };
         self.shader_resources_dirty = false;
     }
 
@@ -638,9 +639,9 @@ impl GlyphPipeline {
                 0,
                 D3D11_MAP_WRITE_DISCARD,
                 0,
-                Some(&mut mapped),
+                Some(&raw mut mapped),
             )?;
-            let mut dst = mapped.pData as *mut u8;
+            let mut dst = mapped.pData.cast::<u8>();
             let background =
                 QuadInstance::background_rect([target.width as f32, target.height as f32]);
             let background_bytes = cast_slice(slice::from_ref(&background));
@@ -689,7 +690,7 @@ fn create_render_target_view(
     let rtv = unsafe {
         let mut output = None;
         device
-            .CreateRenderTargetView(&texture, None, Some(&mut output))
+            .CreateRenderTargetView(&texture, None, Some(&raw mut output))
             .context("CreateRenderTargetView failed")?;
         output.context("CreateRenderTargetView returned null")?
     };
@@ -735,11 +736,10 @@ fn create_texture(
         CPUAccessFlags: 0,
         MiscFlags: 0,
     };
-    unsafe {
-        let mut texture = None;
-        device.CreateTexture2D(&desc, None, Some(&mut texture))?;
-        texture.context("CreateTexture2D returned null")
-    }
+
+    let mut texture = None;
+    unsafe { device.CreateTexture2D(&raw const desc, None, Some(&raw mut texture))? };
+    texture.context("CreateTexture2D returned null")
 }
 
 fn create_dynamic_texture(
@@ -763,38 +763,31 @@ fn create_dynamic_texture(
         CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
         MiscFlags: 0,
     };
-    unsafe {
-        let mut texture = None;
-        device.CreateTexture2D(&desc, None, Some(&mut texture))?;
-        texture.context("CreateTexture2D returned null")
-    }
+
+    let mut texture = None;
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture))? };
+    texture.context("CreateTexture2D returned null")
 }
 
 fn create_shader_resource_view(
     device: &ID3D11Device,
     resource: &ID3D11Texture2D,
 ) -> Result<Option<ID3D11ShaderResourceView>> {
-    unsafe {
-        let mut view = None;
-        device.CreateShaderResourceView(resource, None, Some(&mut view))?;
-        Ok(view)
-    }
+    let mut view = None;
+    unsafe { device.CreateShaderResourceView(resource, None, Some(&raw mut view))? };
+    Ok(view)
 }
 
 fn create_vertex_shader(device: &ID3D11Device, bytes: &[u8]) -> Result<ID3D11VertexShader> {
-    unsafe {
-        let mut shader = None;
-        device.CreateVertexShader(bytes, None, Some(&mut shader))?;
-        shader.context("CreateVertexShader returned null")
-    }
+    let mut shader = None;
+    unsafe { device.CreateVertexShader(bytes, None, Some(&raw mut shader))? };
+    shader.context("CreateVertexShader returned null")
 }
 
 fn create_pixel_shader(device: &ID3D11Device, bytes: &[u8]) -> Result<ID3D11PixelShader> {
-    unsafe {
-        let mut shader = None;
-        device.CreatePixelShader(bytes, None, Some(&mut shader))?;
-        shader.context("CreatePixelShader returned null")
-    }
+    let mut shader = None;
+    unsafe { device.CreatePixelShader(bytes, None, Some(&mut shader))? };
+    shader.context("CreatePixelShader returned null")
 }
 
 fn create_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
@@ -808,11 +801,9 @@ fn create_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
     desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
     desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
 
-    unsafe {
-        let mut state = None;
-        device.CreateBlendState(&desc, Some(&mut state))?;
-        state.context("CreateBlendState returned null")
-    }
+    let mut state = None;
+    unsafe { device.CreateBlendState(&raw const desc, Some(&raw mut state))? };
+    state.context("CreateBlendState returned null")
 }
 
 fn create_sampler(device: &ID3D11Device) -> Result<Option<ID3D11SamplerState>> {
@@ -828,11 +819,9 @@ fn create_sampler(device: &ID3D11Device) -> Result<Option<ID3D11SamplerState>> {
         MinLOD: 0.0,
         MaxLOD: D3D11_FLOAT32_MAX,
     };
-    unsafe {
-        let mut output = None;
-        device.CreateSamplerState(&desc, Some(&mut output))?;
-        Ok(output)
-    }
+    let mut output = None;
+    unsafe { device.CreateSamplerState(&raw const desc, Some(&raw mut output))? };
+    Ok(output)
 }
 
 fn create_dynamic_constant_buffer<T>(device: &ID3D11Device) -> Result<ID3D11Buffer> {
@@ -843,11 +832,10 @@ fn create_dynamic_constant_buffer<T>(device: &ID3D11Device) -> Result<ID3D11Buff
         CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
         ..Default::default()
     };
-    unsafe {
-        let mut buffer = None;
-        device.CreateBuffer(&desc, None, Some(&mut buffer))?;
-        buffer.context("CreateBuffer returned null")
-    }
+
+    let mut buffer = None;
+    unsafe { device.CreateBuffer(&raw const desc, None, Some(&raw mut buffer))? };
+    buffer.context("CreateBuffer returned null")
 }
 
 fn create_glyph_input_layout(
@@ -920,11 +908,9 @@ fn create_glyph_input_layout(
         },
     ];
 
-    unsafe {
-        let mut layout = None;
-        device.CreateInputLayout(&elements, shader_bytes, Some(&mut layout))?;
-        layout.context("CreateInputLayout returned null")
-    }
+    let mut layout = None;
+    unsafe { device.CreateInputLayout(&elements, shader_bytes, Some(&raw mut layout))? };
+    layout.context("CreateInputLayout returned null")
 }
 
 fn create_static_vertex_buffer<T: Pod>(device: &ID3D11Device, data: &[T]) -> Result<ID3D11Buffer> {
@@ -936,15 +922,16 @@ fn create_static_vertex_buffer<T: Pod>(device: &ID3D11Device, data: &[T]) -> Res
         ..Default::default()
     };
     let initial_data = D3D11_SUBRESOURCE_DATA {
-        pSysMem: data.as_ptr() as *const _,
+        pSysMem: data.as_ptr().cast(),
         ..Default::default()
     };
 
+    let mut buffer = None;
     unsafe {
-        let mut buffer = None;
-        device.CreateBuffer(&desc, Some(&initial_data), Some(&mut buffer))?;
-        buffer.context("CreateBuffer returned null")
-    }
+        let initial = &raw const initial_data;
+        device.CreateBuffer(&raw const desc, Some(initial), Some(&raw mut buffer))?;
+    };
+    buffer.context("CreateBuffer returned null")
 }
 
 fn create_static_index_buffer(device: &ID3D11Device, data: &[u16]) -> Result<ID3D11Buffer> {
@@ -956,15 +943,16 @@ fn create_static_index_buffer(device: &ID3D11Device, data: &[u16]) -> Result<ID3
         ..Default::default()
     };
     let initial_data = D3D11_SUBRESOURCE_DATA {
-        pSysMem: data.as_ptr() as *const _,
+        pSysMem: data.as_ptr().cast(),
         ..Default::default()
     };
 
+    let mut buffer = None;
     unsafe {
-        let mut buffer = None;
-        device.CreateBuffer(&desc, Some(&initial_data), Some(&mut buffer))?;
-        buffer.context("CreateBuffer returned null")
-    }
+        let initial = &raw const initial_data;
+        device.CreateBuffer(&raw const desc, Some(initial), Some(&raw mut buffer))?;
+    };
+    buffer.context("CreateBuffer returned null")
 }
 
 fn create_dynamic_vertex_buffer<T>(
@@ -979,18 +967,16 @@ fn create_dynamic_vertex_buffer<T>(
         ..Default::default()
     };
 
-    unsafe {
-        let mut output = None;
-        device.CreateBuffer(&desc, None, Some(&mut output))?;
-        output.context("CreateBuffer returned null")
-    }
+    let mut output = None;
+    unsafe { device.CreateBuffer(&raw const desc, None, Some(&raw mut output))? };
+    output.context("CreateBuffer returned null")
 }
 
 fn write_buffer(context: &ID3D11DeviceContext, buffer: &ID3D11Buffer, bytes: &[u8]) -> Result<()> {
     unsafe {
         let mut mapped = std::mem::zeroed();
-        context.Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))?;
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.pData as *mut u8, bytes.len());
+        context.Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&raw mut mapped))?;
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.pData.cast::<u8>(), bytes.len());
         context.Unmap(buffer, 0);
     }
     Ok(())

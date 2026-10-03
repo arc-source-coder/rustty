@@ -1,4 +1,4 @@
-use gpui::{Div, Styled, div};
+use gpui::{Div, Styled as _, div};
 
 /// Returns a `Div` as horizontal flex layout (flex-row with items centered).
 #[inline(always)]

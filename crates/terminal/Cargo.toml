@@ -23,3 +23,6 @@ windows-sys = {
     ]
 }
 bytes = "1.11.1"
+
+[lints]
+workspace = true

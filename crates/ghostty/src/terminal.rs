@@ -82,13 +82,14 @@ impl Terminal {
     }
 
     /// Borrow the underlying Ghostty handle for integration layers such as zconpty.
-    pub fn handle(&self) -> *mut c_void {
+    pub const fn handle(&self) -> *mut c_void {
         self.handle.as_ptr()
     }
 
     /// Acquire the Zig-owned terminal mutex.
     ///
-    /// SAFETY: The caller must pair this with [`Terminal::unlock`] on the same
+    /// # Safety
+    /// The caller must pair this with [`Terminal::unlock`] on the same
     /// terminal and must not call methods that lock internally while the mutex is held.
     pub unsafe fn lock(&self) {
         unsafe {
@@ -98,7 +99,8 @@ impl Terminal {
 
     /// Release the Zig-owned terminal mutex.
     ///
-    /// SAFETY: The caller must currently hold the terminal mutex for this terminal.
+    /// # Safety
+    /// The caller must currently hold the terminal mutex for this terminal.
     pub unsafe fn unlock(&self) {
         unsafe {
             ghostty_terminal_unlock(self.handle);
@@ -116,7 +118,7 @@ impl Terminal {
             event_tx,
             wake: Box::new(wake),
         });
-        let userdata = (&mut *sink as *mut CallbackSink).cast::<c_void>();
+        let userdata = (&raw mut *sink).cast::<c_void>();
 
         unsafe {
             ghostty_terminal_set_callbacks(
@@ -169,7 +171,8 @@ impl Terminal {
     /// they can gather any other frame-coherent terminal data in the same critical
     /// section before unlocking.
     ///
-    /// SAFETY: The caller must hold the terminal mutex via [`Terminal::lock`].
+    /// # Safety
+    /// The caller must hold the terminal mutex via [`Terminal::lock`].
     /// Callers must still avoid overlapping frames on the same terminal
     /// because `RenderFrame::drop()` clears shared dirty flags.
     pub unsafe fn render_frame(&self) -> RenderFrame {
@@ -261,10 +264,11 @@ impl Terminal {
     /// Query scrollbar positioning info (total rows, viewport offset, viewport size).
     /// This does not lock internally.
     ///
-    /// SAFETY: The caller must hold the terminal mutex via [`Terminal::lock`].
+    /// # Safety
+    /// The caller must hold the terminal mutex via [`Terminal::lock`].
     pub unsafe fn scrollbar_info(&self) -> ScrollbarInfo {
         let mut out = ScrollbarInfo::default();
-        let out_ptr = unsafe { NonNull::new_unchecked(&mut out) };
+        let out_ptr = unsafe { NonNull::new_unchecked(&raw mut out) };
         unsafe { ghostty_terminal_scrollbar_info(self.handle, out_ptr) };
         out
     }
@@ -283,14 +287,7 @@ impl Terminal {
         rectangular: bool,
     ) -> bool {
         let rc = unsafe {
-            ghostty_terminal_set_selection(
-                self.handle,
-                start_x,
-                start_y,
-                end_x,
-                end_y,
-                rectangular as u8,
-            )
+            ghostty_terminal_set_selection(self.handle, start_x, start_y, end_x, end_y, rectangular)
         };
         rc == 0
     }
@@ -355,7 +352,7 @@ impl Terminal {
     /// Locks internally.
     pub fn selection_text(&self) -> Option<SelectionText> {
         let mut len: usize = 0;
-        let len_ptr = unsafe { NonNull::new_unchecked(&mut len) };
+        let len_ptr = unsafe { NonNull::new_unchecked(&raw mut len) };
         let ptr = unsafe { ghostty_terminal_get_selection_text(self.handle, len_ptr) };
         if ptr.is_null() {
             return None;
@@ -383,7 +380,7 @@ impl Drop for Terminal {
 /// mutex. The handle pointer is Zig-allocated and heap-stable.
 ///
 /// Cell and style data returned by `row_raw()` and `row_styles()` are
-/// zero-copy slices into RenderState memory. These pointers are stable
+/// zero-copy slices into `RenderState` memory. These pointers are stable
 /// from the moment `render_frame()` returns until the next `render_update()`.
 /// Thus, it is stable for the entire frame (when frame drops, dirty flags clear).
 ///
@@ -398,8 +395,8 @@ impl RenderFrame {
     /// Get raw cell data for a row (zero-copy pointer into Zig memory).
     /// Returns `None` if row is out of bounds.
     ///
-    /// Safety: The returned slice borrows from RenderState memory
-    /// that is stable for the lifetime of this RenderFrame.
+    /// Safety: The returned slice borrows from `RenderState` memory
+    /// that is stable for the lifetime of this `RenderFrame`.
     pub fn row_raw(&self, y: u16) -> Option<&[RawCell]> {
         let mut len: u16 = 0;
         let len_ptr = unsafe { NonNull::new_unchecked(&mut len) };
@@ -408,9 +405,9 @@ impl RenderFrame {
             return None;
         }
         // Safety: RawCell is #[repr(transparent)] over u64.
-        // The pointer comes from RenderState memory which is stable
+        // The pointer comes from `RenderState` memory which is stable
         // for the frame's lifetime. The len is verified by the Zig side.
-        Some(unsafe { std::slice::from_raw_parts(ptr as *const RawCell, len as usize) })
+        Some(unsafe { std::slice::from_raw_parts(ptr.cast::<RawCell>(), len as usize) })
     }
 
     /// Get style data for a row (zero-copy pointer into Zig memory).
@@ -427,7 +424,7 @@ impl RenderFrame {
         }
         // Safety: The Zig FFI returns *const CellStyle (the Zig extern struct).
         // Rust's CellStyle is #[repr(C)] with the same layout, verified by
-        // Zig comptime assertions. Pointer is into RenderState memory,
+        // Zig comptime assertions. Pointer is into `RenderState` memory,
         // stable for the frame's lifetime.
         Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
     }
@@ -436,7 +433,7 @@ impl RenderFrame {
     /// Returns a zero-copy slice into the grapheme SoA column for a row (slice of slices).
     ///
     /// Each element is a Zig slice []const u21 = { ptr: [*]const u21, len: usize }.
-    /// GraphemeSlice mirrors the layout of a Zig slice, verified by comptime assertions.
+    /// `GraphemeSlice` mirrors the layout of a Zig slice, verified by comptime assertions.
     ///
     /// Only the low 21 bits of each `u32` are meaningful. Zig stores these values as
     /// `u21`; the FFI exposes them as `u32` with Zig comptime assertions guaranteeing
@@ -447,7 +444,7 @@ impl RenderFrame {
     ///
     /// Returns `None` for out-of-bounds rows (or if the row has zero cells).
     ///
-    /// SAFETY: The returned slice points into RenderState memory and
+    /// SAFETY: The returned slice points into `RenderState` memory and
     /// is stable for the frame lifetime (until the next `render_update()`).
     pub fn row_graphemes(&self, row: u16) -> Option<&[GraphemeSlice]> {
         let mut len: u16 = 0;
@@ -456,7 +453,7 @@ impl RenderFrame {
         if ptr.is_null() || len == 0 {
             return None;
         }
-        // SAFETY: The returned slice points into RenderState memory and
+        // SAFETY: The returned slice points into `RenderState` memory and
         // is stable for the frame lifetime (until the next `render_update()`).
         Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
     }
@@ -492,8 +489,8 @@ impl RenderFrame {
         let mut start_x: u16 = 0;
         let mut end_x: u16 = 0;
 
-        let start_ptr = unsafe { NonNull::new_unchecked(&mut start_x) };
-        let end_ptr = unsafe { NonNull::new_unchecked(&mut end_x) };
+        let start_ptr = unsafe { NonNull::new_unchecked(&raw mut start_x) };
+        let end_ptr = unsafe { NonNull::new_unchecked(&raw mut end_x) };
         let has =
             unsafe { ghostty_terminal_render_row_selection(self.handle, y, start_ptr, end_ptr) };
         if has { Some((start_x, end_x)) } else { None }
@@ -502,7 +499,7 @@ impl RenderFrame {
     /// Current cursor state.
     pub fn cursor(&self) -> CursorState {
         let mut out = CursorState::default();
-        let out_ptr = unsafe { NonNull::new_unchecked(&mut out) };
+        let out_ptr = unsafe { NonNull::new_unchecked(&raw mut out) };
         unsafe { ghostty_terminal_render_cursor(self.handle, out_ptr) };
         out
     }
@@ -510,7 +507,7 @@ impl RenderFrame {
     /// Current terminal colors (foreground, background, cursor).
     pub fn colors(&self) -> &RenderColors {
         let ptr = unsafe { ghostty_terminal_render_colors(self.handle) };
-        // Safety: pointer is into RenderState memory, stable until next render_update().
+        // Safety: pointer is into `RenderState` memory, stable until next render_update().
         unsafe { &*ptr }
     }
 }
@@ -540,7 +537,7 @@ pub struct SelectionText {
 
 impl SelectionText {
     /// View the selection text as a `&str`.
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         // Safety: Ghostty produces valid UTF-8 selection text (stores
         // codepoints internally and serializes via std.unicode.utf8Encode).
         unsafe {

@@ -1,15 +1,14 @@
-#![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     #[cfg(target_os = "windows")]
     compile_shaders();
 }
 
-#[cfg(target_os = "windows")]
 fn compile_shaders() {
-    use std::fs;
-    use std::path::PathBuf;
-
     let shader_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/gpu");
     let shader_path = shader_dir.join("shader.hlsl");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -47,11 +46,7 @@ fn compile_shaders() {
     );
 }
 
-#[cfg(target_os = "windows")]
 fn find_fxc_compiler() -> String {
-    use std::path::Path;
-    use std::process::Command;
-
     if let Ok(path) = std::env::var("GPUI_FXC_PATH")
         && Path::new(&path).exists()
     {
@@ -75,10 +70,7 @@ fn find_fxc_compiler() -> String {
     panic!("failed to find fxc.exe; set GPUI_FXC_PATH to the shader compiler");
 }
 
-#[cfg(target_os = "windows")]
 fn find_windows_sdk_binary(binary: &str) -> Option<std::path::PathBuf> {
-    use std::path::PathBuf;
-
     let base = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\bin");
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x64",
@@ -105,7 +97,6 @@ fn find_windows_sdk_binary(binary: &str) -> Option<std::path::PathBuf> {
         .find(|path| path.exists())
 }
 
-#[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 fn compile_shader(
     fxc_path: &str,
@@ -118,12 +109,8 @@ fn compile_shader(
     const_name: &str,
     output_name: &str,
 ) {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-    use std::process::Command;
-
     let output_path = out_dir.join(output_name);
-    let build_profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let build_profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_owned());
     let mut args: Vec<&str> = vec![
         "/T",
         profile,
@@ -146,9 +133,10 @@ fn compile_shader(
         .status()
         .unwrap_or_else(|err| panic!("failed to compile {module} shader with fxc.exe: {err}"));
 
-    if !status.success() {
-        panic!("fxc.exe failed compiling {module} shader entry {entry_point}");
-    }
+    assert!(
+        status.success(),
+        "fxc.exe failed compiling {module} shader entry {entry_point}"
+    );
 
     let mut rust_bindings = OpenOptions::new()
         .create(true)

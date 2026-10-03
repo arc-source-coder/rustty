@@ -224,7 +224,7 @@ pub(crate) fn build_shape_options(
     feature_spec: &FontFeatureSpec,
 ) -> ShapeOptions {
     ShapeOptions {
-        locale: locale.to_string(),
+        locale: locale.to_owned(),
         font_size: config.font_size.as_f32(),
         cell_width: cell_metrics.cell_width,
         variant: Style::Normal,
@@ -812,14 +812,14 @@ pub(crate) fn cursor_instance(
     // (cursor-color + cursor-text) once renderer config plumbing lands.
     let color_u32 = cursor_color.unwrap_or(default_fg).to_rgba_u32();
 
-    let mut x = cursor.x as f32 * cell_metrics.cell_width;
-    let y = cursor.y as f32 * cell_metrics.line_height;
+    let mut x = f32::from(cursor.x) * cell_metrics.cell_width;
+    let y = f32::from(cursor.y) * cell_metrics.line_height;
     let mut w = cell_metrics.cell_width;
     let mut h = cell_metrics.line_height;
     let scale_factor = config.scale_factor.max(1.0);
 
     if cursor.wide_tail != 0 {
-        x = (cursor.x.saturating_sub(1) as f32) * cell_metrics.cell_width;
+        x = (f32::from(cursor.x.saturating_sub(1))) * cell_metrics.cell_width;
         w = cell_metrics.cell_width * 2.0;
     }
 
@@ -933,9 +933,9 @@ fn nominal_row_rect(row: u16, cols: u16, metrics: CellMetrics, scale_factor: f32
     // when a rebuilt row emits no foreground quads.
     DirtyRect {
         left: 0,
-        top: (row as f32 * metrics.line_height * scale_factor).floor() as i32,
-        right: (cols as f32 * metrics.cell_width * scale_factor).ceil() as i32,
-        bottom: (((row + 1) as f32) * metrics.line_height * scale_factor).ceil() as i32,
+        top: (f32::from(row) * metrics.line_height * scale_factor).floor() as i32,
+        right: (f32::from(cols) * metrics.cell_width * scale_factor).ceil() as i32,
+        bottom: (f32::from(row + 1) * metrics.line_height * scale_factor).ceil() as i32,
     }
 }
 

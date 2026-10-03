@@ -1,5 +1,5 @@
 use gpui::{
-    AnyElement, App, Context, Decorations, InteractiveElement, IntoElement, MouseButton,
+    AnyElement, App, Context, Decorations, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement, Pixels, Render, RenderOnce, StatefulInteractiveElement, Styled, TitlebarOptions,
     Window, WindowControlArea, div, prelude::FluentBuilder, px, rgba, svg, white,
 };

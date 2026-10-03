@@ -6,7 +6,7 @@ mod workspace;
 
 use better_mimalloc_rs::MiMalloc;
 use gpui::{
-    App, AppContext, Bounds, WindowBackgroundAppearance, WindowBounds, WindowOptions, px, size,
+    App, AppContext as _, Bounds, WindowBackgroundAppearance, WindowBounds, WindowOptions, px, size,
 };
 use gpui_platform::application;
 use terminal::RenderConfig;
@@ -33,10 +33,10 @@ fn main() {
         let render_config = cx.new(|_| RenderConfig::default());
 
         // Window sizing: 60% x 70% of primary display, centered.
-        let display_bounds = cx
-            .primary_display()
-            .map(|display| display.bounds())
-            .unwrap_or_else(|| Bounds::centered(None, size(px(1024.), px(720.)), cx));
+        let display_bounds = cx.primary_display().map_or_else(
+            || Bounds::centered(None, size(px(1024.), px(720.)), cx),
+            |display| display.bounds(),
+        );
 
         let target_size = size(
             display_bounds.size.width * 0.6,

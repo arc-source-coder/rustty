@@ -14,6 +14,18 @@ members = [
 version = "0.1.0"
 edition = "2024"
 
+[workspace.lints.clippy]
+doc_markdown = "allow"
+
+str_to_string = "warn"
+unused_trait_names = "warn"
+precedence_bits = "warn"
+cognitive_complexity = "warn"
+
+# as_pointer_underscore = "warn"
+# single_call_fn = "warn"
+# redundant_type_annotations = "warn"
+
 [workspace.dependencies]
 log = "0.4.29"
 async-channel = "2.5.0"

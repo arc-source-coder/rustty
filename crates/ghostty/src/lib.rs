@@ -104,7 +104,7 @@ unsafe extern "C" {
         start_y: u32,
         end_x: u16,
         end_y: u32,
-        rectangular: u8,
+        rectangular: bool,
     ) -> c_int;
     pub(crate) fn ghostty_terminal_select_word_at(
         terminal: NonNull<c_void>,

@@ -115,6 +115,6 @@ fn pack_pos(v: f32) -> i16 {
     if !v.is_finite() {
         return 0;
     }
-    let rounded = v.round().clamp(i16::MIN as f32, i16::MAX as f32);
+    let rounded = v.round().clamp(f32::from(i16::MIN), f32::from(i16::MAX));
     rounded as i16
 }

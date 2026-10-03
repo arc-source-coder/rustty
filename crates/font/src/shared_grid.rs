@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 #[cfg(target_os = "windows")]
 use anyhow::{Result, anyhow};
 use ghostty::RawCell;
-use rapidhash::{HashMapExt, RapidHashMap};
+use rapidhash::{HashMapExt as _, RapidHashMap};
 
 use crate::atlas::{Atlas, Format, INITIAL_SIZE, Region};
 #[cfg(target_os = "windows")]
@@ -24,7 +24,7 @@ use crate::types::{FontIndex, Style};
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::DirectWrite::{IDWriteFactory2, IDWriteFactory6, IDWriteFontFace2};
 #[cfg(target_os = "windows")]
-use windows_core::Interface;
+use windows_core::Interface as _;
 
 pub use crate::types::Presentation;
 
@@ -202,12 +202,12 @@ impl SharedGrid {
             }
         }
 
-        let mut inner = self.inner.write().expect("shared grid poisoned");
-        let resolver: *mut CodepointResolver = &mut inner.resolver;
+        // Dereference the write guard to get &mut SharedGridInner
+        let inner = &mut *self.inner.write().expect("shared grid poisoned");
         match inner.codepoints.entry(key) {
             Entry::Occupied(found) => *found.get(),
             Entry::Vacant(slot) => {
-                let resolved = unsafe { (*resolver).get_index(codepoint, style, presentation) };
+                let resolved = inner.resolver.get_index(codepoint, style, presentation);
                 slot.insert(resolved);
                 resolved
             }
@@ -333,45 +333,42 @@ impl SharedGrid {
                 .atlas_for_kind_mut(atlas_kind)
                 .reserve(raster.width + GLYPH_PADDING, raster.height + GLYPH_PADDING);
 
-            match reserve {
-                Ok(region) => {
-                    let glyph_region = Region {
-                        x: region.x,
-                        y: region.y,
-                        width: raster.width,
-                        height: raster.height,
-                    };
-                    inner
-                        .atlas_for_kind_mut(atlas_kind)
-                        .set(glyph_region, &raster.pixels);
-                    let cached = CachedGlyph {
-                        width: raster.width,
-                        height: raster.height,
-                        offset_x: raster.offset_x,
-                        offset_y: raster.offset_y,
-                        atlas_x: glyph_region.x,
-                        atlas_y: glyph_region.y,
-                        atlas_kind: Some(atlas_kind),
-                        overlap_split: Self::glyph_needs_overlap_split(
-                            raster.offset_x,
-                            raster.width,
-                            Self::glyph_cell_width(key),
-                            dwrite.raster_cell_width,
-                        ),
-                    };
-                    return Ok(inner.glyphs.insert_or_get_existing(key, cached));
+            if let Ok(region) = reserve {
+                let glyph_region = Region {
+                    x: region.x,
+                    y: region.y,
+                    width: raster.width,
+                    height: raster.height,
+                };
+                inner
+                    .atlas_for_kind_mut(atlas_kind)
+                    .set(glyph_region, &raster.pixels);
+                let cached = CachedGlyph {
+                    width: raster.width,
+                    height: raster.height,
+                    offset_x: raster.offset_x,
+                    offset_y: raster.offset_y,
+                    atlas_x: glyph_region.x,
+                    atlas_y: glyph_region.y,
+                    atlas_kind: Some(atlas_kind),
+                    overlap_split: Self::glyph_needs_overlap_split(
+                        raster.offset_x,
+                        raster.width,
+                        Self::glyph_cell_width(key),
+                        dwrite.raster_cell_width,
+                    ),
+                };
+                return Ok(inner.glyphs.insert_or_get_existing(key, cached));
+            } else {
+                if self.try_grow_atlas(&mut inner, atlas_kind) {
+                    continue;
                 }
-                Err(_) => {
-                    if self.try_grow_atlas(&mut inner, atlas_kind) {
-                        continue;
-                    }
-                    if did_reset {
-                        return Err(anyhow!("atlas allocation failed after hard-limit reset"));
-                    }
-                    did_reset = true;
-                    self.reset_all_atlases(&mut inner);
-                    inner.glyphs.clear();
+                if did_reset {
+                    return Err(anyhow!("atlas allocation failed after hard-limit reset"));
                 }
+                did_reset = true;
+                self.reset_all_atlases(&mut inner);
+                inner.glyphs.clear();
             }
         }
     }

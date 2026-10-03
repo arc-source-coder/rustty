@@ -21,7 +21,7 @@ use crate::types::{FontAxisSpec, Style};
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::DirectWrite::IDWriteFactory6;
 #[cfg(target_os = "windows")]
-use windows_core::Interface;
+use windows_core::Interface as _;
 
 /// Ghostty-style shared-grid registry keyed by derived font configuration.
 ///
@@ -81,7 +81,7 @@ where
             let mut inner = self.inner.lock().expect("shared grid set poisoned");
             if let Some(existing) = inner.get_mut(&key) {
                 existing.refs += 1;
-                return Ok(existing.grid.as_ref() as *const SharedGrid);
+                return Ok(std::ptr::from_ref::<SharedGrid>(existing.grid.as_ref()));
             }
         }
 
@@ -89,7 +89,7 @@ where
         let mut inner = self.inner.lock().expect("shared grid set poisoned");
         if let Some(existing) = inner.get_mut(&key) {
             existing.refs += 1;
-            return Ok(existing.grid.as_ref() as *const SharedGrid);
+            return Ok(std::ptr::from_ref::<SharedGrid>(existing.grid.as_ref()));
         }
         let ptr = grid.as_ref() as *const SharedGrid;
         inner.insert(key, ReffedGrid { grid, refs: 1 });

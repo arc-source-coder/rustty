@@ -1,21 +1,23 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn cargo_profile_dir(out_dir: &Path) -> PathBuf {
-    out_dir
-        .ancestors()
-        .nth(3)
-        .expect("OUT_DIR should be target/<profile>/build/<pkg>/out")
-        .to_path_buf()
-}
-
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
 
-    let zig_target = zig_target();
+    let zig_arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86_64") => "x86_64",
+        Ok("aarch64") => "aarch64",
+        arch => panic!("unsupported target arch for conpty: {arch:?}"),
+    };
+    let zig_env = match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
+        Ok("msvc") => "msvc",
+        Ok("gnu") => "gnu",
+        env => panic!("unsupported target env for conpty: {env:?}"),
+    };
 
+    let zig_target = format!("{zig_arch}-windows-{zig_env}");
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
         .parent()
@@ -51,34 +53,34 @@ fn main() {
         .arg(format!("-Dtarget={zig_target}"))
         .arg("--prefix")
         .arg(&prefix)
-        .current_dir(&workspace_root.join("zig"))
+        .current_dir(workspace_root.join("zig"))
         .status()
         .unwrap_or_else(|error| panic!("failed to run `zig build` for zconpty shim: {error}"));
-    if !status.success() {
-        panic!("zig build failed for zconpty shim");
-    }
+    assert!(status.success(), "zig build failed for zconpty shim");
 
     let lib_dir = prefix.join("lib");
-    if !contains_static_library(&lib_dir, "zconpty_shim") {
-        panic!(
-            "zconpty_shim static library was not found in {}",
-            lib_dir.display()
-        );
-    }
-    if !contains_static_library(&lib_dir, "ghostty_shim") {
-        panic!(
-            "ghostty_shim static library was not found in {}",
-            lib_dir.display()
-        );
-    }
+    assert!(
+        contains_static_library(&lib_dir, "zconpty_shim"),
+        "zconpty_shim static library was not found in {}",
+        lib_dir.display()
+    );
+    assert!(
+        contains_static_library(&lib_dir, "ghostty_shim"),
+        "ghostty_shim static library was not found in {}",
+        lib_dir.display()
+    );
 
     let bin_dir = prefix.join("bin");
     let wslz = bin_dir.join("wslz.exe");
-    if !wslz.exists() {
-        panic!("wslz.exe was not found at {}", bin_dir.display());
-    }
 
-    let profile_dir = cargo_profile_dir(&out_dir);
+    let error = format!("wslz.exe was not found at {}", bin_dir.display());
+    assert!(wslz.exists(), "{}", error);
+
+    let profile_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .expect("OUT_DIR should be target/<profile>/build/<pkg>/out")
+        .to_path_buf();
     std::fs::copy(&wslz, profile_dir.join("wslz.exe"))
         .expect("failed to copy wslz.exe next to final executable");
 
@@ -87,21 +89,6 @@ fn main() {
     println!("cargo:rustc-link-lib=static=ghostty_shim");
 
     println!("cargo:rustc-link-lib=advapi32");
-}
-
-fn zig_target() -> String {
-    let zig_arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
-        Ok("x86_64") => "x86_64",
-        Ok("aarch64") => "aarch64",
-        arch => panic!("unsupported target arch for conpty: {arch:?}"),
-    };
-    let zig_env = match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
-        Ok("msvc") => "msvc",
-        Ok("gnu") => "gnu",
-        env => panic!("unsupported target env for conpty: {env:?}"),
-    };
-
-    format!("{zig_arch}-windows-{zig_env}")
 }
 
 fn contains_static_library(lib_dir: &Path, name: &str) -> bool {

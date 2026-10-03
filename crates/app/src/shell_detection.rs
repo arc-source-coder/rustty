@@ -53,7 +53,7 @@ fn build_platform_profiles() -> Vec<Profile> {
 
     // WSL distros
     for distro_name in detect_wsl_distros() {
-        let display = format!("{} (WSL)", distro_name);
+        let display = format!("{distro_name} (WSL)");
         profiles.push(Profile::new(
             display,
             ShellKind::Wsl {
@@ -126,9 +126,8 @@ fn detect_wsl_distros() -> Vec<String> {
         _ => return Vec::new(),
     };
 
-    let decoded = match decode_utf16le(&output.stdout) {
-        Some(s) => s,
-        None => return Vec::new(),
+    let Some(decoded) = decode_utf16le(&output.stdout) else {
+        return Vec::new();
     };
 
     parse_wsl_quiet_output(&decoded)

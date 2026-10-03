@@ -18,16 +18,16 @@ pub fn extract_metrics(face: &IDWriteFontFace, font_size: f32) -> Result<FontMet
     let mut raw = DWRITE_FONT_METRICS::default();
     // SAFETY: `raw` is a valid out-parameter for this COM call.
     unsafe {
-        face.GetMetrics(&mut raw);
+        face.GetMetrics(&raw mut raw);
     }
     if raw.designUnitsPerEm == 0 {
         return Err(anyhow!("invalid font metrics: designUnitsPerEm == 0"));
     }
 
-    let scale = font_size / raw.designUnitsPerEm as f32;
+    let scale = font_size / f32::from(raw.designUnitsPerEm);
     Ok(FontMetrics {
-        ascent: raw.ascent as f32 * scale,
-        descent: raw.descent as f32 * scale,
-        line_gap: raw.lineGap as f32 * scale,
+        ascent: f32::from(raw.ascent) * scale,
+        descent: f32::from(raw.descent) * scale,
+        line_gap: f32::from(raw.lineGap) * scale,
     })
 }

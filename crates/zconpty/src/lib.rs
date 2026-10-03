@@ -2,7 +2,7 @@ use std::ffi::c_void;
 use std::fmt::{Display, Formatter};
 
 unsafe extern "C" {
-    fn zconpty_start_console_server(terminal_ptr: *mut c_void, out_session: *mut isize) -> i32;
+    fn zconpty_start_console_server(terminal_ptr: *const c_void, out_session: *mut isize) -> i32;
     fn zconpty_stop_console_server(session: isize);
     fn zconpty_send_key(session: isize, event: KeyEvent);
     fn zconpty_send_mouse(session: isize, event: MouseEvent);
@@ -114,7 +114,7 @@ pub struct MouseEvent {
 }
 
 #[repr(i8)]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MouseButton {
     /// No button pressed
     None = -1,
@@ -132,7 +132,7 @@ pub enum MouseButton {
 }
 
 #[repr(i32)]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MouseAction {
     Press = 0,
     Release = 1,
@@ -164,9 +164,14 @@ pub fn key_from_w3c(code: &[u8]) -> Option<W3cCode> {
 }
 
 impl ConPTY {
-    pub fn new(terminal_handle: *mut c_void) -> Result<Self, StartError> {
+    #[allow(clippy::missing_errors_doc)]
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub fn new(terminal_handle: *const c_void) -> Result<Self, StartError> {
         let mut session = 0;
-        let hresult = unsafe { zconpty_start_console_server(terminal_handle, &mut session) };
+
+        // Safety: zconpty never dereferences the terminal handle. It is
+        // stored and passed back as a handle in future calls into the terminal.
+        let hresult = unsafe { zconpty_start_console_server(terminal_handle, &raw mut session) };
         if hresult < 0 {
             return Err(StartError { hresult });
         }

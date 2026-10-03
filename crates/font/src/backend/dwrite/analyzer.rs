@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_GLYPH_OFFSET, DWRITE_LINE_BREAKPOINT, DWRITE_NUMBER_SUBSTITUTION_METHOD_CONTEXTUAL,
     DWRITE_READING_DIRECTION, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWRITE_SCRIPT_ANALYSIS,
@@ -10,7 +10,7 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextAnalyzer1,
 };
 use windows::core::{OutRef, PCWSTR, Ref, implement};
-use windows_core::{BOOL, Interface};
+use windows_core::{BOOL, Interface as _};
 
 use super::arena::{
     ArenaResetMode, OutputArena, OutputCaps, OutputUsed, ScratchArena, ScratchCaps,
@@ -193,7 +193,7 @@ impl DWriteAnalyzer {
         let has_features = !features.is_empty();
         let feature_block = if has_features {
             Some(DWRITE_TYPOGRAPHIC_FEATURES {
-                features: features.as_ptr() as *mut _,
+                features: features.as_ptr().cast_mut(),
                 featureCount: features.len() as u32,
             })
         } else {
@@ -201,7 +201,7 @@ impl DWriteAnalyzer {
         };
         let feature_ptrs: [*const DWRITE_TYPOGRAPHIC_FEATURES; 1] = [feature_block
             .as_ref()
-            .map_or(std::ptr::null(), |v| v as *const _)];
+            .map_or(std::ptr::null(), std::ptr::from_ref)];
         let feature_range_lengths = [text_len as u32];
         let features_arg = feature_block.as_ref().map(|_| feature_ptrs.as_ptr());
         let feature_range_arg = feature_block
@@ -218,8 +218,8 @@ impl DWriteAnalyzer {
                     PCWSTR(text_slice.as_ptr()),
                     text_len as u32,
                     face,
-                    &mut simple,
-                    &mut read,
+                    &raw mut simple,
+                    &raw mut read,
                     Some(self.scratch.glyph_indices_mut_ptr()),
                 )?;
             }
@@ -271,7 +271,7 @@ impl DWriteAnalyzer {
                     face,
                     false,
                     rtl,
-                    analysis as *const _,
+                    std::ptr::from_ref(analysis),
                     locale_pcw,
                     self.number_substitution.as_ref(),
                     features_arg,
@@ -282,7 +282,7 @@ impl DWriteAnalyzer {
                     self.scratch.text_props_mut_ptr(),
                     self.scratch.glyph_indices_mut_ptr(),
                     self.scratch.glyph_props_mut_ptr(),
-                    &mut actual_glyph_count,
+                    &raw mut actual_glyph_count,
                 )
             };
             if hr.is_ok() {
@@ -315,13 +315,15 @@ impl DWriteAnalyzer {
                 font_size,
                 false,
                 rtl,
-                analysis as *const _,
+                std::ptr::from_ref(analysis),
                 locale_pcw,
                 features_arg,
                 feature_ranges_arg,
                 feature_ranges_count,
                 self.scratch.glyph_advances_mut_ptr(),
-                self.scratch.glyph_offsets_mut_ptr() as *mut DWRITE_GLYPH_OFFSET,
+                self.scratch
+                    .glyph_offsets_mut_ptr()
+                    .cast::<DWRITE_GLYPH_OFFSET>(),
             )?;
             // SAFETY: cluster map has `text_len + 1` capacity by scratch reservation.
             *self.scratch.cluster_map_mut_ptr().add(text_len) = actual_glyph_count as u16;
@@ -351,7 +353,7 @@ impl DWriteAnalyzer {
                     x: cluster_to_cell_x(*codepoints.add(i)),
                     x_offset: 0.0,
                     y_offset: 0.0,
-                    glyph_index: *glyph_idx_ptr.add(i) as u32,
+                    glyph_index: u32::from(*glyph_idx_ptr.add(i)),
                 };
                 *adv_ptr.add(i) = cell_width;
                 *off_ptr.add(i) = GlyphOffset::default();
@@ -394,12 +396,12 @@ impl DWriteAnalyzer {
                 {
                     glyph_cluster += 1;
                     let next_glyph_start = *src_cluster.add(glyph_cluster) as usize;
-                    if next_glyph_start != cluster_glyph_start {
-                        cluster_glyph_start = next_glyph_start;
-                        cluster_min_x = cluster_to_cell_x(*codepoints.add(glyph_cluster));
-                    } else {
+                    if next_glyph_start == cluster_glyph_start {
                         cluster_min_x =
                             cluster_min_x.min(cluster_to_cell_x(*codepoints.add(glyph_cluster)));
+                    } else {
+                        cluster_glyph_start = next_glyph_start;
+                        cluster_min_x = cluster_to_cell_x(*codepoints.add(glyph_cluster));
                     }
                 }
                 let off = *src_off.add(glyph_index);
@@ -412,7 +414,7 @@ impl DWriteAnalyzer {
                     // positive Y moves the glyph down when added during rendering, so
                     // we normalize the sign here once at the boundary.
                     y_offset: -off.ascender_offset,
-                    glyph_index: *src_idx.add(glyph_index) as u32,
+                    glyph_index: u32::from(*src_idx.add(glyph_index)),
                 };
             }
         }
@@ -636,7 +638,7 @@ fn projected_glyphs(text_len: usize) -> usize {
 
 #[inline]
 fn cluster_to_cell_x(codepoint: Codepoint) -> u16 {
-    debug_assert!(codepoint.cluster <= u16::MAX as u32);
+    debug_assert!(u16::try_from(codepoint.cluster).is_ok());
     codepoint.cluster as u16
 }
 
@@ -674,7 +676,7 @@ impl IDWriteTextAnalysisSource_Impl for BorrowedTextAnalysisSource_Impl {
         let pos = textposition.min(self.text_len) as usize;
         // SAFETY: `pos` is clamped to `text_len`.
         unsafe {
-            *textstring = self.text_ptr.add(pos) as *mut u16;
+            *textstring = self.text_ptr.add(pos).cast_mut();
             *textlength = self.text_len - pos as u32;
         }
         Ok(())
@@ -689,7 +691,7 @@ impl IDWriteTextAnalysisSource_Impl for BorrowedTextAnalysisSource_Impl {
         let pos = textposition.min(self.text_len);
         // SAFETY: pointer/length pair references a valid prefix.
         unsafe {
-            *textstring = self.text_ptr as *mut u16;
+            *textstring = self.text_ptr.cast_mut();
             *textlength = pos;
         }
         Ok(())
@@ -708,7 +710,7 @@ impl IDWriteTextAnalysisSource_Impl for BorrowedTextAnalysisSource_Impl {
         // SAFETY: locale buffer is analyzer-owned and null-terminated.
         unsafe {
             *textlength = self.text_len - textposition.min(self.text_len);
-            *localename = self.locale_ptr as *mut u16;
+            *localename = self.locale_ptr.cast_mut();
         }
         Ok(())
     }
@@ -745,7 +747,7 @@ impl ScriptAnalysisSink {
         Self {
             runs_ptr: UnsafeCell::new(runs),
             runs_cap,
-            used_ptr: UnsafeCell::new(used as *mut usize),
+            used_ptr: UnsafeCell::new(std::ptr::from_mut(used)),
         }
     }
 
@@ -834,7 +836,7 @@ impl BidiAnalysisSink {
         Self {
             runs_ptr: UnsafeCell::new(runs),
             runs_cap,
-            used_ptr: UnsafeCell::new(used as *mut usize),
+            used_ptr: UnsafeCell::new(std::ptr::from_mut(used)),
         }
     }
 

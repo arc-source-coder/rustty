@@ -108,7 +108,7 @@ impl TerminalSession {
                     .update(cx, |this, cx| match event {
                         TerminalEvent::Bell => this.handle_io_event(IoEvent::Bell, cx),
                         TerminalEvent::TitleChanged(title) => {
-                            this.handle_io_event(IoEvent::TitleChanged(title), cx)
+                            this.handle_io_event(IoEvent::TitleChanged(title), cx);
                         }
                     })
                     .is_err()

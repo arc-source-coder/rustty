@@ -4,7 +4,7 @@
 /// deliberately excludes absolute position and subpixel variant (for the
 /// grayscale path) — fractional placement is applied at draw time.
 ///
-/// ## GlyphKey packing
+/// ## `GlyphKey` packing
 ///
 /// The entire `GlyphKey` is packed into a single `u64`, exactly matching
 /// Ghostty's `GlyphKey.Packed` strategy. This is possible because we
@@ -29,7 +29,7 @@
 ///   `BackendD3D.h` — `AtlasGlyphEntry` keyed by `glyphIndex` within a
 ///   per-font-face `AtlasFontFaceEntry`.
 use crate::types::FontIndex;
-use rapidhash::{HashMapExt, RapidHashMap};
+use rapidhash::{HashMapExt as _, RapidHashMap};
 use std::hash::{Hash, Hasher};
 
 /// Which atlas a glyph was rasterized into.
@@ -164,9 +164,9 @@ impl GlyphKey {
     #[inline(always)]
     pub fn new(font_index: FontIndex, glyph_index: u32, options: GlyphRenderOptions) -> Self {
         Self {
-            packed: (font_index.to_u16() as u64)
-                | ((glyph_index as u64) << 16)
-                | ((options.pack() as u64) << 48),
+            packed: u64::from(font_index.to_u16())
+                | (u64::from(glyph_index) << 16)
+                | (u64::from(options.pack()) << 48),
         }
     }
 

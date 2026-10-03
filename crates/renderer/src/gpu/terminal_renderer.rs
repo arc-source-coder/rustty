@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use async_channel::Sender;
 use crossbeam_channel::unbounded;
 use ghostty::{ScrollbarInfo, Terminal};
@@ -6,7 +6,7 @@ use gpui::{ExternalSurfaceEvent, ExternalSurfaceHost, Pixels, Window};
 use std::sync::Arc;
 use terminal::RendererMessage;
 use windows::Win32::{
-    Foundation::{CloseHandle, HANDLE},
+    Foundation::{CloseHandle, HANDLE, HMODULE},
     Graphics::{
         Direct3D::{
             D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -25,7 +25,7 @@ use windows::Win32::{
         },
     },
 };
-use windows::core::Interface;
+use windows::core::Interface as _;
 
 use super::thread::{RendererThreadHandle, spawn};
 
@@ -122,17 +122,16 @@ fn create_renderer_device() -> Result<ID3D11Device> {
         D3D11CreateDevice(
             None,
             D3D_DRIVER_TYPE_HARDWARE,
-            Default::default(),
+            HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             Some(&feature_levels),
             D3D11_SDK_VERSION,
-            Some(&mut device),
+            Some(&raw mut device),
             None,
             None,
         )
         .context("D3D11CreateDevice failed for renderer")?;
     }
-
     device.context("D3D11CreateDevice returned null device")
 }
 
@@ -179,7 +178,7 @@ fn create_composition_swap_chain(
         factory_media.CreateSwapChainForCompositionSurfaceHandle(
             device,
             Some(surface_handle),
-            &desc,
+            &raw const desc,
             None,
         )
     }

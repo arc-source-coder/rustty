@@ -35,3 +35,6 @@ windows = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 windows-numerics.workspace = true
+
+[lints]
+workspace = true

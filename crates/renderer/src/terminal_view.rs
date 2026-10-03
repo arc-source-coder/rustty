@@ -3,10 +3,10 @@ use std::rc::Rc;
 
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle, ElementId, Entity,
-    FocusHandle, FocusOutEvent, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    FocusHandle, FocusOutEvent, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent,
     KeyUpEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, Styled, Subscription,
-    Window, div, px,
+    MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent, Styled as _,
+    Subscription, Window, div, px,
 };
 use gpui::{AsyncApp, Task, WeakEntity};
 use terminal::{AppAction, MousePosition, TerminalSession};
@@ -187,8 +187,8 @@ impl TerminalView {
 
         Some(MousePosition {
             // These will never be 0 because all grid construction sites clamp to min 1.
-            x: mouse_col.min((cols - 1) as u32),
-            y: mouse_row.min((rows - 1) as u32),
+            x: mouse_col.min(u32::from(cols - 1)),
+            y: mouse_row.min(u32::from(rows - 1)),
             x_px: x_px * scale_factor,
             y_px: y_px * scale_factor,
         })
@@ -334,7 +334,7 @@ impl TerminalView {
                 MouseButton::Left => terminal::MouseButton::Left,
                 MouseButton::Right => terminal::MouseButton::Right,
                 MouseButton::Middle => terminal::MouseButton::Middle,
-                _ => terminal::MouseButton::Unknown,
+                MouseButton::Navigate(_) => terminal::MouseButton::Unknown,
             },
             None => terminal::MouseButton::None,
         };
@@ -357,7 +357,7 @@ impl TerminalView {
             return;
         };
 
-        let cell_h = self.cell_metrics.map(|m| m.line_height).unwrap_or(16.0);
+        let cell_h = self.cell_metrics.map_or(16.0, |m| m.line_height);
 
         let mut action = None;
         let mut emit = |next| action = Some(next);

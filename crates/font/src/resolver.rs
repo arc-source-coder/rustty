@@ -231,7 +231,7 @@ impl IDWriteTextAnalysisSource_Impl for SingleTextAnalysisSource_Impl {
     ) -> windows::core::Result<()> {
         let pos = textposition.min(self.text_len) as usize;
         unsafe {
-            *textstring = self.text_ptr.add(pos) as *mut u16;
+            *textstring = self.text_ptr.add(pos).cast_mut();
             *textlength = self.text_len - pos as u32;
         }
         Ok(())
@@ -245,7 +245,7 @@ impl IDWriteTextAnalysisSource_Impl for SingleTextAnalysisSource_Impl {
     ) -> windows::core::Result<()> {
         let pos = textposition.min(self.text_len);
         unsafe {
-            *textstring = self.text_ptr as *mut u16;
+            *textstring = self.text_ptr.cast_mut();
             *textlength = pos;
         }
         Ok(())

@@ -20,7 +20,25 @@ const NUMLOCK_ON: u32 = 0x0020;
 /// media keys, etc.).
 pub(crate) fn map_key(key: &str) -> Option<W3cCode> {
     if key.len() == 1 {
-        return map_single_char_key(key.as_bytes()[0]);
+        let byte = key.as_bytes()[0];
+        return match byte {
+            b'a'..=b'z' => map_letter_key(byte),
+            b'A'..=b'Z' => map_letter_key(byte.to_ascii_lowercase()),
+            b'0'..=b'9' => map_digit_key(byte),
+            b'`' => key_from_w3c(b"backquote"),
+            b'\\' => key_from_w3c(b"backslash"),
+            b'[' => key_from_w3c(b"bracket_left"),
+            b']' => key_from_w3c(b"bracket_right"),
+            b',' => key_from_w3c(b"comma"),
+            b'=' => key_from_w3c(b"equal"),
+            b'-' => key_from_w3c(b"minus"),
+            b'.' => key_from_w3c(b"period"),
+            b'\'' => key_from_w3c(b"quote"),
+            b';' => key_from_w3c(b"semicolon"),
+            b'/' => key_from_w3c(b"slash"),
+            b' ' => key_from_w3c(b"space"),
+            _ => None,
+        };
     }
 
     let lower;
@@ -53,10 +71,10 @@ pub(crate) fn pack_key_mods(
     modifiers: &gpui::Modifiers,
     native_key: Option<WindowsNativeKey>,
 ) -> Mods {
-    let mut packed = (modifiers.shift as u16)
-        | ((modifiers.control as u16) << 1)
-        | ((modifiers.alt as u16) << 2)
-        | ((modifiers.platform as u16) << 3);
+    let mut packed = u16::from(modifiers.shift)
+        | (u16::from(modifiers.control) << 1)
+        | (u16::from(modifiers.alt) << 2)
+        | (u16::from(modifiers.platform) << 3);
 
     if let Some(native) = native_key {
         if (native.control_key_state & CAPSLOCK_ON) != 0 {
@@ -72,10 +90,10 @@ pub(crate) fn pack_key_mods(
 
 pub(crate) fn pack_mouse_mods(modifiers: &gpui::Modifiers) -> Mods {
     Mods(
-        (modifiers.shift as u16)
-            | ((modifiers.control as u16) << 1)
-            | ((modifiers.alt as u16) << 2)
-            | ((modifiers.platform as u16) << 3),
+        u16::from(modifiers.shift)
+            | (u16::from(modifiers.control) << 1)
+            | (u16::from(modifiers.alt) << 2)
+            | (u16::from(modifiers.platform) << 3),
     )
 }
 
@@ -208,27 +226,6 @@ fn compute_unshifted_codepoint(keystroke: &gpui::Keystroke) -> u32 {
     }
 
     0
-}
-
-fn map_single_char_key(byte: u8) -> Option<W3cCode> {
-    match byte {
-        b'a'..=b'z' => map_letter_key(byte),
-        b'A'..=b'Z' => map_letter_key(byte.to_ascii_lowercase()),
-        b'0'..=b'9' => map_digit_key(byte),
-        b'`' => key_from_w3c(b"backquote"),
-        b'\\' => key_from_w3c(b"backslash"),
-        b'[' => key_from_w3c(b"bracket_left"),
-        b']' => key_from_w3c(b"bracket_right"),
-        b',' => key_from_w3c(b"comma"),
-        b'=' => key_from_w3c(b"equal"),
-        b'-' => key_from_w3c(b"minus"),
-        b'.' => key_from_w3c(b"period"),
-        b'\'' => key_from_w3c(b"quote"),
-        b';' => key_from_w3c(b"semicolon"),
-        b'/' => key_from_w3c(b"slash"),
-        b' ' => key_from_w3c(b"space"),
-        _ => None,
-    }
 }
 
 fn map_letter_key(byte: u8) -> Option<W3cCode> {

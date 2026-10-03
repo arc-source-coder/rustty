@@ -45,7 +45,7 @@ pub export fn ghostty_terminal_set_selection(
     start_y: u32,
     end_x: u16,
     end_y: u32,
-    rectangular: u8,
+    rectangular: bool,
 ) callconv(.c) c_int {
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
     handle.lock();
@@ -62,7 +62,7 @@ pub export fn ghostty_terminal_set_selection(
         .y = end_y,
     } }) orelse return 1;
 
-    const sel = terminal.Selection.init(start_pin, end_pin, rectangular != 0);
+    const sel = terminal.Selection.init(start_pin, end_pin, rectangular);
     screen.select(sel) catch return 1;
     return 0;
 }

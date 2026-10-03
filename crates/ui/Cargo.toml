@@ -9,3 +9,6 @@ terminal = { path = "../terminal" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = ["Wdk_System_SystemServices", "Win32_System_SystemInformation"] }
+
+[lints]
+workspace = true

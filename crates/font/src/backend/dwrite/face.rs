@@ -94,7 +94,7 @@ fn measure_face_dimensions(face: &IDWriteFontFace, font_size: f32) -> Result<Fac
 fn measure_zero_advance_width(face: &IDWriteFontFace, font_size: f32) -> Result<Option<f32>> {
     let mut raw = DWRITE_FONT_METRICS::default();
     unsafe {
-        face.GetMetrics(&mut raw);
+        face.GetMetrics(&raw mut raw);
     }
     if raw.designUnitsPerEm == 0 {
         return Ok(None);
@@ -113,7 +113,7 @@ fn measure_zero_advance_width(face: &IDWriteFontFace, font_size: f32) -> Result<
     unsafe {
         face.GetDesignGlyphMetrics(glyph_index.as_ptr(), 1, glyph_metrics.as_mut_ptr(), false)?;
     }
-    let scale = font_size / raw.designUnitsPerEm as f32;
+    let scale = font_size / f32::from(raw.designUnitsPerEm);
     Ok(Some(glyph_metrics[0].advanceWidth as f32 * scale))
 }
 
@@ -205,7 +205,7 @@ impl DWriteGlyphRasterizer {
         let enumerator = unsafe {
             factory4.TranslateColorGlyphRun(
                 Vector2 { X: 0.0, Y: 0.0 },
-                &glyph_run,
+                &raw const glyph_run,
                 None,
                 desired_formats,
                 DWRITE_MEASURING_MODE_NATURAL,
@@ -296,8 +296,9 @@ impl DWriteGlyphRasterizer {
     ) -> Result<Option<RasterizedGlyph>> {
         let mut data = DWRITE_GLYPH_IMAGE_DATA::default();
         let mut context = std::ptr::null_mut();
-        let hr =
-            unsafe { face4.GetGlyphImageData(glyph_index, ppem, format, &mut data, &mut context) };
+        let hr = unsafe {
+            face4.GetGlyphImageData(glyph_index, ppem, format, &raw mut data, &raw mut context)
+        };
         if hr.is_err() {
             return Ok(None);
         }
@@ -312,7 +313,7 @@ impl DWriteGlyphRasterizer {
         }
 
         let pixels = unsafe {
-            std::slice::from_raw_parts(data.imageData as *const u8, data.imageDataSize as usize)
+            std::slice::from_raw_parts(data.imageData.cast::<u8>(), data.imageDataSize as usize)
         };
         let (decoded_pixels, width, height) =
             if format == DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8 {
@@ -376,9 +377,7 @@ impl DWriteGlyphRasterizer {
 
         let mut width = 0;
         let mut height = 0;
-        unsafe {
-            converter.GetSize(&mut width, &mut height)?;
-        }
+        unsafe { converter.GetSize(&raw mut width, &raw mut height)? };
         if width == 0 || height == 0 {
             return Ok(None);
         }
@@ -512,13 +511,13 @@ impl DWriteGlyphRasterizer {
                 font_size,
                 96.0,
                 96.0,
-                Some(&transform),
+                Some(&raw const transform),
                 false,
                 DWRITE_OUTLINE_THRESHOLD_ANTIALIASED,
                 DWRITE_MEASURING_MODE_NATURAL,
                 self.rendering_params.as_ref(),
-                &mut rendering_mode,
-                &mut grid_fit_mode,
+                &raw mut rendering_mode,
+                &raw mut grid_fit_mode,
             )?;
         }
         if rendering_mode == DWRITE_RENDERING_MODE_OUTLINE {
@@ -527,8 +526,8 @@ impl DWriteGlyphRasterizer {
 
         Ok(unsafe {
             self.factory.CreateGlyphRunAnalysis(
-                &glyph_run,
-                Some(&transform),
+                &raw const glyph_run,
+                Some(&raw const transform),
                 rendering_mode,
                 DWRITE_MEASURING_MODE_NATURAL,
                 grid_fit_mode,

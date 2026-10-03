@@ -1,4 +1,5 @@
 /// IO thread — handles input ingress, mailbox, and timers.
+use std::ffi::c_void;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -40,28 +41,31 @@ pub fn spawn_suspended(
         io_notify,
         renderer_wake,
     });
-    let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
+    let ctx_ptr = Box::into_raw(ctx).cast::<c_void>();
     match PlatformThread::spawn_suspended(io_thread_entry, ctx_ptr) {
         Ok(thread) => Ok(thread),
         Err(err) => {
             // SAFETY: ctx_ptr was produced by Box::into_raw above.
-            unsafe {
-                drop(Box::from_raw(ctx_ptr as *mut IoThreadContext));
-            }
+            unsafe { drop(Box::from_raw(ctx_ptr.cast::<IoThreadContext>())) };
             Err(err)
         }
     }
 }
 
 /// Ntdll thread entry trampoline.
-unsafe extern "system" fn io_thread_entry(context: *mut std::ffi::c_void) -> u32 {
+unsafe extern "system" fn io_thread_entry(context: *mut c_void) -> u32 {
     set_current_thread_name("pty-io");
     #[cfg(feature = "profiler")]
     tracy_client::set_thread_name!("pty-io");
 
     // SAFETY: context comes from Box::into_raw in spawn_suspended.
-    let ctx = unsafe { Box::from_raw(context as *mut IoThreadContext) };
-    let mut thread = IoThread::new(ctx.console_session, ctx.terminal, ctx.io_notify, ctx.renderer_wake);
+    let ctx = unsafe { Box::from_raw(context.cast::<IoThreadContext>()) };
+    let mut thread = IoThread::new(
+        ctx.console_session,
+        ctx.terminal,
+        ctx.io_notify,
+        ctx.renderer_wake,
+    );
     thread.run();
     0
 }

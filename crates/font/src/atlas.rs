@@ -171,8 +171,8 @@ impl Atlas {
             width,
             height,
         };
-        let mut best_height: u32 = u32::MAX;
-        let mut best_width: u32 = u32::MAX;
+        let mut best_height = u32::MAX;
+        let mut best_width = u32::MAX;
         let mut chosen: Option<usize> = None;
 
         for i in 0..self.nodes.len() {

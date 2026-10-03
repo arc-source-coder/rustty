@@ -44,9 +44,9 @@ impl FontFallbackContext {
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                &mut mapped_length,
-                &mut mapped_font,
-                &mut scale,
+                &raw mut mapped_length,
+                &raw mut mapped_font,
+                &raw mut scale,
             )?;
         }
 

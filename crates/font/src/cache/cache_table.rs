@@ -91,7 +91,7 @@ pub struct CacheTable<
 // We enforce these at compile-time for each monomorphized instantiation.
 const fn validate_params_const<const B: usize, const S: usize>() {
     assert!(B > 0, "BUCKETS must be > 0");
-    assert!((B & (B - 1)) == 0, "BUCKETS must be a power of two");
+    assert!(B.is_power_of_two(), "BUCKETS must be a power of two");
     assert!(S > 0, "BUCKET_SIZE must be > 0");
     assert!(S <= u8::MAX as usize, "BUCKET_SIZE must fit in u8");
 }
@@ -103,9 +103,9 @@ impl<K, V, const BUCKETS: usize, const BUCKET_SIZE: usize> CacheTable<K, V, BUCK
         // Runtime debug checks mirror the compile-time rules for easier
         // diagnosis in debug builds and to document hot-path assumptions.
         debug_assert!(BUCKETS > 0);
-        debug_assert!((BUCKETS & (BUCKETS - 1)) == 0);
+        debug_assert!(BUCKETS.is_power_of_two());
         debug_assert!(BUCKET_SIZE > 0);
-        debug_assert!(BUCKET_SIZE <= u8::MAX as usize);
+        debug_assert!(u8::try_from(BUCKET_SIZE).is_ok());
 
         // SAFETY: MaybeUninit<T> does not require initialization. We zero
         // the `lengths` array so no bucket slot is ever read before being
@@ -113,7 +113,7 @@ impl<K, V, const BUCKETS: usize, const BUCKET_SIZE: usize> CacheTable<K, V, BUCK
         // Ghostty's `= undefined` for buckets + `= @splat(0)` for lengths.
         let storage = unsafe {
             let layout = std::alloc::Layout::new::<Storage<K, V, BUCKETS, BUCKET_SIZE>>();
-            let ptr = std::alloc::alloc(layout) as *mut Storage<K, V, BUCKETS, BUCKET_SIZE>;
+            let ptr = std::alloc::alloc(layout).cast::<Storage<K, V, BUCKETS, BUCKET_SIZE>>();
             if ptr.is_null() {
                 std::alloc::handle_alloc_error(layout);
             }
@@ -155,7 +155,7 @@ impl<K, V, const BUCKETS: usize, const BUCKET_SIZE: usize> CacheTable<K, V, BUCK
         // — handles overlapping regions), and write the new entry into
         // the last position. After this, all slots are still initialized.
         unsafe {
-            let base = bucket.as_mut_ptr() as *mut Entry<K, V>;
+            let base = bucket.as_mut_ptr().cast::<Entry<K, V>>();
             let evicted = ptr::read(base);
             ptr::copy(base.add(1), base, BUCKET_SIZE - 1);
             ptr::write(base.add(BUCKET_SIZE - 1), Entry { key, value });
@@ -198,7 +198,7 @@ impl<K, V, const BUCKETS: usize, const BUCKET_SIZE: usize> CacheTable<K, V, BUCK
                     // overlap), and write the hit entry into slot[len-1].
                     // All slots i..len remain initialized afterward.
                     unsafe {
-                        let base = bucket.as_mut_ptr() as *mut Entry<K, V>;
+                        let base = bucket.as_mut_ptr().cast::<Entry<K, V>>();
                         let hit = ptr::read(base.add(i));
                         ptr::copy(base.add(i + 1), base.add(i), len - 1 - i);
                         ptr::write(base.add(len - 1), hit);

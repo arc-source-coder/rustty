@@ -64,7 +64,7 @@ fn system_font_collection(
 ) -> Result<IDWriteFontCollection> {
     let factory_base = factory.cast::<IDWriteFactory>()?;
     let mut out = None;
-    unsafe { factory_base.GetSystemFontCollection(&mut out, check_for_updates) }?;
+    unsafe { factory_base.GetSystemFontCollection(&raw mut out, check_for_updates) }?;
     out.ok_or_else(|| anyhow!("DirectWrite returned no system font collection"))
 }
 
@@ -81,10 +81,10 @@ fn resolve_style_face(
         return Ok(face);
     }
 
-    if !request.family.eq_ignore_ascii_case("Consolas") {
-        if let Ok(face) = resolve_style_face_for_family(system_collection, style, "Consolas") {
-            return Ok(face);
-        }
+    if !request.family.eq_ignore_ascii_case("Consolas")
+        && let Ok(face) = resolve_style_face_for_family(system_collection, style, "Consolas")
+    {
+        return Ok(face);
     }
 
     Err(anyhow!(
@@ -108,7 +108,7 @@ fn resolve_style_face_for_family(
     let mut index = 0;
     let mut exists = BOOL(0);
     let family_name_w = PCWSTR(family_utf16.as_ptr());
-    unsafe { system_collection.FindFamilyName(family_name_w, &mut index, &mut exists) }?;
+    unsafe { system_collection.FindFamilyName(family_name_w, &raw mut index, &raw mut exists) }?;
     if !exists.as_bool() {
         return Err(anyhow!(
             "no matching family for family='{family_name}' style={style:?}"

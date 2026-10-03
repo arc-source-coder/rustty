@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 #[cfg(target_os = "windows")]
-use rapidhash::{HashMapExt, RapidHashMap};
+use rapidhash::{HashMapExt as _, RapidHashMap};
 
 #[cfg(target_os = "windows")]
 use std::mem::ManuallyDrop;
@@ -16,7 +16,7 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteFontFace, IDWriteFontFace2, IDWriteFontFace4,
 };
 #[cfg(target_os = "windows")]
-use windows_core::Interface;
+use windows_core::Interface as _;
 #[cfg(target_os = "windows")]
 use windows_numerics::Vector2;
 
@@ -121,10 +121,10 @@ impl Collection {
         presentation: Option<Presentation>,
     ) -> bool {
         let style_idx = index.style() as usize;
-        let entry = match self.faces[style_idx].get(index.index() as usize) {
-            Some(entry) => entry,
-            None => return false,
+        let Some(entry) = self.faces[style_idx].get(index.index() as usize) else {
+            return false;
         };
+
         entry.query_has_codepoint(codepoint, presentation, self.dwrite_factory4.as_ref())
     }
 
@@ -239,7 +239,7 @@ fn glyph_has_color_run(factory4: &IDWriteFactory4, face: &IDWriteFontFace, glyph
     unsafe {
         factory4.TranslateColorGlyphRun(
             Vector2 { X: 0.0, Y: 0.0 },
-            &glyph_run,
+            &raw const glyph_run,
             None,
             DWRITE_GLYPH_IMAGE_FORMATS_COLR
                 | DWRITE_GLYPH_IMAGE_FORMATS_SVG

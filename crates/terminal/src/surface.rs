@@ -83,15 +83,15 @@ impl TerminalSurface {
                         had_selection
                     }
                     2 => {
-                        let selected = term.select_word_at(position.x as u16, position.y as u32);
+                        let selected = term.select_word_at(position.x as u16, position.y);
                         self.drag_anchor = Some(position);
                         selected
                     }
                     3 => {
                         let selected = if mods.control || mods.platform {
-                            term.select_output_at(position.x as u16, position.y as u32)
+                            term.select_output_at(position.x as u16, position.y)
                         } else {
-                            term.select_line_at(position.x as u16, position.y as u32)
+                            term.select_line_at(position.x as u16, position.y)
                         };
                         self.drag_anchor = Some(position);
                         selected

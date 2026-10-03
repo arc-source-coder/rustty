@@ -19,7 +19,7 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory2, IDWriteFactory6,
 };
 use windows::Win32::Graphics::Dxgi::IDXGISwapChain1;
-use windows::core::{HSTRING, Interface};
+use windows::core::{HSTRING, Interface as _};
 
 use super::backend_d3d11::D3D11Backend;
 use super::scene::{
@@ -187,8 +187,7 @@ impl RendererThread {
                 recv(rx) -> msg => {
                     match msg {
                         Ok(RendererMessage::Wake) => pending_wake = true,
-                        Ok(RendererMessage::Quit) => break,
-                        Err(_) => break,
+                        Ok(RendererMessage::Quit) | Err(_) => break,
                     }
                 }
             }
@@ -196,9 +195,8 @@ impl RendererThread {
             loop {
                 match rx.try_recv() {
                     Ok(RendererMessage::Wake) => pending_wake = true,
-                    Ok(RendererMessage::Quit) => return,
                     Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => return,
+                    Ok(RendererMessage::Quit) | Err(TryRecvError::Disconnected) => return,
                 }
             }
 
@@ -387,8 +385,7 @@ fn coalesce_wakes(rx: &Receiver<RendererMessage>, window: Duration) -> bool {
     loop {
         match rx.try_recv() {
             Ok(RendererMessage::Wake) => continue,
-            Ok(RendererMessage::Quit) => return false,
-            Err(TryRecvError::Disconnected) => return false,
+            Ok(RendererMessage::Quit) | Err(TryRecvError::Disconnected) => return false,
             Err(TryRecvError::Empty) => {}
         }
 

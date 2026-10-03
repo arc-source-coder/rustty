@@ -40,8 +40,8 @@ pub struct RunIteratorHook {
 impl RunIteratorHook {
     pub(crate) fn new(shaper: &mut crate::shaper::shaper::Shaper) -> Self {
         Self {
-            codepoints: &mut shaper.codepoints as *mut _,
-            utf16_buf: &mut shaper.utf16_buf as *mut _,
+            codepoints: &raw mut shaper.codepoints,
+            utf16_buf: &raw mut shaper.utf16_buf,
         }
     }
 
@@ -218,11 +218,11 @@ impl<'a> RunIterator<'a> {
             } else if let Some(idx) =
                 self.opts
                     .grid
-                    .get_index(b' ' as u32, run_variant, presentation)
+                    .get_index(u32::from(b' '), run_variant, presentation)
             {
                 FontInfo {
                     idx,
-                    fallback: Some(b' ' as u32),
+                    fallback: Some(u32::from(b' ')),
                 }
             } else {
                 return None;
@@ -242,7 +242,7 @@ impl<'a> RunIterator<'a> {
             }
 
             if cell.codepoint() == KITTY_UNICODE_PLACEHOLDER {
-                self.add_codepoint(&mut hasher, b' ' as u32, cluster);
+                self.add_codepoint(&mut hasher, u32::from(b' '), cluster);
                 j += 1;
                 continue;
             }
@@ -268,7 +268,7 @@ impl<'a> RunIterator<'a> {
         let cells = (j - start) as u16;
 
         Some(TextRun {
-            hash: hasher.finish(cells as u32, current_font.to_u16() as u64),
+            hash: hasher.finish(u32::from(cells), u64::from(current_font.to_u16())),
             offset: start as u16,
             cells,
             font_index: current_font,
@@ -367,13 +367,13 @@ fn font_variant_from_style(style: Option<&CellStyle>) -> Style {
 
 #[inline]
 fn normalize_codepoint(cp: u32) -> u32 {
-    if cp == 0 { b' ' as u32 } else { cp }
+    if cp == 0 { u32::from(b' ') } else { cp }
 }
 
 #[inline]
 fn split_bad_ligature(prev: u32, current: u32) -> bool {
-    (prev == b'f' as u32 && (current == b'l' as u32 || current == b'i' as u32))
-        || (prev == b's' as u32 && current == b't' as u32)
+    (prev == u32::from(b'f') && (current == u32::from(b'l') || current == u32::from(b'i')))
+        || (prev == u32::from(b's') && current == u32::from(b't'))
 }
 
 #[inline]
