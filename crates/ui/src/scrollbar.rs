@@ -2,12 +2,12 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, BorderStyle, Bounds, Context, Corners, CursorStyle, DispatchPhase, Edges, Element,
-    ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, Position, Render, Size, Style, Task, Window, px, quad, relative, size,
+    ElementId, Entity, EventEmitter, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Position, Render, Size, Style, Task, Window, px, quad, relative,
+    size,
 };
 use terminal::ScrollbarInfo;
-use terminal::TerminalSession;
 
 /// Delay before the scrollbar starts fading out after the last scroll event.
 const HIDE_DELAY: Duration = Duration::from_millis(800);
@@ -120,9 +120,11 @@ impl InteractionState {
 ///
 /// `TerminalView` holds `Entity<ScrollbarState>` and forwards scroll events.
 /// `ScrollbarElement` holds the same entity and handles all mouse interaction.
-pub struct ScrollbarState {
-    session: Entity<TerminalSession>,
+pub enum ScrollbarEvent {
+    ScrollToRow(u64),
+}
 
+pub struct ScrollbarState {
     /// Current opacity animation (0.0 = hidden, 1.0 = fully visible).
     opacity_anim: AnimatedFloat,
     /// Current width animation (THIN_WIDTH..WIDE_WIDTH).
@@ -138,10 +140,11 @@ pub struct ScrollbarState {
     scrollbar_info: ScrollbarInfo,
 }
 
+impl EventEmitter<ScrollbarEvent> for ScrollbarState {}
+
 impl ScrollbarState {
-    pub fn new(session: Entity<TerminalSession>) -> Self {
+    pub fn new() -> Self {
         Self {
-            session,
             opacity_anim: AnimatedFloat::immediate(0.0),
             width_anim: AnimatedFloat::immediate(THIN_WIDTH),
             interaction: InteractionState::Inactive,
@@ -513,9 +516,8 @@ impl Element for ScrollbarElement {
                         // Track click: jump thumb center to click position.
                         let grab_offset = layout.thumb_height / 2.0;
                         let row = s.row_for_pointer_y(&layout, event.position.y, grab_offset);
-                        let session = s.session.clone();
-                        session.read(cx).scroll_to_row(row);
                         s.start_drag(grab_offset, cx);
+                        cx.emit(ScrollbarEvent::ScrollToRow(row));
                     }
                 });
 
@@ -534,8 +536,7 @@ impl Element for ScrollbarElement {
                 state.update(cx, |s, cx| {
                     if let Some(grab_offset) = s.grab_offset() {
                         let row = s.row_for_pointer_y(&layout, event.position.y, grab_offset);
-                        let session = s.session.clone();
-                        session.read(cx).scroll_to_row(row);
+                        cx.emit(ScrollbarEvent::ScrollToRow(row));
                         // Keep visible during drag; do not reschedule the hide timer.
                         s.show(cx);
                         // Notify unconditionally: show() skips notify when already at full
