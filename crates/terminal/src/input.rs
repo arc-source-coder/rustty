@@ -22,10 +22,10 @@ pub trait ToZconptyMods {
 impl ToZconptyMods for gpui::Modifiers {
     fn mods(&self) -> Modifiers {
         Modifiers(
-            u16::from(self.shift)
-                | (u16::from(self.control) << 1)
-                | (u16::from(self.alt) << 2)
-                | (u16::from(self.platform) << 3),
+            (u16::from(self.shift) * Modifiers::SHIFT)
+                | (u16::from(self.control) * Modifiers::CTRL)
+                | (u16::from(self.alt) * Modifiers::ALT)
+                | (u16::from(self.platform) * Modifiers::SUPER),
         )
     }
 }
@@ -45,22 +45,17 @@ impl ToZconptyMods for KeyUpEvent {
 impl ToZconptyMods for ModifiersChangedEvent {
     fn mods(&self) -> Modifiers {
         let mut mods = self.modifiers.mods();
-        if self.capslock.on {
-            mods.0 |= 1 << 4;
-        }
+        mods.0 |= u16::from(self.capslock.on) * Modifiers::CAPS_LOCK;
         apply_native(mods, self.changed_native_key)
     }
 }
 
 #[inline]
-fn apply_native(mut mods: Modifiers, nk: Option<WindowsNativeKey>) -> Modifiers {
-    if let Some(native_key) = nk {
-        if (native_key.control_key_state & CAPSLOCK_ON) != 0 {
-            mods.0 |= 1 << 4;
-        }
-        if (native_key.control_key_state & NUMLOCK_ON) != 0 {
-            mods.0 |= 1 << 5;
-        }
+fn apply_native(mut mods: Modifiers, native_key: Option<WindowsNativeKey>) -> Modifiers {
+    if let Some(native_key) = native_key {
+        let state = native_key.control_key_state;
+        mods.0 |= u16::from(state & CAPSLOCK_ON != 0) * Modifiers::CAPS_LOCK;
+        mods.0 |= u16::from(state & NUMLOCK_ON != 0) * Modifiers::NUM_LOCK;
     }
     mods
 }
@@ -202,6 +197,8 @@ impl ConsumedModifiers for KeyDownEvent {
             return Modifiers(0);
         }
 
+        let mut consumed = u16::from(self.keystroke.modifiers.shift) * Modifiers::SHIFT;
+
         // AltGr generates text while reporting Ctrl+Alt on Windows.
         // Mark these as consumed so text input doesn't look like a Ctrl+Alt binding.
         // TODO: Find out a better way to do this than a heuristic.
@@ -209,11 +206,11 @@ impl ConsumedModifiers for KeyDownEvent {
             let state = native_key.control_key_state;
             const CTRL_PRESSED: u32 = LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED;
             if (state & RIGHT_ALT_PRESSED) != 0 && (state & CTRL_PRESSED) != 0 {
-                return Modifiers((1 << 1) | (1 << 2));
+                consumed |= Modifiers::CTRL | Modifiers::ALT;
             }
         }
 
-        Modifiers(0)
+        Modifiers(consumed)
     }
 }
 
