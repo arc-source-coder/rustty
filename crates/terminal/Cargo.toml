@@ -3,26 +3,18 @@ name = "terminal"
 version.workspace = true
 edition.workspace = true
 
-[features]
-profiler = ["dep:tracy-client"]
-
 [dependencies]
-tracy-client = { workspace = true, optional = true }
-log.workspace = true
-async-channel.workspace = true
 gpui.workspace = true
+
+log.workspace = true
+
+async-channel.workspace = true
+crossbeam-queue.workspace = true
+crossbeam-channel.workspace = true
+
+config = { path = "../config" }
 ghostty = { path = "../ghostty" }
 zconpty = { path = "../zconpty" }
-crossbeam-channel.workspace = true
-crossbeam-queue.workspace = true
-windows-sys = {
-    workspace = true,
-    features = [
-        "Win32_Foundation",
-        "Win32_System_Console",
-    ]
-}
-bytes = "1.11.1"
 
 [lints]
 workspace = true

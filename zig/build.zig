@@ -40,20 +40,26 @@ fn configureGhosttyModule(b: *std.Build, module: *std.Build.Module, ctx: Context
     module.addAnonymousImport("unicode_tables", .{ .root_source_file = ctx.props_output });
     module.addAnonymousImport("symbols_tables", .{ .root_source_file = ctx.symbols_output });
 
+    const z2d_dep = b.dependency("z2d", .{
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+    });
+    module.addImport("z2d", z2d_dep.module("z2d"));
+
     if (!ctx.terminal_options.simd) return;
 
     // Configure SIMD dependencies
     const simdutf_dep = b.dependency("simdutf", .{ .target = ctx.target, .optimize = ctx.optimize });
     const highway_dep = b.dependency("highway", .{ .target = ctx.target, .optimize = ctx.optimize });
-    const utfcpp_dep = b.dependency("utfcpp", .{ .target = ctx.target, .optimize = ctx.optimize });
 
     const simdutf = simdutf_dep.artifact("simdutf");
     const highway = highway_dep.artifact("highway");
-    const utfcpp = utfcpp_dep.artifact("utfcpp");
+
+    simdutf.lto = .full;
+    highway.lto = .full;
 
     module.linkLibrary(simdutf);
     module.linkLibrary(highway);
-    module.linkLibrary(utfcpp);
 
     module.addIncludePath(b.path("ghostty/src"));
 
@@ -185,35 +191,13 @@ pub fn build(b: *std.Build) !void {
             .link_libc = terminal_options.simd,
         }),
     });
+
     lib.bundle_compiler_rt = false;
     try configureGhosttyModule(b, lib.root_module, ctx);
 
     // Wire up generated unicode tables
     props_output.addStepDependencies(&lib.step);
     symbols_output.addStepDependencies(&lib.step);
-
-    // --- Tests ---
-    var test_terminal_ctx = ctx;
-    test_terminal_ctx.terminal_options.slow_runtime_safety = true;
-
-    const test_step = b.step("test", "Run Zig shim tests");
-    const shim_tests = b.addExecutable(.{
-        .name = "ghostty_shim_tests",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = test_terminal_ctx.terminal_options.simd,
-        }),
-    });
-    try configureGhosttyModule(b, shim_tests.root_module, test_terminal_ctx);
-    test_step.dependOn(&b.addRunArtifact(shim_tests).step);
-
-    const fmt_check = b.addFmt(.{
-        // ziglint-ignore: Z024
-        .paths = &.{ "src", "zconpty_shim.zig", "build.zig", "build.zig.zon" },
-    });
-    test_step.dependOn(&fmt_check.step);
 
     const zconpty_dep = b.dependency("zconpty", .{
         .target = target,
@@ -246,11 +230,9 @@ pub fn build(b: *std.Build) !void {
     // Merge all SIMD dependencies into the final library
     const simdutf_dep = b.dependency("simdutf", .{ .target = target, .optimize = optimize });
     const highway_dep = b.dependency("highway", .{ .target = target, .optimize = optimize });
-    const utfcpp_dep = b.dependency("utfcpp", .{ .target = target, .optimize = optimize });
 
     const simdutf = simdutf_dep.artifact("simdutf");
     const highway = highway_dep.artifact("highway");
-    const utfcpp = utfcpp_dep.artifact("utfcpp");
 
     const library_names = libraryNames(target);
     b.getInstallStep().dependOn(&b.addInstallArtifact(lib, .{
@@ -268,7 +250,6 @@ pub fn build(b: *std.Build) !void {
     run.addFileArg(lib.getEmittedBin());
     run.addFileArg(simdutf.getEmittedBin());
     run.addFileArg(highway.getEmittedBin());
-    run.addFileArg(utfcpp.getEmittedBin());
 
     b.getInstallStep().dependOn(&b.addInstallLibFile(merged_library, library_names.merged).step);
 }

@@ -12,7 +12,23 @@ const TerminalHandle = handle_mod.TerminalHandle;
 const OptionalColorRGB = extern struct {
     rgb: u32,
     tag: u8,
-    _pad: [3]u8,
+};
+
+/// C/Rust mirror of `std.MultiArrayList(T)` header.
+///
+/// Rust uses this with type-specific prefix constants to recreate
+/// `MultiArrayList.slice().items(.field)` without copying cell data.
+pub const ZigMultiArrayList = extern struct {
+    bytes: [*]const u8,
+    len: usize,
+    capacity: usize,
+};
+
+/// C/Rust mirror for `?[2]u16` used by `RenderState.Row.selection`.
+/// Layout is validated against Zig's optional representation below.
+pub const OptionalSelection = extern struct {
+    range: [2]u16,
+    tag: u8,
 };
 
 /// C/Rust mirror for `terminal.RenderState.Colors`.
@@ -27,12 +43,73 @@ pub const RenderColors = extern struct {
     palette: [256]u32,
 };
 
+/// C/Rust mirror of `terminal.RenderState.Cursor.Viewport`.
+const CursorViewport = extern struct {
+    x: u16,
+    y: u16,
+    wide_tail: bool,
+};
+
+/// C/Rust mirror of `?terminal.RenderState.Cursor.Viewport`.
+const OptionalCursorViewport = extern struct {
+    viewport: CursorViewport,
+    tag: u8,
+};
+
+/// C/Rust mirror of `terminal.RenderState.Cursor`.
+const RenderCursor = extern struct {
+    // Field order is memory order, not Ghostty declaration order.
+    cell: u64,
+    active: terminal.Coordinate,
+    style: CellStyle,
+    viewport: OptionalCursorViewport,
+    visual_style: u8,
+    password_input: bool,
+    visible: bool,
+    blinking: bool,
+};
+
+fn malOffset(comptime Mal: type, comptime field: Mal.Field) usize {
+    const mal: Mal = .{ .bytes = @ptrFromInt(0x1000), .len = 1, .capacity = 1 };
+    return @intFromPtr(mal.slice().items(field).ptr) - @intFromPtr(mal.bytes);
+}
+
+fn assertSameLayout(comptime A: type, comptime B: type) void {
+    std.debug.assert(@sizeOf(A) == @sizeOf(B));
+    std.debug.assert(@alignOf(A) == @alignOf(B));
+}
+
 // === ABI STABILITY ASSERTIONS ===
 // These verify that Ghostty's internal type layouts match what the Rust
 // side expects. If any of these assertions fail after a Ghostty update,
 // the Rust-side structs and these assertions must be updated to match.
 comptime {
     const page = @import("../ghostty/src/terminal/page.zig");
+    const render = @import("../ghostty/src/terminal/render.zig");
+
+    const Row = render.RenderState.Row;
+    const Cell = render.RenderState.Cell;
+    const Cursor = render.RenderState.Cursor;
+    const RowMal = std.MultiArrayList(Row);
+    const CellMal = std.MultiArrayList(Cell);
+
+    // These guard the Rust direct-MultiArrayList reader in crates/ghostty/src/zig.rs.
+    // If they fail after a Zig/Ghostty update, update the Rust constants and mirrors.
+    assertSameLayout(ZigMultiArrayList, RowMal);
+
+    std.debug.assert(@offsetOf(ZigMultiArrayList, "bytes") == @offsetOf(RowMal, "bytes"));
+    std.debug.assert(@offsetOf(ZigMultiArrayList, "len") == @offsetOf(RowMal, "len"));
+    std.debug.assert(@offsetOf(ZigMultiArrayList, "capacity") == @offsetOf(RowMal, "capacity"));
+
+    std.debug.assert(malOffset(RowMal, .cells) == 40);
+    std.debug.assert(malOffset(RowMal, .selection) == 88);
+    std.debug.assert(malOffset(RowMal, .dirty) == 94);
+    std.debug.assert(@sizeOf(?[2]u16) == @sizeOf(OptionalSelection));
+    std.debug.assert(@alignOf(?[2]u16) == @alignOf(OptionalSelection));
+
+    std.debug.assert(malOffset(CellMal, .raw) == 0);
+    std.debug.assert(malOffset(CellMal, .grapheme) == 8);
+    std.debug.assert(malOffset(CellMal, .style) == 24);
 
     // --- page.Cell (RawCell on Rust side) ---
     // page.Cell must be u64-aligned so the [*]const u64 cast in _row_raw is sound.
@@ -62,8 +139,17 @@ comptime {
     std.debug.assert(@bitSizeOf(u21) == 21);
     std.debug.assert(@sizeOf(u21) == @sizeOf(u32));
     std.debug.assert(@alignOf(u21) == @alignOf(u32));
-    std.debug.assert(@sizeOf([]const u21) == @sizeOf(GraphemeSlice));
-    std.debug.assert(@alignOf([]const u21) == @alignOf(GraphemeSlice));
+
+    // C-safe mirror of a Zig slice to verify layout.
+    // Used to return []const []const u21 as ?[*]const GraphemeView.
+    // The Rust side interprets it as &[GraphemeView] and forms slices
+    // from ptr + len when accessing the grapheme codepoints for a cell.
+    const GraphemeView = extern struct {
+        ptr: [*]const u21,
+        len: usize,
+    };
+    std.debug.assert(@sizeOf([]const u21) == @sizeOf(GraphemeView));
+    std.debug.assert(@alignOf([]const u21) == @alignOf(GraphemeView));
 
     // --- terminal.Style (CellStyle on Rust side) ---
     // CellStyle is the extern struct matching terminal.Style. These
@@ -80,13 +166,21 @@ comptime {
     // --- Style.Color tagged union (StyleColor on Rust/Zig side) ---
     std.debug.assert(@sizeOf(terminal.Style.Color) == @sizeOf(StyleColor));
     std.debug.assert(@alignOf(terminal.Style.Color) == @alignOf(StyleColor));
-    // Verify tag values via @tagName (none=0, palette=1, rgb=2 based on declaration order)
+
+    const fields = std.meta.fields(terminal.Style.Color);
+    std.debug.assert(fields.len == 3);
+
+    std.debug.assert(std.mem.eql(u8, fields[0].name, "none"));
+    std.debug.assert(std.mem.eql(u8, fields[1].name, "palette"));
+    std.debug.assert(std.mem.eql(u8, fields[2].name, "rgb"));
+
     const none_color: terminal.Style.Color = .none;
-    const pal_color: terminal.Style.Color = .{ .palette = 0xAB };
+    const palette_color: terminal.Style.Color = .{ .palette = 0xAB };
     const rgb_color: terminal.Style.Color = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } };
-    std.debug.assert(std.mem.eql(u8, @tagName(none_color), "none"));
-    std.debug.assert(std.mem.eql(u8, @tagName(pal_color), "palette"));
-    std.debug.assert(std.mem.eql(u8, @tagName(rgb_color), "rgb"));
+
+    std.debug.assert(@intFromEnum(std.meta.activeTag(none_color)) == 0);
+    std.debug.assert(@intFromEnum(std.meta.activeTag(palette_color)) == 1);
+    std.debug.assert(@intFromEnum(std.meta.activeTag(rgb_color)) == 2);
 
     // --- color.RGB zero-copy palette ABI contract ---
     // color.RGB is packed struct(u24): 4 bytes in memory (padded to u32).
@@ -107,23 +201,33 @@ comptime {
     // --- optional color.RGB ABI contract (?color.RGB) ---
     std.debug.assert(@sizeOf(?color.RGB) == @sizeOf(OptionalColorRGB));
     std.debug.assert(@alignOf(?color.RGB) == @alignOf(OptionalColorRGB));
-}
 
-/// C-safe cursor state
-pub const CursorState = extern struct {
-    /// Cursor position in viewport coordinates. If not visible in viewport,
-    /// x and y are set to active-area coordinates and in_viewport is 0.
-    x: u16,
-    y: u16,
-    in_viewport: u8,
-    /// Visual style: 0=bar, 1=block, 2=underline, 3=block_hollow
-    style: u8,
-    visible: u8,
-    blinking: u8,
-    password_input: u8,
-    /// 1 if cursor is on the tail half of a wide char
-    wide_tail: u8,
-};
+    // --- terminal.RenderState.Cursor zero-copy ABI contract ---
+    std.debug.assert(@sizeOf(Cursor.Viewport) == @sizeOf(CursorViewport));
+    std.debug.assert(@alignOf(Cursor.Viewport) == @alignOf(CursorViewport));
+    std.debug.assert(@offsetOf(Cursor.Viewport, "x") == @offsetOf(CursorViewport, "x"));
+    std.debug.assert(@offsetOf(Cursor.Viewport, "y") == @offsetOf(CursorViewport, "y"));
+    std.debug.assert(@offsetOf(Cursor.Viewport, "wide_tail") == @offsetOf(CursorViewport, "wide_tail"));
+
+    std.debug.assert(@sizeOf(?Cursor.Viewport) == @sizeOf(OptionalCursorViewport));
+    std.debug.assert(@alignOf(?Cursor.Viewport) == @alignOf(OptionalCursorViewport));
+
+    std.debug.assert(@intFromEnum(terminal.CursorStyle.bar) == 0);
+    std.debug.assert(@intFromEnum(terminal.CursorStyle.block) == 1);
+    std.debug.assert(@intFromEnum(terminal.CursorStyle.underline) == 2);
+    std.debug.assert(@intFromEnum(terminal.CursorStyle.block_hollow) == 3);
+
+    std.debug.assert(@sizeOf(Cursor) == @sizeOf(RenderCursor));
+    std.debug.assert(@alignOf(Cursor) == @alignOf(RenderCursor));
+    std.debug.assert(@offsetOf(Cursor, "active") == @offsetOf(RenderCursor, "active"));
+    std.debug.assert(@offsetOf(Cursor, "viewport") == @offsetOf(RenderCursor, "viewport"));
+    std.debug.assert(@offsetOf(Cursor, "cell") == @offsetOf(RenderCursor, "cell"));
+    std.debug.assert(@offsetOf(Cursor, "style") == @offsetOf(RenderCursor, "style"));
+    std.debug.assert(@offsetOf(Cursor, "visual_style") == @offsetOf(RenderCursor, "visual_style"));
+    std.debug.assert(@offsetOf(Cursor, "password_input") == @offsetOf(RenderCursor, "password_input"));
+    std.debug.assert(@offsetOf(Cursor, "visible") == @offsetOf(RenderCursor, "visible"));
+    std.debug.assert(@offsetOf(Cursor, "blinking") == @offsetOf(RenderCursor, "blinking"));
+}
 
 /// C-safe mirror of terminal.Style.Color tagged union.
 /// Tag values: 0=none, 1=palette, 2=rgb
@@ -150,15 +254,6 @@ pub const CellStyle = extern struct {
     _pad: [2]u8 = undefined,
 };
 
-/// C-safe mirror of a Zig slice.
-/// Used to return []const []const u21 as ?[*]const GraphemeSlice.
-/// The Rust side interprets it as &[GraphemeSlice] and forms slices
-/// from ptr + len when accessing the grapheme codepoints for a cell.
-pub const GraphemeSlice = extern struct {
-    ptr: ?[*]const u32,
-    len: usize,
-};
-
 /// Update the persistent RenderState from current terminal state.
 /// The caller must already hold the terminal mutex.
 /// Returns 0 on success, 1 on allocation error.
@@ -169,13 +264,9 @@ pub export fn ghostty_terminal_render_update(ptr: *anyopaque) callconv(.c) u8 {
 }
 
 /// Returns dirty state: 0=false, 1=partial, 2=full.
-pub export fn ghostty_terminal_render_dirty(ptr: *anyopaque) callconv(.c) u8 {
+pub export fn ghostty_terminal_render_dirty(ptr: *anyopaque) callconv(.c) c_int {
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    return switch (handle.render_state.dirty) {
-        .false => 0,
-        .partial => 1,
-        .full => 2,
-    };
+    return @intFromEnum(handle.render_state.dirty);
 }
 
 /// Clear the dirty state (call after rendering).
@@ -183,152 +274,39 @@ pub export fn ghostty_terminal_render_clear_dirty(ptr: *anyopaque) callconv(.c) 
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
     handle.render_state.dirty = .false;
     // Also clear per-row dirty flags
-    const row_data = handle.render_state.row_data.slice();
-    const dirty = row_data.items(.dirty);
-    @memset(dirty, false);
+    const row_dirty = handle.render_state.row_data.items(.dirty);
+    @memset(row_dirty, false);
 }
 
-/// Returns number of rows in the current render state.
-pub export fn ghostty_terminal_render_rows(ptr: *anyopaque) callconv(.c) u16 {
+/// Writes the number of rows and columns in the current render state.
+pub export fn ghostty_terminal_get_dimensions(
+    ptr: *anyopaque,
+    // Safety: Rust passes &mut u16 references, which is noalias
+    noalias rows: *u16,
+    noalias cols: *u16,
+) callconv(.c) void {
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    return handle.render_state.rows;
+    rows.* = handle.render_state.rows;
+    cols.* = handle.render_state.cols;
 }
 
-/// Returns number of columns in the current render state.
-pub export fn ghostty_terminal_render_cols(ptr: *anyopaque) callconv(.c) u16 {
+/// Returns a pointer to `RenderState.cursor`.
+/// The pointer is valid until the next `render_update()` call.
+pub export fn ghostty_terminal_render_cursor(ptr: *anyopaque) callconv(.c) *const RenderCursor {
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    return handle.render_state.cols;
+    return @ptrCast(&handle.render_state.cursor);
 }
 
-/// Get cursor state from the current render state.
-pub export fn ghostty_terminal_render_cursor(ptr: *anyopaque, out: *CursorState) callconv(.c) void {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    const c = &handle.render_state.cursor;
-
-    if (c.viewport) |vp| {
-        out.x = vp.x;
-        out.y = vp.y;
-        out.in_viewport = 1;
-        out.wide_tail = @intFromBool(vp.wide_tail);
-    } else {
-        out.x = c.active.x;
-        out.y = @intCast(c.active.y);
-        out.in_viewport = 0;
-        out.wide_tail = 0;
-    }
-
-    out.style = switch (c.visual_style) {
-        .bar => 0,
-        .block => 1,
-        .underline => 2,
-        .block_hollow => 3,
-    };
-    out.visible = @intFromBool(c.visible);
-    out.blinking = @intFromBool(c.blinking);
-    out.password_input = @intFromBool(c.password_input);
-}
-
-/// Returns a direct pointer to `RenderState.colors` (zero-copy).
-///
-/// Valid until next `render_update()` call.
+/// Returns a pointer to `RenderState.colors`
+/// The pointer is valid until the next `render_update()` call.
 pub export fn ghostty_terminal_render_colors(ptr: *anyopaque) callconv(.c) *const RenderColors {
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
     return @ptrCast(&handle.render_state.colors);
 }
 
-/// Get selection range for a row. Returns whether a row has a selection.
-/// When returning true, start_x and end_x are set to the selection column range.
-pub export fn ghostty_terminal_render_row_selection(
-    ptr: *anyopaque,
-    row: u16,
-    start_x: *u16,
-    end_x: *u16,
-) callconv(.c) bool {
+/// Returns a pointer to the `std.MultiArrayList(Row)` in RenderState.
+/// The returned pointer is valid until the next `render_update()` call.
+pub export fn ghostty_terminal_render_row_data(ptr: *anyopaque) callconv(.c) *const ZigMultiArrayList {
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    if (row >= handle.render_state.rows) return false;
-
-    const sel = handle.render_state.row_data.items(.selection)[row];
-    if (sel) |range| {
-        start_x.* = range[0];
-        end_x.* = range[1];
-        return true;
-    }
-    return false;
-}
-
-/// Returns a pointer to the per-row dirty flags in RenderState.
-///
-/// `out_len` is set to the number of viewport rows. The returned pointer is
-/// into `RenderState` memory and is valid until the next `render_update()` call.
-pub export fn ghostty_terminal_render_dirty_rows(
-    ptr: *anyopaque,
-    out_len: *u16,
-) callconv(.c) [*]bool {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    const dirty = handle.render_state.row_data.items(.dirty);
-    out_len.* = @intCast(dirty.len);
-    return dirty.ptr;
-}
-
-/// Returns a direct pointer into RenderState's page.Cell array for a row.
-/// Zero-copy: the pointer is into persistent Zig memory.
-/// Valid until the next render_update() call.
-pub export fn ghostty_terminal_render_row_raw(
-    ptr: *anyopaque,
-    row: u16,
-    out_len: *u16,
-) callconv(.c) ?[*]const u64 {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    if (row >= handle.render_state.rows) return null;
-
-    const cells = handle.render_state.row_data.items(.cells)[row];
-    const raws = cells.items(.raw);
-    out_len.* = @intCast(raws.len);
-    // page.Cell is packed struct(u64), safe to cast to [*]const u64
-    return @ptrCast(raws.ptr);
-}
-
-/// Returns a direct pointer into RenderState's Style array for a row.
-/// Zero-copy: the pointer is into persistent Zig memory.
-/// Valid until the next render_update() call.
-/// The Style data at column `col` is only valid if the corresponding
-/// page.Cell's style_id is non-zero OR content_tag is bg_color_*.
-pub export fn ghostty_terminal_render_row_styles(
-    ptr: *anyopaque,
-    row: u16,
-    out_len: *u16,
-) callconv(.c) ?[*]const CellStyle {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    if (row >= handle.render_state.rows) return null;
-
-    const cells = handle.render_state.row_data.items(.cells)[row];
-    const styles = cells.items(.style);
-    out_len.* = @intCast(styles.len);
-    // ptrCast is valid: CellStyle is an extern struct whose layout
-    // is verified by comptime assertions to match terminal.Style exactly.
-    return @ptrCast(styles.ptr);
-}
-
-/// Returns a direct pointer into the grapheme SoA column for a row.
-/// Each element is a Zig slice []const u21 = { ptr: [*]const u21, len: usize }.
-/// Since @sizeOf(u21) == @sizeOf(u32), ptr can be read as [*]const u32.
-///
-/// For cells without graphemes (content_tag != codepoint_grapheme), the
-/// slice is undefined — caller must check the raw cell's content_tag.
-///
-/// Zero-copy: the pointer is into persistent Zig memory.
-/// Valid until the next render_update() call.
-pub export fn ghostty_terminal_render_row_graphemes(
-    ptr: *anyopaque,
-    row: u16,
-    out_len: *u16,
-) callconv(.c) ?[*]const GraphemeSlice {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    if (row >= handle.render_state.rows) return null;
-
-    const cells = handle.render_state.row_data.items(.cells)[row];
-    const graphemes = cells.items(.grapheme);
-    out_len.* = @intCast(graphemes.len);
-    // ABI validated at comptime: u21 has same size/alignment as u32.
-    return @ptrCast(graphemes.ptr);
+    return @ptrCast(&handle.render_state.row_data);
 }

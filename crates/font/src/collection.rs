@@ -1,256 +1,127 @@
-use anyhow::{Result, anyhow};
-#[cfg(target_os = "windows")]
-use rapidhash::{HashMapExt as _, RapidHashMap};
+use anyhow::anyhow;
+
+use crate::metrics::FontMetrics;
+use crate::types::{FontError, FontIndex, FontSize, FontStyle, Presentation, PresentationMode};
+
+use utils::asserts::unreachable;
 
 #[cfg(target_os = "windows")]
-use std::mem::ManuallyDrop;
-#[cfg(target_os = "windows")]
-use std::sync::RwLock;
-#[cfg(target_os = "windows")]
-use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_GLYPH_IMAGE_FORMATS, DWRITE_GLYPH_IMAGE_FORMATS_COLR,
-    DWRITE_GLYPH_IMAGE_FORMATS_JPEG, DWRITE_GLYPH_IMAGE_FORMATS_PNG,
-    DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8, DWRITE_GLYPH_IMAGE_FORMATS_SVG,
-    DWRITE_GLYPH_IMAGE_FORMATS_TIFF, DWRITE_GLYPH_OFFSET, DWRITE_GLYPH_RUN,
-    DWRITE_MEASURING_MODE_NATURAL, DWriteCreateFactory, IDWriteFactory2, IDWriteFactory4,
-    IDWriteFontFace, IDWriteFontFace2, IDWriteFontFace4,
-};
-#[cfg(target_os = "windows")]
-use windows_core::Interface as _;
-#[cfg(target_os = "windows")]
-use windows_numerics::Vector2;
+use crate::backend::dwrite::face::Face;
 
-use crate::types::Presentation;
-use crate::types::{FontIndex, Style};
-
-pub struct Collection {
-    /// Ghostty equivalent field name: `faces`.
-    /// Reference: `font/Collection.zig`.
-    faces: [Vec<FaceEntry>; 4],
-    /// Transitional DWrite-only pointer->index dedupe map.
-    /// Ghostty does not need this exact map because it adds faces through
-    /// collection-building flow, not per-shape `MapCharacters` callbacks.
-    ///
-    /// TODO(ghostty-parity): remove this map after we complete the Ghostty-style
-    /// collection lifecycle migration:
-    /// 1) fallback/discovery adds faces via resolver lifecycle (not shaping flow),
-    /// 2) collection storage moves to pointer-stable Ghostty-like entries
-    ///    (EnumArray + SegmentedList + EntryOrAlias semantics),
-    /// 3) shaping path consumes pre-owned `FontIndex` only.
-    dwrite_face_index_map: [Vec<(usize, u16)>; 4],
-    #[cfg(target_os = "windows")]
-    dwrite_factory4: Option<IDWriteFactory4>,
+pub struct FontEntry {
+    pub face: Face,
+    pub fallback: bool,
 }
 
-struct FaceEntry {
-    #[cfg(target_os = "windows")]
-    face2: IDWriteFontFace2,
-    #[cfg(target_os = "windows")]
-    face: IDWriteFontFace,
-    #[cfg(target_os = "windows")]
-    face4: Option<IDWriteFontFace4>,
-    #[cfg(target_os = "windows")]
-    color_glyph_cache: RwLock<RapidHashMap<u16, bool>>,
+impl FontEntry {
+    pub fn has_codepoint(&self, cp: u32, p_mode: PresentationMode) -> bool {
+        let presentation_mode = match p_mode {
+            // Fallback should need explicit presentation matching.
+            PresentationMode::Default(p) if self.fallback => PresentationMode::Explicit(p),
+            PresentationMode::Explicit(p) => PresentationMode::Explicit(p),
+            _ => PresentationMode::Any,
+        };
+
+        match presentation_mode {
+            PresentationMode::Explicit(p) => {
+                let Some(glyph_index) = self.face.glyph_index(cp) else {
+                    return false;
+                };
+                let is_color = self.face.is_color_glyph(glyph_index);
+                match p {
+                    Presentation::Emoji => is_color,
+                    Presentation::Text => !is_color,
+                }
+            }
+            PresentationMode::Any => self.face.glyph_index(cp).is_some(),
+            // Safety: All modes were collapsed above in the `let presentation_mode =` block.
+            PresentationMode::Default(_) => unreachable(),
+        }
+    }
+}
+
+// TODO: Doc comments
+/// Ghostty reference: `font/Collection.zig`.
+pub struct Collection {
+    faces: [Vec<FontEntry>; 4],
+    pub size: FontSize,
 }
 
 impl Collection {
-    pub fn new() -> Self {
-        #[cfg(target_os = "windows")]
-        let dwrite_factory4 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
-            .ok()
-            .and_then(|factory: IDWriteFactory2| factory.cast::<IDWriteFactory4>().ok());
-
+    pub fn new(size: FontSize) -> Self {
         Self {
             faces: std::array::from_fn(|_| Vec::new()),
-            dwrite_face_index_map: std::array::from_fn(|_| Vec::new()),
-            #[cfg(target_os = "windows")]
-            dwrite_factory4,
+            size,
         }
     }
 
-    #[cfg(target_os = "windows")]
-    pub fn get_or_insert_dwrite_face(
-        &mut self,
-        style: Style,
-        face: &IDWriteFontFace2,
-    ) -> Result<FontIndex> {
+    #[inline]
+    pub fn add(&mut self, entry: FontEntry, style: FontStyle) -> anyhow::Result<FontIndex> {
         let style_idx = style as usize;
-        let raw = face.as_raw().addr();
-        for &(ptr, idx) in &self.dwrite_face_index_map[style_idx] {
-            if ptr == raw {
-                return Ok(FontIndex::new(style, idx));
-            }
-        }
-
         let idx = self.faces[style_idx].len();
+
         if idx > FontIndex::MAX_FACES_PER_STYLE as usize {
             return Err(anyhow!("font collection exhausted style bucket: {style:?}"));
         }
-        let idx_u16 = idx as u16;
-        let face_base = face.cast::<IDWriteFontFace>()?;
-        self.faces[style_idx].push(FaceEntry {
-            face2: face.clone(),
-            face: face_base,
-            face4: face.cast::<IDWriteFontFace4>().ok(),
-            color_glyph_cache: RwLock::new(RapidHashMap::with_capacity(64)),
-        });
-        self.dwrite_face_index_map[style_idx].push((raw, idx_u16));
-        Ok(FontIndex::new(style, idx_u16))
+
+        self.faces[style_idx].push(entry);
+        Ok(FontIndex::new(style, idx as u16))
     }
 
+    #[inline]
+    fn entry(&self, index: FontIndex) -> Option<&FontEntry> {
+        self.faces[index.style() as usize].get(index.index() as usize)
+    }
+
+    #[inline]
     pub fn get_index(
         &self,
-        codepoint: u32,
-        style: Style,
-        presentation: Option<Presentation>,
+        cp: u32,
+        style: FontStyle,
+        p_mode: PresentationMode,
     ) -> Option<FontIndex> {
         let style_idx = style as usize;
+
         for idx in 0..self.faces[style_idx].len() {
             let index = FontIndex::new(style, idx as u16);
-            if self.has_codepoint(index, codepoint, presentation) {
+            if self.has_codepoint(index, cp, p_mode) {
                 return Some(index);
             }
         }
         None
     }
 
-    pub fn has_codepoint(
-        &self,
-        index: FontIndex,
-        codepoint: u32,
-        presentation: Option<Presentation>,
-    ) -> bool {
-        let style_idx = index.style() as usize;
-        let Some(entry) = self.faces[style_idx].get(index.index() as usize) else {
-            return false;
+    #[inline]
+    pub fn has_codepoint(&self, idx: FontIndex, cp: u32, p_mode: PresentationMode) -> bool {
+        self.entry(idx)
+            .is_some_and(|entry| entry.has_codepoint(cp, p_mode))
+    }
+
+    #[inline]
+    pub fn ensure_loaded(&mut self, idx: FontIndex) -> Result<(), FontError> {
+        let Some(entry) = self.faces[idx.style() as usize].get_mut(idx.index() as usize) else {
+            return Err(FontError::InvalidIndex);
         };
-
-        entry.query_has_codepoint(codepoint, presentation, self.dwrite_factory4.as_ref())
+        // Unlike Ghostty, we deliberately do not do any metric-based fallback size
+        // adjustment. This matches Windows Terminal and avoids resizing DirectWrite
+        // fallback fonts, which can worsen their appearance.
+        entry.face.load(self.size)
     }
 
-    #[cfg(target_os = "windows")]
-    pub(crate) fn face_for_index(&self, index: FontIndex) -> Option<IDWriteFontFace2> {
-        Some(
-            self.faces[index.style() as usize]
-                .get(index.index() as usize)?
-                .face2
-                .clone(),
-        )
-    }
-}
-
-impl Default for Collection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FaceEntry {
-    fn query_has_codepoint(
-        &self,
-        codepoint: u32,
-        presentation: Option<Presentation>,
-        factory4: Option<&IDWriteFactory4>,
-    ) -> bool {
-        #[cfg(target_os = "windows")]
-        {
-            let mut glyph = [0u16; 1];
-            let cps = [codepoint];
-            // SAFETY: one-element arrays are valid for DWrite call.
-            let ok = unsafe {
-                self.face2
-                    .GetGlyphIndices(cps.as_ptr(), cps.len() as u32, glyph.as_mut_ptr())
-                    .is_ok()
-            };
-            if !ok || glyph[0] == 0 {
-                return false;
-            }
-            let Some(presentation) = presentation else {
-                return true;
-            };
-
-            let is_color = glyph_is_color(self, glyph[0], factory4);
-            return match presentation {
-                Presentation::Text => !is_color,
-                Presentation::Emoji => is_color,
-            };
-        }
-
-        #[allow(unreachable_code)]
-        false
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn glyph_is_color(entry: &FaceEntry, glyph_id: u16, factory4: Option<&IDWriteFactory4>) -> bool {
-    if let Some(&cached) = entry
-        .color_glyph_cache
-        .read()
-        .expect("color glyph cache poisoned")
-        .get(&glyph_id)
-    {
-        return cached;
+    #[inline]
+    pub fn get_face(&self, idx: FontIndex) -> Result<&Face, FontError> {
+        self.entry(idx)
+            .map(|entry| &entry.face)
+            .ok_or(FontError::InvalidIndex)
     }
 
-    let image_formats = entry
-        .face4
-        .as_ref()
-        .and_then(|face4| unsafe { face4.GetGlyphImageFormats(glyph_id, 1, 4096) }.ok())
-        .unwrap_or(DWRITE_GLYPH_IMAGE_FORMATS(0));
-    let color_formats = DWRITE_GLYPH_IMAGE_FORMATS_PNG
-        | DWRITE_GLYPH_IMAGE_FORMATS_JPEG
-        | DWRITE_GLYPH_IMAGE_FORMATS_TIFF
-        | DWRITE_GLYPH_IMAGE_FORMATS_COLR
-        | DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8
-        | DWRITE_GLYPH_IMAGE_FORMATS_SVG;
-    let is_color = if (image_formats & color_formats).0 != 0 {
-        true
-    } else if let Some(factory4) = factory4 {
-        glyph_has_color_run(factory4, &entry.face, glyph_id)
-    } else {
-        // Coarse fallback if per-glyph image formats are unavailable on the platform.
-        unsafe { entry.face2.IsColorFont() }.as_bool()
-    };
+    /// Load the primary regular face and calculate grid metrics from it.
+    pub fn update_metrics(&mut self) -> Result<FontMetrics, FontError> {
+        self.ensure_loaded(FontIndex::DEFAULT)?;
 
-    entry
-        .color_glyph_cache
-        .write()
-        .expect("color glyph cache poisoned")
-        .insert(glyph_id, is_color);
-    is_color
-}
+        let face_metrics = self.get_face(FontIndex::DEFAULT)?.get_metrics()?;
+        let font_metrics = FontMetrics::calculate(&face_metrics);
 
-#[cfg(target_os = "windows")]
-fn glyph_has_color_run(factory4: &IDWriteFactory4, face: &IDWriteFontFace, glyph_id: u16) -> bool {
-    let glyph_indices = [glyph_id];
-    let advances = [0.0f32];
-    let offsets = [DWRITE_GLYPH_OFFSET::default()];
-    let glyph_run = DWRITE_GLYPH_RUN {
-        fontFace: ManuallyDrop::new(Some(face.clone())),
-        fontEmSize: 14.0,
-        glyphCount: 1,
-        glyphIndices: glyph_indices.as_ptr(),
-        glyphAdvances: advances.as_ptr(),
-        glyphOffsets: offsets.as_ptr(),
-        isSideways: false.into(),
-        bidiLevel: 0,
-    };
-
-    unsafe {
-        factory4.TranslateColorGlyphRun(
-            Vector2 { X: 0.0, Y: 0.0 },
-            &raw const glyph_run,
-            None,
-            DWRITE_GLYPH_IMAGE_FORMATS_COLR
-                | DWRITE_GLYPH_IMAGE_FORMATS_SVG
-                | DWRITE_GLYPH_IMAGE_FORMATS_PNG
-                | DWRITE_GLYPH_IMAGE_FORMATS_JPEG
-                | DWRITE_GLYPH_IMAGE_FORMATS_TIFF
-                | DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8,
-            DWRITE_MEASURING_MODE_NATURAL,
-            None,
-            0,
-        )
+        Ok(font_metrics)
     }
-    .is_ok()
 }

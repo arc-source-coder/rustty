@@ -1,21 +1,20 @@
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
+use config::Config;
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Context, DragMoveEvent, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, MouseButton, ParentElement, PromptLevel, Render, ScrollHandle,
-    StatefulInteractiveElement, Styled, Subscription, Window, WindowControlArea, div,
-    prelude::FluentBuilder, px, rgba,
+    StatefulInteractiveElement, Styled, Subscription, Window, WindowControlArea, div, px, rgba,
 };
-use renderer::TerminalView;
-use terminal::{RenderConfig, SessionEvent, TerminalSession};
+use renderer::{TerminalView, TerminalViewEvent};
 use ui::title_bar::WindowsWindowControls;
 
 use crate::actions::{
-    CloseActiveTab, NewTab, SelectNextTab, SelectPreviousTab, SelectTab1, SelectTab2, SelectTab3,
-    SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
+    CloseActiveTab, DecreaseFontSize, IncreaseFontSize, NewTab, ResetFontSize, SelectNextTab,
+    SelectPreviousTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
+    SelectTab7, SelectTab8, SelectTab9,
 };
 use crate::profile::ProfileIconKind;
 use crate::profile_registry::ProfileRegistry;
@@ -47,10 +46,7 @@ macro_rules! define_select_tab_handlers {
 
 /// Content hosted by a tab.
 pub enum TabContent {
-    Terminal {
-        session: Entity<TerminalSession>,
-        view: Entity<TerminalView>,
-    },
+    Terminal { view: Entity<TerminalView> },
 }
 
 /// A single tab's data. Thin wrapper to allow future fields
@@ -112,7 +108,6 @@ pub struct Workspace {
     tab_entries: HashMap<TabId, TabEntry>,
     active_tab: TabId,
     profiles: Entity<ProfileRegistry>,
-    render_config: Entity<RenderConfig>,
     tab_scroll_handle: ScrollHandle,
     tab_scroll_animation: Option<TabScrollAnimation>,
     tab_layout_animations: HashMap<TabId, TabLayoutAnimation>,
@@ -127,7 +122,6 @@ impl Workspace {
     /// Create a new workspace with a single tab running the default profile.
     pub fn new(
         profiles: Entity<ProfileRegistry>,
-        render_config: Entity<RenderConfig>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -137,7 +131,6 @@ impl Workspace {
             tab_entries: HashMap::new(),
             active_tab: tab_id,
             profiles,
-            render_config,
             tab_scroll_handle: ScrollHandle::new(),
             tab_scroll_animation: None,
             tab_layout_animations: HashMap::new(),
@@ -160,18 +153,16 @@ impl Workspace {
     ) -> TabEntry {
         let default_profile = self.profiles.read(cx).default_profile().clone();
         let spawn_config = default_profile.spawn_config.clone();
-        let session =
-            cx.new(|cx| TerminalSession::new(spawn_config, self.render_config.clone(), cx));
-        let view = cx.new(|cx| TerminalView::new(session.clone(), window, cx));
+        let view = cx.new(|cx| TerminalView::new(spawn_config, Config::default(), window, cx));
 
-        let title_subscription = cx.subscribe_in(&session, window, |_, _, event, _, cx| {
-            if matches!(event, SessionEvent::TitleChanged) {
+        let title_subscription = cx.subscribe_in(&view, window, |_, _, event, _, cx| {
+            if matches!(event, TerminalViewEvent::TitleChanged) {
                 cx.notify();
             }
         });
 
         TabEntry {
-            live_content: Some(TabContent::Terminal { session, view }),
+            live_content: Some(TabContent::Terminal { view }),
             title_fallback: default_profile.name.clone(),
             profile_icon: default_profile.profile_icon_kind(),
             phase,
@@ -181,6 +172,7 @@ impl Workspace {
     }
 
     /// Render the active tab's content as an `AnyElement`.
+    // TODO(renderer-refactor): Audit this
     fn render_active_content(&self) -> Option<AnyElement> {
         let entry = self.tab_entries.get(&self.active_tab)?;
         let content = entry.live_content.as_ref()?;
@@ -199,26 +191,23 @@ impl Workspace {
         };
 
         match content {
-            TabContent::Terminal { session, .. } => {
-                rgba(session.read(cx).default_background_rgba()).into()
-            }
+            TabContent::Terminal { view } => rgba(view.read(cx).default_background_rgba()).into(),
         }
     }
 
     fn tab_title(&self, entry: &TabEntry, cx: &App) -> String {
         let title = match entry.live_content.as_ref() {
-            Some(TabContent::Terminal { session, .. }) => session.read(cx).metadata().title.clone(),
+            Some(TabContent::Terminal { view }) => view.read(cx).title().map(str::to_owned),
             None => None,
         };
 
         title.unwrap_or_else(|| entry.title_fallback.clone())
     }
 
-    fn active_session(&self) -> Option<&Entity<TerminalSession>> {
+    fn active_terminal_view(&self) -> Option<&Entity<TerminalView>> {
         let entry = self.tab_entries.get(&self.active_tab)?;
-        let content = entry.live_content.as_ref()?;
-        match content {
-            TabContent::Terminal { session, .. } => Some(session),
+        match entry.live_content.as_ref()? {
+            TabContent::Terminal { view } => Some(view),
         }
     }
 
@@ -613,8 +602,8 @@ impl Workspace {
         }
         self.start_tab_layout_animation(previous_widths, target_widths, duration, now);
 
-        if let Some(session) = self.active_session() {
-            session.update(cx, |session, _cx| session.mark_output_read());
+        if let Some(view) = self.active_terminal_view() {
+            view.update(cx, |view, _cx| view.mark_output_read());
         }
 
         self.focus_active_terminal(window, cx);
@@ -630,8 +619,8 @@ impl Workspace {
         if changed {
             self.active_tab = tab_id;
             self.scroll_active_tab_into_view = true;
-            if let Some(session) = self.active_session() {
-                session.update(cx, |session, _cx| session.mark_output_read());
+            if let Some(view) = self.active_terminal_view() {
+                view.update(cx, |view, _cx| view.mark_output_read());
             }
         }
 
@@ -701,8 +690,8 @@ impl Workspace {
             if let Some(next_tab_id) = open_tabs.get(next_active_index).copied() {
                 self.active_tab = next_tab_id;
                 self.scroll_active_tab_into_view = true;
-                if let Some(session) = self.active_session() {
-                    session.update(cx, |session, _cx| session.mark_output_read());
+                if let Some(view) = self.active_terminal_view() {
+                    view.update(cx, |view, _cx| view.mark_output_read());
                 }
             }
         }
@@ -1462,6 +1451,21 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_select_tab_7))
             .on_action(cx.listener(Self::on_select_tab_8))
             .on_action(cx.listener(Self::on_select_tab_9))
+            .on_action(cx.listener(|this, _: &IncreaseFontSize, _window, cx| {
+                if let Some(view) = this.active_terminal_view() {
+                    view.update(cx, |view, cx| view.increase_font_size(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DecreaseFontSize, _window, cx| {
+                if let Some(view) = this.active_terminal_view() {
+                    view.update(cx, |view, cx| view.decrease_font_size(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ResetFontSize, _window, cx| {
+                if let Some(view) = this.active_terminal_view() {
+                    view.update(cx, |view, cx| view.reset_font_size(cx));
+                }
+            }))
             .child(
                 div()
                     .id("title-bar")
@@ -1524,7 +1528,7 @@ impl Render for Workspace {
                     .child(
                         div()
                             .id("title-bar-right-gutter")
-                            .flex_grow()
+                            .flex_grow_1()
                             .min_w(RIGHT_DRAG_GUTTER_MIN_WIDTH)
                             .h_full()
                             .window_control_area(WindowControlArea::Drag),
@@ -1551,7 +1555,7 @@ fn move_tab_ids_to_index(tabs: &mut Vec<TabId>, from: usize, to: usize) {
 }
 
 fn wrapped_index(current: usize, len: usize, delta: isize) -> usize {
-    debug_assert!(len > 0);
+    assert!(len > 0);
     let len = len as isize;
     (current as isize + delta).rem_euclid(len) as usize
 }

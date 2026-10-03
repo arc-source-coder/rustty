@@ -1,7 +1,12 @@
+mod font;
 mod gpu;
 mod terminal_element;
 mod terminal_view;
 
-pub use gpu::{RendererCellMetrics, TerminalRenderer};
+mod types;
+
+mod atlas_allocator;
+mod backend;
+
 pub use terminal_element::TerminalElement;
-pub use terminal_view::TerminalView;
+pub use terminal_view::{TerminalView, TerminalViewEvent};

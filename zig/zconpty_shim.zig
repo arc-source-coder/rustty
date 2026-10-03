@@ -8,7 +8,6 @@
 const std = @import("std");
 const zconpty = @import("zconpty");
 const handle_mod = @import("src/handle.zig");
-
 const windows = zconpty.Windows;
 const server = zconpty.Server;
 const input_types = zconpty.InputTypes;
@@ -30,8 +29,8 @@ extern fn ghostty_terminal_encode_key(
     ptr: *anyopaque,
     key: c_int,
     action: input_types.KeyAction,
-    mods: input_types.Mods,
-    consumed_mods: input_types.Mods,
+    mods: input_types.Modifiers,
+    consumed_mods: input_types.Modifiers,
     text_ptr: ?[*]const u8,
     text_len: usize,
     unshifted_codepoint: u32,
@@ -42,8 +41,8 @@ extern fn ghostty_terminal_encode_key(
 extern fn ghostty_terminal_encode_mouse(
     ptr: *anyopaque,
     button: i8,
-    action: input_types.MouseAction,
-    mods: input_types.Mods,
+    action: u8,
+    mods: input_types.Modifiers,
     x: f32,
     y: f32,
     out: ?[*]u8,
@@ -155,7 +154,7 @@ export fn zconpty_send_resize(session: isize, cols: u16, rows: u16) callconv(.c)
     sessionFromHandle(session).input_subsystem.sendResize(cols, rows);
 }
 
-export fn zconpty_key_from_w3c(code_ptr: [*]const u8, code_len: usize) callconv(.c) c_int {
+export fn zconpty_w3c_code_from_bytes(code_ptr: [*]const u8, code_len: usize) callconv(.c) c_int {
     const code = input_types.W3CCode.fromW3C(code_ptr[0..code_len]);
     if (code) |c| {
         return @intCast(@intFromEnum(c));
@@ -203,8 +202,8 @@ fn ghosttyEncodeMouse(
     return ghostty_terminal_encode_mouse(
         ptr,
         @intFromEnum(event.button),
-        event.action,
-        @bitCast(event.mods),
+        @intFromEnum(event.action),
+        @bitCast(event.modifiers),
         event.position.x_px,
         event.position.y_px,
         out,

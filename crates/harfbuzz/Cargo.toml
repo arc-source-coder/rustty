@@ -1,0 +1,15 @@
+[package]
+name = "harfbuzz"
+version.workspace = true
+edition.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Graphics_DirectWrite",
+] }
+
+[build-dependencies]
+cc = "1.2"
+
+[lints]
+workspace = true

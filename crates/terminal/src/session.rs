@@ -1,86 +1,110 @@
 use std::sync::Arc;
 
 use crossbeam_queue::ArrayQueue;
-use gpui::{AsyncApp, Context, Entity, EventEmitter, Keystroke, Modifiers, Task, WeakEntity};
-
-use crate::config::{RenderConfig, SpawnConfig};
-use crate::input::{normalize_key_event, normalize_modifier_event};
-use crate::io_thread;
-use crate::platform::windows::thread::PlatformThread;
-use crate::surface::{AppAction, TerminalSurface};
-use crate::types::{
-    IoEvent, IoInput, IoMsg, IoThreadNotify, ProcessState, RendererWake, ScrollOp, SessionId,
-    SessionMetadata, TerminalDimensions,
+use gpui::{
+    Bounds, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseMoveEvent,
+    Pixels, Point, ScrollDelta, ScrollWheelEvent,
 };
-use ghostty::{CallbackHandle, ColorRGB, Event as TerminalEvent, Terminal};
-use zconpty::{ConPTY, KeyAction, KeyEvent, MouseButton, MousePosition, key_from_w3c};
+
+use crate::input::{ToKeyEvent as _, ToZconptyMods as _};
+use crate::platform::windows::thread::PlatformThread;
+use crate::types::{IoEvent, IoInput, IoMsg, IoThreadNotify};
+
+use crate::io_thread;
+use crate::types::{ProcessState, RendererWake, ScrollOp, SessionMetadata};
+
+use config::{Config, SpawnConfig};
+use ghostty::{
+    CallbackHandle, CellSize, ColorRGB, ScreenSize, Terminal, TerminalDimensions, TerminalEvent,
+};
+use zconpty::{
+    ConPTY, KeyAction, KeyEvent, MouseAction, MouseButton, MouseEvent, MousePosition, W3cCode,
+};
+
+pub const DEFAULT_FG: ColorRGB = ColorRGB::new(0xDD, 0xDD, 0xDD);
+pub const DEFAULT_BG: ColorRGB = ColorRGB::new(0x1E, 0x1E, 0x2E);
 
 /// Capacity for the IO thread mailbox.
 /// Input now flows through this queue as typed events, so keep some headroom for
 /// short bursts of key, mouse, resize, and paste traffic.
 const IO_MSG_CHANNEL_CAPACITY: usize = 256;
 
-#[allow(dead_code)] // tabs not yet implemented
+/// A terminal's UI-side session, holding its shared Ghostty terminal, ConPTY
+/// connection, IO thread/mailbox, callbacks, and renderer wake binding.
 pub struct TerminalSession {
-    pub id: SessionId,
-    /// Holds the ConPTY session alive until after the IO thread exits.
-    console_session: Arc<ConPTY>,
-    callback_handle: CallbackHandle,
+    pub config: Config,
+
     terminal: Arc<Terminal>,
-    dimensions: TerminalDimensions,
-    spawn_config: SpawnConfig,
-    render_config: Entity<RenderConfig>,
-    /// Sender for user input and resize commands to the IO thread.
-    io_notify: Arc<IoThreadNotify>,
-    renderer_wake: Arc<RendererWake>,
-    default_background: ColorRGB,
+    /// Holds the ConPTY session alive until after the IO thread exits.
+    _console_session: Arc<ConPTY>,
+
     metadata: SessionMetadata,
     process_state: ProcessState,
-    surface: TerminalSurface,
 
+    /// Written by `TerminalElement::prepaint` each frame.
+    /// Used to convert window-space mouse positions to element-local positions.
+    pub surface_bounds: Bounds<Pixels>,
+
+    pending_scroll_y: f32,
+    dimensions: TerminalDimensions,
+
+    // TODO(courier): Replace the 4 below
+    _callback_handle: CallbackHandle,
+    io_notify: Arc<IoThreadNotify>,
+    renderer_wake: Arc<RendererWake>,
     io_thread: Option<PlatformThread>,
-    _event_task: Task<()>,
 }
 
-pub enum SessionEvent {
+/// Notification for the caller after a session operation.
+#[derive(Eq, PartialEq)]
+pub enum SessionEffect {
+    /// Session title metadata changed.
     TitleChanged,
+    /// A bell was recorded in the session metadata.
+    Bell,
+    /// No notification for the caller, even if session state or input changed.
+    None,
+    /// Viewport scrolling was requested; queued scrolling may not yet be applied.
+    ViewportScrolled,
 }
 
-impl EventEmitter<SessionEvent> for TerminalSession {}
+#[derive(Debug, Clone)]
+pub enum AppAction {
+    WriteClipboard(String),
+    Autoscroll(bool),
+    None,
+}
+
+pub struct Options<'a> {
+    pub cell_size: CellSize,
+    pub event_rx: &'a mut Option<async_channel::Receiver<TerminalEvent>>,
+}
 
 impl TerminalSession {
-    pub fn new(
-        spawn_config: SpawnConfig,
-        render_config: Entity<RenderConfig>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        // Channels:
-        //   io_notify.queue: bounded lock-free — GPUI → IO thread
-        //   event_tx/rx:     unbounded bell/title events — Ghostty callbacks → GPUI task
-        let io_queue = Arc::new(ArrayQueue::new(IO_MSG_CHANNEL_CAPACITY));
-        let io_notify = Arc::new(IoThreadNotify::new(io_queue));
-        let (event_tx, event_rx) = async_channel::unbounded::<TerminalEvent>();
-        let renderer_wake = Arc::new(RendererWake::new());
-
-        let default_fg = ColorRGB::new(0xDD, 0xDD, 0xDD);
-        let default_bg = ColorRGB::new(0x1E, 0x1E, 0x2E);
+    // TODO(renderer-refactor): Remove SpawnConfig
+    pub fn new(spawn_config: SpawnConfig, config: Config, options: Options) -> Self {
         let terminal = Arc::new(
             Terminal::new(
                 spawn_config.initial_cols,
                 spawn_config.initial_rows,
-                default_fg,
-                default_bg,
+                DEFAULT_FG,
+                DEFAULT_BG,
             )
             .expect("failed to allocate ghostty terminal"),
         );
+        terminal.set_cell_dimensions(options.cell_size);
+
         let console_session =
-            Arc::new(ConPTY::new(terminal.handle()).expect("failed to start console session"));
-        let callback_renderer_wake = renderer_wake.clone();
+            Arc::new(ConPTY::new(terminal.handle()).expect("failed to start zconpty session"));
+
+        let renderer_wake = Arc::new(RendererWake::new());
+        let callback_renderer_wake = Arc::clone(&renderer_wake);
+
+        // event_tx/rx: unbounded channel for bell/title events — Ghostty callbacks → GPUI task
+        let (event_tx, event_rx) = async_channel::unbounded::<TerminalEvent>();
         let callback_handle =
             terminal.set_event_sender(event_tx, move || callback_renderer_wake.wake());
-
-        let dimensions = initial_dimensions(&spawn_config);
-        terminal.set_dimensions(dimensions);
+        *options.event_rx = Some(event_rx);
 
         /*    let mut env = HashMap::new();
                 env.insert("TERM".into(), spawn_config.term.clone());
@@ -95,246 +119,204 @@ impl TerminalSession {
                     ..Default::default()
                 };
         */
+
+        // io_notify.queue: bounded lock-free — GPUI → IO thread
+        let io_queue = Arc::new(ArrayQueue::new(IO_MSG_CHANNEL_CAPACITY));
+        let io_notify = Arc::new(IoThreadNotify::new(io_queue));
         let io_thread = io_thread::spawn_suspended(
-            console_session.clone(),
-            terminal.clone(),
-            io_notify.clone(),
-            renderer_wake.clone(),
+            Arc::clone(&console_session),
+            Arc::clone(&terminal),
+            Arc::clone(&io_notify),
+            Arc::clone(&renderer_wake),
         )
         .expect("failed to spawn IO thread");
 
         io_notify.set_io_thread(io_thread.handle());
-
-        log::debug!("terminal session thread spawned: io_tid={}", io_thread.id());
-
         io_thread.resume().expect("failed to resume IO thread");
 
-        let event_task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            while let Ok(event) = event_rx.recv().await {
-                if this
-                    .update(cx, |this, cx| match event {
-                        TerminalEvent::Bell => this.handle_io_event(IoEvent::Bell, cx),
-                        TerminalEvent::TitleChanged(title) => {
-                            this.handle_io_event(IoEvent::TitleChanged(title), cx);
-                        }
-                    })
-                    .is_err()
-                {
-                    break; // Entity dropped
-                }
-            }
-        });
-
+        let dimensions = terminal.dimensions();
         Self {
-            id: SessionId::new(),
-            console_session,
-            callback_handle,
+            config,
             terminal,
+            _console_session: console_session,
+
+            surface_bounds: Bounds::default(),
             dimensions,
-            spawn_config,
-            render_config,
-            io_notify,
-            renderer_wake,
-            default_background: default_bg,
+            pending_scroll_y: 0.0,
+
             metadata: SessionMetadata::default(),
             process_state: ProcessState::Running,
-            surface: TerminalSurface::new(),
+
+            io_notify,
+            renderer_wake,
+            _callback_handle: callback_handle,
             io_thread: Some(io_thread),
-            _event_task: event_task,
         }
     }
 
     // --- Public API ---
 
     /// Access the shared terminal.
+    #[inline]
     pub fn terminal(&self) -> &Arc<Terminal> {
         &self.terminal
     }
 
     /// Bind the session's direct renderer wake path.
-    pub fn bind_renderer_sender(
-        &self,
-        sender: crossbeam_channel::Sender<crate::types::RendererMessage>,
-    ) {
+    // TODO: Courier
+    #[inline]
+    pub fn bind_renderer_sender(&self, sender: crossbeam_channel::Sender<()>) {
         self.renderer_wake.bind(sender);
     }
 
-    /// Apply the latest terminal dimensions from layout.
-    pub fn apply_resize(&mut self, dimensions: TerminalDimensions) {
-        if self.dimensions == dimensions {
+    #[inline]
+    pub fn update_metrics(&mut self) {
+        self.dimensions = self.terminal.dimensions();
+    }
+
+    /// Apply surface size and optional replacement font metrics with one PTY resize.
+    #[inline]
+    pub fn apply_resize(&mut self, size: ScreenSize, cell_size: Option<CellSize>) {
+        if size == self.dimensions.screen && cell_size.is_none() {
             return;
         }
+        if let Some(cell_size) = cell_size {
+            self.terminal.set_cell_dimensions(cell_size);
+            self.dimensions.cell = cell_size;
+        }
+        self.terminal.set_screen_dimensions(size);
+        self.dimensions.screen = size;
 
-        self.dimensions = dimensions;
-        let _ = self.io_notify.try_send(IoMsg::Resize(dimensions));
+        let rows = (size.height / self.dimensions.cell.height) as u16;
+        let cols = (size.width / self.dimensions.cell.width) as u16;
+
+        let _ = self.io_notify.try_send(IoMsg::Resize { rows, cols });
     }
 
     /// Current process state.
+    #[inline]
     pub fn process_state(&self) -> &ProcessState {
         &self.process_state
     }
 
     /// Session metadata (title, cwd, bell count).
+    #[inline]
     pub fn metadata(&self) -> &SessionMetadata {
         &self.metadata
     }
 
+    #[inline]
     pub fn display_title(&self) -> &str {
-        self.metadata
-            .title
-            .as_deref()
-            .unwrap_or(self.spawn_config.shell_program.as_str())
-    }
-
-    // TODO: Wire up actual terminal background.
-    pub fn default_background_rgba(&self) -> u32 {
-        u32::from_be_bytes([
-            self.default_background.r(),
-            self.default_background.g(),
-            self.default_background.b(),
-            0xff,
-        ])
+        self.metadata.title.as_deref().unwrap_or("Shell")
     }
 
     /// Mark output as read (e.g., when the tab becomes active).
+    #[inline]
     pub fn mark_output_read(&mut self) {
         self.metadata.has_unread_output = false;
     }
 
-    fn handle_io_event(&mut self, event: IoEvent, cx: &mut Context<Self>) {
+    pub fn handle_io_event(&mut self, event: IoEvent) -> SessionEffect {
         match event {
             IoEvent::Bell => {
                 self.metadata.bell_count = self.metadata.bell_count.saturating_add(1);
                 self.metadata.has_unread_output = true;
+                SessionEffect::Bell
             }
             IoEvent::TitleChanged(title) => {
                 self.metadata.title = if title.is_empty() { None } else { Some(title) };
-                cx.emit(SessionEvent::TitleChanged);
+                SessionEffect::TitleChanged
             }
+            // NOTE(renderer-refactor): These are never constructued.
             IoEvent::Exited(status) => {
                 self.process_state = ProcessState::Exited(status);
+                SessionEffect::None
             }
             IoEvent::Error(err) => {
                 self.process_state = ProcessState::Error(err);
+                SessionEffect::None
             }
         }
-        cx.notify();
     }
 
-    pub fn send_key_event(
-        &self,
-        keystroke: &Keystroke,
-        native_key: Option<gpui::WindowsNativeKey>,
-        action: KeyAction,
-        is_held: bool,
-    ) {
-        let Some(event) = normalize_key_event(keystroke, native_key, action, is_held) else {
-            return;
-        };
-
-        let mut needs_renderer_wake = false;
-
-        if should_clear_selection_on_key_event(&event) && self.terminal.selection_text().is_some() {
-            self.terminal.clear_selection();
-            needs_renderer_wake = true;
+    #[inline]
+    pub fn send_key_down_event(&self, key_down_event: &KeyDownEvent) {
+        if let Some(event) = key_down_event.to_key_event() {
+            self.send_key_event(event);
         }
+    }
 
-        if should_reveal_key_input(action) && !self.terminal.viewport_is_bottom() {
+    #[inline]
+    pub fn send_key_up_event(&self, key_up_event: &KeyUpEvent) {
+        if let Some(event) = key_up_event.to_key_event() {
+            self.send_key_event(event);
+        }
+    }
+
+    fn send_key_event(&self, event: KeyEvent) {
+        // Modifier-only events arrive with no logical key code and no text payload.
+        // Keep selection for these so Shift/Ctrl/Alt taps don't dismiss a selection.
+        let not_modifier = event.code != W3cCode::UNKNOWN || event.text_len > 0;
+        let selection_changed =
+            event.action != KeyAction::Release && not_modifier && self.terminal.clear_selection();
+        let viewport_changed =
+            event.action != KeyAction::Release && !self.terminal.viewport_is_bottom();
+
+        if viewport_changed {
             self.terminal.scroll_to_bottom();
-            needs_renderer_wake = true;
         }
 
-        if needs_renderer_wake {
+        self.io_notify
+            .send_lossless(IoMsg::Input(IoInput::Key(event)));
+
+        if selection_changed || viewport_changed {
             self.renderer_wake.wake();
         }
-
-        self.io_notify
-            .send_lossless(IoMsg::Input(IoInput::Key(event)));
     }
 
-    pub fn send_key_down(
-        &self,
-        keystroke: &Keystroke,
-        native_key: Option<gpui::WindowsNativeKey>,
-        is_held: bool,
-    ) {
-        self.send_key_event(keystroke, native_key, KeyAction::Press, is_held);
-    }
-
-    pub fn send_key_up(&self, keystroke: &Keystroke, native_key: Option<gpui::WindowsNativeKey>) {
-        self.send_key_event(keystroke, native_key, KeyAction::Release, false);
-    }
-
-    pub fn send_modifier_change(&self, modifiers: &Modifiers, native_key: gpui::WindowsNativeKey) {
-        let event = normalize_modifier_event(modifiers, native_key);
-
-        self.io_notify
-            .send_lossless(IoMsg::Input(IoInput::Key(event)));
+    #[inline]
+    pub fn send_modifier_change(&self, event: &ModifiersChangedEvent) {
+        if let Some(event) = event.to_key_event() {
+            self.io_notify
+                .send_lossless(IoMsg::Input(IoInput::Key(event)));
+        }
     }
 
     pub fn send_paste(&self, text: &str) {
-        let mut needs_renderer_wake = false;
+        let selection_changed = self.terminal.clear_selection();
+        let viewport_changed = !self.terminal.viewport_is_bottom();
 
-        if self.terminal.selection_text().is_some() {
-            self.terminal.clear_selection();
-            needs_renderer_wake = true;
-        }
-
-        if !self.terminal.viewport_is_bottom() {
+        if viewport_changed {
             self.terminal.scroll_to_bottom();
-            needs_renderer_wake = true;
-        }
-
-        if needs_renderer_wake {
-            self.renderer_wake.wake();
         }
 
         self.io_notify
             .send_lossless(IoMsg::Input(IoInput::Paste(text.as_bytes().to_vec())));
+
+        if selection_changed || viewport_changed {
+            self.renderer_wake.wake();
+        }
     }
 
+    #[inline]
     pub fn send_focus_change(&self, focused: bool) {
         self.io_notify
             .send_lossless(IoMsg::Input(IoInput::Focus(focused)));
     }
 
-    pub fn send_scroll_arrow(&self, scroll_up: bool) {
-        let code = if scroll_up {
-            key_from_w3c(b"arrow_up").expect("arrow_up should resolve")
-        } else {
-            key_from_w3c(b"arrow_down").expect("arrow_down should resolve")
-        };
-        self.io_notify
-            .send_lossless(IoMsg::Input(IoInput::Key(KeyEvent::press(code))));
-    }
-
-    /// Set terminal selection in viewport coordinates (0-indexed).
-    /// start and end are (col, row) pairs where row is u32 for scrollback-aware coords.
-    /// rectangular = true for Alt+drag block selection.
-    /// Locks internally.
-    pub fn set_selection(&self, start: (u16, u32), end: (u16, u32), rectangular: bool) {
-        self.terminal
-            .set_selection(start.0, start.1, end.0, end.1, rectangular);
-        self.renderer_wake.wake();
-    }
-
     /// Copy the current selection and clear it.
     /// Caller is responsible for writing to the clipboard.
     /// Locks internally.
+    #[inline]
     pub fn take_selection_text(&self) -> Option<String> {
-        let text = self.surface.take_selection_text(&self.terminal);
-        if text.is_some() {
-            self.renderer_wake.wake();
-        }
-        text
-    }
+        let text = self.terminal.take_selection_text()?;
+        self.renderer_wake.wake();
 
-    /// Access the render config.
-    pub fn render_config(&self) -> &Entity<RenderConfig> {
-        &self.render_config
+        if text.is_empty() { None } else { Some(text) }
     }
 
     /// Scroll the viewport by delta rows. Negative = up (towards history).
+    #[inline]
     pub fn scroll_viewport(&self, delta: i32) {
         let _ = self
             .io_notify
@@ -342,11 +324,13 @@ impl TerminalSession {
     }
 
     /// Scroll to the top of scrollback.
+    #[inline]
     pub fn scroll_to_top(&self) {
         let _ = self.io_notify.try_send(IoMsg::Scroll(ScrollOp::Top));
     }
 
     /// Scroll to the bottom (active area).
+    #[inline]
     pub fn scroll_to_bottom(&self) {
         let _ = self.io_notify.try_send(IoMsg::Scroll(ScrollOp::Bottom));
     }
@@ -358,279 +342,266 @@ impl TerminalSession {
     /// `total_rows`, which changes as output arrives. Forwarding would
     /// introduce a TOCTOU race (stale scrollback geometry).
     /// Locks internally.
+    #[inline]
     pub fn scroll_to_row(&self, row: u64) {
         self.terminal.scroll_to_row(row);
         self.renderer_wake.wake();
     }
 
-    pub fn surface_focus_out(&mut self) {
-        self.surface.focus_out();
-    }
-
-    pub fn handle_left_mouse_down(
+    pub fn handle_mouse_button(
         &mut self,
-        position: MousePosition,
-        click_count: u8,
-        mods: &Modifiers,
-    ) -> bool {
-        let changed = self.surface.handle_left_mouse_down(
-            &self.terminal,
-            &self.io_notify,
-            position,
-            click_count,
-            mods,
-        );
+        action: MouseAction,
+        button: gpui::MouseButton,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+        scale_factor: f32,
+    ) -> AppAction {
+        let button = match button {
+            gpui::MouseButton::Left => MouseButton::Left,
+            gpui::MouseButton::Right => MouseButton::Right,
+            gpui::MouseButton::Middle => MouseButton::Middle,
+            gpui::MouseButton::Navigate(_) => return AppAction::None,
+        };
 
-        if !self.terminal.is_mouse_reporting() || mods.shift {
-            if changed {
+        let mode = self.terminal.mouse_mode();
+        let position = self.mouse_position(position, scale_factor);
+
+        // Finish the gesture before routing; local release preserves multi-click history.
+        if button == MouseButton::Left && action == MouseAction::Release {
+            self.terminal
+                .send_gesture_release(position.x_px, position.y_px);
+        }
+
+        if mode.is_mouse_reporting && (!modifiers.shift || mode.is_mouse_shift_capture) {
+            let selection_changed = self.terminal.clear_selection();
+            self.terminal.reset_gesture();
+            if selection_changed {
                 self.renderer_wake.wake();
             }
+
+            let event = MouseEvent {
+                action,
+                button,
+                modifiers: modifiers.mods(),
+                position,
+            };
+            self.io_notify
+                .send_lossless(IoMsg::Input(IoInput::Mouse(event)));
+            return AppAction::Autoscroll(false);
         }
-        changed
+
+        match (button, action) {
+            (MouseButton::Left, MouseAction::Press) => {
+                let update = self.terminal.send_gesture_press(
+                    position.x_px,
+                    position.y_px,
+                    modifiers.platform || modifiers.control,
+                    modifiers.shift,
+                    modifiers.alt,
+                );
+                if update.needs_redraw {
+                    self.renderer_wake.wake();
+                }
+                return AppAction::Autoscroll(update.autoscroll);
+            }
+            (MouseButton::Right, MouseAction::Press) => {
+                if let Some(text) = self.take_selection_text() {
+                    return AppAction::WriteClipboard(text);
+                }
+            }
+            _ => {}
+        }
+
+        AppAction::None
     }
 
-    pub fn handle_right_mouse_down(&mut self, position: MousePosition, mods: &Modifiers) -> bool {
-        self.surface
-            .handle_right_mouse_down(&self.terminal, &self.io_notify, position, mods)
-    }
+    /// Returns an autoscroll update for selection motion; other motion leaves the timer alone.
+    pub fn handle_mouse_move(&mut self, event: &MouseMoveEvent, scale_factor: f32) -> Option<bool> {
+        let mode = self.terminal.mouse_mode();
 
-    pub fn handle_middle_mouse_down(&mut self, position: MousePosition, mods: &Modifiers) -> bool {
-        self.surface
-            .handle_middle_mouse_down(&self.terminal, &self.io_notify, position, mods)
-    }
+        // Map GPUI mouse buttons to zconpty / Ghostty mouse buttons.
+        let button: MouseButton = match event.pressed_button {
+            Some(b) => match b {
+                gpui::MouseButton::Left => MouseButton::Left,
+                gpui::MouseButton::Right => MouseButton::Right,
+                gpui::MouseButton::Middle => MouseButton::Middle,
+                gpui::MouseButton::Navigate(_) => MouseButton::Unknown,
+            },
+            None => MouseButton::None,
+        };
 
-    pub fn handle_left_mouse_up(
-        &mut self,
-        position: Option<MousePosition>,
-        mods: &Modifiers,
-    ) -> bool {
-        self.surface
-            .handle_left_mouse_up(&self.terminal, &self.io_notify, position, mods)
-    }
+        let position = self.mouse_position(event.position, scale_factor);
 
-    pub fn handle_right_mouse_up(
-        &mut self,
-        position: Option<MousePosition>,
-        mods: &Modifiers,
-        emit: &mut dyn FnMut(AppAction),
-    ) -> bool {
-        let changed = self.surface.handle_right_mouse_up(
-            &self.terminal,
-            &self.io_notify,
-            position,
-            mods,
-            emit,
-        );
+        let shift_override =
+            event.pressed_button.is_some() && event.modifiers.shift && !mode.is_mouse_shift_capture;
+        if mode.is_mouse_reporting && !shift_override {
+            let event = MouseEvent {
+                action: MouseAction::Move,
+                button,
+                modifiers: event.modifiers.mods(),
+                position,
+            };
+            self.io_notify
+                .send_lossless(IoMsg::Input(IoInput::Mouse(event)));
+            return None;
+        }
 
-        if !self.terminal.is_mouse_reporting() || mods.shift {
-            if changed {
+        if button == MouseButton::Left {
+            let update =
+                self.terminal
+                    .send_gesture_drag(position.x_px, position.y_px, event.modifiers.alt);
+            if update.needs_redraw {
                 self.renderer_wake.wake();
             }
+            return Some(update.autoscroll);
         }
-        changed
+        None
     }
 
-    pub fn handle_middle_mouse_up(&mut self, position: MousePosition, mods: &Modifiers) -> bool {
-        self.surface
-            .handle_middle_mouse_up(&self.terminal, &self.io_notify, position, mods)
-    }
-
-    pub fn handle_mouse_move(
-        &mut self,
-        pos: MousePosition,
-        pressed_button: MouseButton,
-        mods: &Modifiers,
+    /// Advance selection scrolling atomically, then wake after the terminal lock is released.
+    pub fn selection_autoscroll_tick(
+        &self,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+        scale_factor: f32,
     ) -> bool {
-        let changed = self.surface.handle_mouse_move(
-            &self.terminal,
-            &self.io_notify,
-            pos,
-            pressed_button,
-            mods,
-        );
+        let position = self.mouse_position(position, scale_factor);
+        let update =
+            self.terminal
+                .send_gesture_autoscroll_tick(position.x_px, position.y_px, modifiers.alt);
+        if update.needs_redraw {
+            self.renderer_wake.wake();
+        }
+        update.autoscroll
+    }
 
-        if pressed_button == MouseButton::Left
-            && (!self.terminal.is_mouse_reporting() || mods.shift)
-        {
-            if changed {
+    #[inline]
+    fn mouse_position(&self, position: Point<Pixels>, scale_factor: f32) -> MousePosition {
+        // `event.position` is window-relative; subtract the element's origin
+        // (derived from surface bounds) to get a position local to the terminal surface.
+        let x_px = position.x.as_f32() - f32::from(self.surface_bounds.origin.x);
+        let y_px = position.y.as_f32() - f32::from(self.surface_bounds.origin.y);
+
+        MousePosition {
+            x_px: x_px * scale_factor,
+            y_px: y_px * scale_factor,
+        }
+    }
+
+    pub fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, scale: f32) -> SessionEffect {
+        let io = self.io_notify.as_ref();
+
+        let rows = match event.delta {
+            ScrollDelta::Lines(lines) => match lines.y {
+                y if y > 0.0 => lines.y.ceil() as i32,
+                y if y < 0.0 => lines.y.floor() as i32,
+                _ => return SessionEffect::None,
+            },
+            ScrollDelta::Pixels(pixels) => {
+                let cell_height = self.dimensions.cell.height as f32;
+                let total = self.pending_scroll_y + f32::from(pixels.y);
+                let rows = (total / cell_height).trunc();
+
+                if rows == 0.0 {
+                    self.pending_scroll_y = total;
+                    return SessionEffect::None;
+                }
+                self.pending_scroll_y = total - rows * cell_height;
+
+                rows as i32
+            }
+        };
+
+        // GPUI sends positive vertical deltas for wheel-up
+        let is_scroll_up = rows > 0;
+        let mode = self.terminal.mouse_mode();
+
+        if mode.is_mouse_reporting {
+            let position = self.mouse_position(event.position, scale);
+            let button = match is_scroll_up {
+                true => MouseButton::WheelUp,
+                false => MouseButton::WheelDown,
+            };
+            if self.terminal.clear_selection() {
                 self.renderer_wake.wake();
             }
+            for _ in 0..rows.unsigned_abs() {
+                let mouse_event = MouseEvent {
+                    action: MouseAction::Press,
+                    button,
+                    modifiers: event.modifiers.mods(),
+                    position,
+                };
+                io.send_lossless(IoMsg::Input(IoInput::Mouse(mouse_event)));
+            }
+            return SessionEffect::None;
         }
-        changed
+
+        if mode.is_alternate_screen && mode.is_mouse_alternate_scroll {
+            let code = match is_scroll_up {
+                true => W3cCode::from_bytes(b"arrow_up").expect("arrow_up should resolve"),
+                false => W3cCode::from_bytes(b"arrow_down").expect("arrow_down should resolve"),
+            };
+            if self.terminal.clear_selection() {
+                self.renderer_wake.wake();
+            }
+            for _ in 0..rows.unsigned_abs() {
+                io.send_lossless(IoMsg::Input(IoInput::Key(KeyEvent::press(code))));
+            }
+            return SessionEffect::None;
+        }
+
+        // This does `-rows` because GPUI and Ghostty use opposite conventions.
+        match io.try_send(IoMsg::Scroll(ScrollOp::Delta(-rows))) {
+            true => SessionEffect::ViewportScrolled,
+            false => SessionEffect::None,
+        }
     }
 
-    pub fn handle_scroll_wheel(
-        &mut self,
-        position: MousePosition,
-        delta: gpui::ScrollDelta,
-        cell_height: f32,
-        mods: &Modifiers,
-        emit: &mut dyn FnMut(AppAction),
-    ) -> bool {
-        self.surface.handle_scroll_wheel(
-            &self.terminal,
-            &self.io_notify,
-            position,
-            delta,
-            cell_height,
-            mods,
-            emit,
-        )
+    pub fn handle_scroll_key(&mut self, keystroke: &Keystroke) -> SessionEffect {
+        let rows = (self.dimensions.screen.height / self.dimensions.cell.height.max(1)).max(1);
+
+        // Locks internally.
+        let mode = self.terminal.mouse_mode();
+        let shift_pressed = keystroke.modifiers.shift;
+
+        let scroll_operation = 'scroll: {
+            let direction = match keystroke.key.to_ascii_lowercase().as_str() {
+                "home" if shift_pressed => break 'scroll ScrollOp::Top,
+                "end" if shift_pressed => break 'scroll ScrollOp::Bottom,
+                "pageup" | "page_up" => -1,
+                "pagedown" | "page_down" => 1,
+                _ => return SessionEffect::None,
+            };
+
+            // Only PageUp/PageDown reach this point.
+            if mode.is_alternate_screen && !shift_pressed {
+                return SessionEffect::None;
+            }
+
+            let page_rows = rows.saturating_sub(1).max(1) as i32;
+            ScrollOp::Delta(direction * page_rows)
+        };
+        match self.io_notify.try_send(IoMsg::Scroll(scroll_operation)) {
+            true => SessionEffect::ViewportScrolled,
+            false => SessionEffect::None,
+        }
     }
-
-    pub fn handle_scroll_key(
-        &mut self,
-        keystroke: &Keystroke,
-        emit: &mut dyn FnMut(AppAction),
-    ) -> bool {
-        let cell_height_px = self.dimensions.cell_height_px.max(1);
-        let rows = self.dimensions.screen_height_px / cell_height_px;
-
-        self.surface.handle_scroll_key(
-            &self.terminal,
-            &self.io_notify,
-            &keystroke.key,
-            &keystroke.modifiers,
-            rows.max(1) as u16,
-            emit,
-        )
-    }
-
-    /// Locks internally.
-    pub fn has_selection(&self) -> bool {
-        self.terminal.selection_text().is_some()
-    }
-}
-
-fn initial_dimensions(spawn_config: &SpawnConfig) -> TerminalDimensions {
-    // Bootstrap dimensions only. The renderer publishes authoritative text metrics
-    // when it starts, and layout then replaces this initial guess via apply_resize.
-    let cell_width_px = 8;
-    let cell_height_px = 16;
-
-    TerminalDimensions {
-        screen_width_px: u32::from(spawn_config.initial_cols) * cell_width_px,
-        screen_height_px: u32::from(spawn_config.initial_rows) * cell_height_px,
-        cell_width_px,
-        cell_height_px,
-    }
-}
-
-fn should_reveal_key_input(action: KeyAction) -> bool {
-    match action {
-        KeyAction::Release => false,
-        KeyAction::Press | KeyAction::Repeat => true,
-    }
-}
-
-fn should_clear_selection_on_key_event(event: &KeyEvent) -> bool {
-    if event.action == KeyAction::Release {
-        return false;
-    }
-
-    // Modifier-only events arrive with no logical key code and no text payload.
-    // Keep selection for these so Shift/Ctrl/Alt taps don't dismiss a selection.
-    event.code.as_raw() != 0 || event.text_len > 0
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         if let Some(handle) = self.io_thread.take() {
             let io_notify = self.io_notify.clone();
-            // Since zconpty is in-process v/s external process like conhost/OpenConsole.exe,
+            // Since zconpty is in-process v/s an external process like conhost/OpenConsole.exe,
             // spawn a thread to handle closing the console server and IO thread.
-            let builder = std::thread::Builder::new().name("terminal-io-reaper".into());
-            if let Err(err) = builder.spawn(move || {
-                io_notify.send_lossless(IoMsg::Close);
-                handle.join();
-            }) {
-                log::warn!("failed to spawn terminal-io-reaper: {err}");
-            }
+            let _ = std::thread::Builder::new()
+                .name("terminal-io-reaper".into())
+                .spawn(move || {
+                    io_notify.send_lossless(IoMsg::Close);
+                    handle.join()
+                })
+                .inspect_err(|e| log::warn!("failed to spawn terminal-io-reaper: {e}"));
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::{RenderConfig, SpawnConfig};
-
-    // TerminalSession requires a GPUI App context to construct.
-    // Full integration tests will be added when the GPUI test
-    // harness is established. For now, verify supporting types.
-
-    #[test]
-    fn session_id_uniqueness() {
-        let a = SessionId::new();
-        let b = SessionId::new();
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn default_spawn_config() {
-        let config = SpawnConfig::default();
-        assert_eq!(config.initial_cols, 80);
-        assert_eq!(config.initial_rows, 24);
-        assert_eq!(config.term, "xterm-256color");
-    }
-
-    #[test]
-    fn default_render_config() {
-        let config = RenderConfig::default();
-        assert_eq!(config.font_size, 14.0);
-    }
-
-    #[test]
-    fn key_event_selection_clear_ignores_modifier_only_events() {
-        let mut event = KeyEvent::new(KeyAction::Press, zconpty::W3cCode::from_raw(0));
-        event.text_len = 0;
-
-        assert!(!should_clear_selection_on_key_event(&event));
-    }
-
-    #[test]
-    fn key_event_selection_clear_for_non_modifier_press_or_repeat() {
-        let press = KeyEvent::new(KeyAction::Press, key_from_w3c(b"enter").expect("enter key"));
-        let repeat = KeyEvent::new(KeyAction::Repeat, key_from_w3c(b"key_a").expect("a key"));
-
-        assert!(should_clear_selection_on_key_event(&press));
-        assert!(should_clear_selection_on_key_event(&repeat));
-    }
-
-    #[test]
-    fn key_event_selection_clear_for_text_without_logical_key() {
-        let mut event = KeyEvent::new(KeyAction::Press, zconpty::W3cCode::from_raw(0));
-        event.text[0] = b'a';
-        event.text_len = 1;
-
-        assert!(should_clear_selection_on_key_event(&event));
-    }
-
-    #[test]
-    fn key_event_selection_clear_ignores_release_events() {
-        let event = KeyEvent::new(
-            KeyAction::Release,
-            key_from_w3c(b"enter").expect("enter key"),
-        );
-
-        assert!(!should_clear_selection_on_key_event(&event));
-    }
-
-    #[test]
-    fn process_state_variants() {
-        assert!(matches!(ProcessState::Running, ProcessState::Running));
-        assert!(matches!(
-            ProcessState::Error("test".into()),
-            ProcessState::Error(_)
-        ));
-    }
-
-    #[test]
-    fn metadata_defaults() {
-        let meta = SessionMetadata::default();
-        assert!(meta.title.is_none());
-        assert!(meta.cwd.is_none());
-        assert_eq!(meta.bell_count, 0);
-        assert!(!meta.has_unread_output);
     }
 }

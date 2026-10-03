@@ -16,5 +16,8 @@ actions!(
         SelectTab7,
         SelectTab8,
         SelectTab9,
+        IncreaseFontSize,
+        DecreaseFontSize,
+        ResetFontSize,
     ]
 );

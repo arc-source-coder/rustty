@@ -25,26 +25,23 @@ pub export fn ghostty_terminal_is_focus_event_mode(ptr: *anyopaque) callconv(.c)
     return handle.terminal_inst.modes.get(.focus_event);
 }
 
-/// Whether the alternate screen is active.
-pub export fn ghostty_terminal_is_alternate_screen(ptr: *anyopaque) callconv(.c) bool {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    handle.lock();
-    defer handle.unlock();
-    return handle.terminal_inst.screens.active_key == .alternate;
-}
+pub const MouseMode = extern struct {
+    is_alternate_screen: bool,
+    is_mouse_reporting: bool,
+    is_mouse_alternate_scroll: bool,
+    is_mouse_shift_capture: bool,
+};
 
-/// Whether mouse reporting is enabled.
-pub export fn ghostty_terminal_is_mouse_reporting(ptr: *anyopaque) callconv(.c) bool {
+pub export fn ghostty_terminal_get_mouse_mode(ptr: *anyopaque) callconv(.c) MouseMode {
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
     handle.lock();
     defer handle.unlock();
-    return handle.terminal_inst.flags.mouse_event != .none;
-}
-
-/// Whether alternate scroll mode (DEC 1007) is active.
-pub export fn ghostty_terminal_is_mouse_alternate_scroll(ptr: *anyopaque) callconv(.c) bool {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    handle.lock();
-    defer handle.unlock();
-    return handle.terminal_inst.modes.get(.mouse_alternate_scroll);
+    return .{
+        // Whether the alternate screen is active.
+        .is_alternate_screen = handle.terminal_inst.screens.active_key == .alternate,
+        // Whether mouse reporting is enabled.
+        .is_mouse_reporting = handle.terminal_inst.flags.mouse_event != .none,
+        .is_mouse_alternate_scroll = handle.terminal_inst.modes.get(.mouse_alternate_scroll),
+        .is_mouse_shift_capture = handle.terminal_inst.flags.mouse_shift_capture == .true,
+    };
 }

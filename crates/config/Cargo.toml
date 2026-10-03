@@ -1,0 +1,11 @@
+[package]
+name = "config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ghostty = { path = "../ghostty" }
+utils = { path = "../utils" }
+
+[lints]
+workspace = true

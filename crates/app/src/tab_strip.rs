@@ -1,14 +1,12 @@
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Background, Corners, Div, FontWeight, Hsla, IntoElement, ParentElement,
-    Pixels, ScrollHandle, Styled, Window, canvas, div, fill, point, px, rgba, size,
+    AnyElement, App, Background, Bounds, Corners, Div, FillOptions, FontWeight, Hsla, IntoElement,
+    ParentElement, PathBuilder, PathStyle, Pixels, ScrollHandle, Styled, Window, canvas, div, fill,
+    point, px, rgba, size,
 };
-use gpui::{Bounds, FillOptions, PathBuilder, PathStyle};
 
 use crate::profile::ProfileIconKind;
 use crate::types::TabId;
@@ -495,7 +493,7 @@ pub fn render_tab_visual(
                 .opacity(visual_style.surface_opacity)
                 .child(
                     div()
-                        .flex_grow()
+                        .flex_grow_1()
                         .flex()
                         .items_center()
                         .gap(TAB_ICON_LABEL_GAP)

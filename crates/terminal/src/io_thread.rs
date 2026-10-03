@@ -13,7 +13,7 @@ use crate::platform::windows::ntdll::{
     STATUS_ALERTED, STATUS_SUCCESS, STATUS_TIMEOUT, STATUS_USER_APC,
 };
 use crate::platform::windows::thread::{PlatformThread, set_current_thread_name};
-use crate::types::{IoInput, IoMsg, IoThreadNotify, RendererWake, ScrollOp, TerminalDimensions};
+use crate::types::{IoInput, IoMsg, IoThreadNotify, RendererWake, ScrollOp};
 
 const RESIZE_COALESCE: Duration = Duration::from_millis(25);
 const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -55,8 +55,6 @@ pub fn spawn_suspended(
 /// Ntdll thread entry trampoline.
 unsafe extern "system" fn io_thread_entry(context: *mut c_void) -> u32 {
     set_current_thread_name("pty-io");
-    #[cfg(feature = "profiler")]
-    tracy_client::set_thread_name!("pty-io");
 
     // SAFETY: context comes from Box::into_raw in spawn_suspended.
     let ctx = unsafe { Box::from_raw(context.cast::<IoThreadContext>()) };
@@ -78,7 +76,7 @@ struct IoThread {
     renderer_wake: Arc<RendererWake>,
 
     resize_deadline: Option<Instant>,
-    pending_resize: Option<TerminalDimensions>,
+    pending_resize: Option<(u16, u16)>,
     sync_output_deadline: Option<Instant>,
 }
 
@@ -142,8 +140,8 @@ impl IoThread {
                 IoInput::Focus(focused) => self.console_session.send_focus(focused),
                 IoInput::Paste(text) => self.console_session.send_paste(&text),
             },
-            IoMsg::Resize(size) => {
-                self.pending_resize = Some(size);
+            IoMsg::Resize { rows, cols } => {
+                self.pending_resize = Some((rows, cols));
                 self.resize_deadline =
                     Some(resize_deadline_after(self.resize_deadline, Instant::now()));
             }
@@ -184,8 +182,8 @@ impl IoThread {
             && now >= deadline
         {
             self.resize_deadline = None;
-            if let Some(size) = self.pending_resize.take() {
-                self.apply_resize(size);
+            if let Some((rows, columns)) = self.pending_resize.take() {
+                self.apply_resize(rows, columns);
             }
         }
 
@@ -208,12 +206,8 @@ impl IoThread {
         self.renderer_wake.wake();
     }
 
-    fn apply_resize(&self, dimensions: TerminalDimensions) {
-        let rows = (dimensions.screen_height_px / dimensions.cell_height_px) as u16;
-        let cols = (dimensions.screen_width_px / dimensions.cell_width_px) as u16;
-
+    fn apply_resize(&self, rows: u16, cols: u16) {
         self.terminal.resize(cols.max(1), rows.max(1));
-        self.terminal.set_dimensions(dimensions);
         self.console_session.send_resize(cols.max(1), rows.max(1));
         self.renderer_wake.wake();
     }

@@ -4,7 +4,13 @@ const Allocator = std.mem.Allocator;
 const terminal = @import("../ghostty/src/terminal/main.zig");
 const color = terminal.color;
 
-const renderer_dimensions = @import("../ghostty/src/renderer/size.zig");
+const size = @import("../ghostty/src/renderer/size.zig");
+
+pub const Size = extern struct {
+    screen: size.ScreenSize,
+    cell: size.CellSize,
+    padding: size.Padding,
+};
 
 // --- Callback function pointer types ---
 pub const BellCallback = *const fn (?*anyopaque) callconv(.c) void;
@@ -32,15 +38,20 @@ const WriteInput = struct {
 pub const TerminalHandle = struct {
     alloc: Allocator,
     mutex: std.Thread.Mutex = .{},
+
     terminal_inst: terminal.Terminal,
-    handler: terminal.TerminalStream.Handler,
     stream: terminal.TerminalStream,
-    event_callbacks: EventCallbacks,
-    output_callback: OutputCallbackState,
-    write_input: WriteInput,
     render_state: terminal.RenderState,
 
-    size: renderer_dimensions.Size,
+    size: size.Size,
+    gesture: terminal.SelectionGesture,
+    /// This is passed to Ghostty's mouse encoder,
+    /// which uses it to deduplicate mouse movement.
+    mouse_last_cell: ?terminal.point.Coordinate = null,
+
+    write_input: WriteInput,
+    event_callbacks: EventCallbacks,
+    output_callback: OutputCallbackState,
 
     inline fn fromEffectsHandler(handler_ptr: *terminal.TerminalStream.Handler) *TerminalHandle {
         const stream_ptr: *terminal.TerminalStream = @fieldParentPtr("handler", handler_ptr);
@@ -111,7 +122,7 @@ pub const TerminalHandle = struct {
         const handle = try alloc.create(TerminalHandle);
         errdefer alloc.destroy(handle);
 
-        const t = try terminal.Terminal.init(alloc, .{
+        var t = try terminal.Terminal.init(alloc, .{
             .cols = cols,
             .rows = rows,
             .max_scrollback = 20_000_000,
@@ -122,44 +133,33 @@ pub const TerminalHandle = struct {
                 .palette = .default,
             },
         });
-        errdefer {
-            var tmp = t;
-            tmp.deinit(alloc);
-        }
+        t.modes.set(.cursor_blinking, true);
 
         handle.* = .{
             .alloc = alloc,
             .terminal_inst = t,
-            .handler = .init(&handle.terminal_inst),
             .stream = undefined,
+            .gesture = .init,
+            .render_state = .empty,
+
             .event_callbacks = .{},
             .output_callback = .{},
             .write_input = .{},
-            .render_state = .empty,
 
-            // The Rust renderer will set these values via
-            // ghostty_terminal_set_render_dimensions().
+            // Rust will set these values after startup
             .size = .{
-                .screen = .{
-                    .width = 0,
-                    .height = 0,
-                },
-                .cell = .{
-                    .width = 0,
-                    .height = 0,
-                },
-                .padding = .{
-                    .top = 0,
-                    .bottom = 0,
-                    .right = 0,
-                    .left = 0,
-                },
+                .screen = .{ .width = 0, .height = 0 },
+                .cell = .{ .width = 0, .height = 0 },
+                .padding = .{ .top = 0, .bottom = 0, .right = 0, .left = 0 },
             },
         };
 
+        var handler: terminal.TerminalStream.Handler = .init(&handle.terminal_inst);
+        handler.default_cursor_blink = true;
+
         // Install effects callbacks once. They dispatch through Callbacks,
         // so updating callbacks later takes effect immediately.
-        handle.handler.effects = .{
+        handler.effects = .{
             .write_pty = &writePtyTrampoline,
             .bell = &bellTrampoline,
             .color_scheme = &colorSchemeTrampoline,
@@ -167,10 +167,14 @@ pub const TerminalHandle = struct {
             .enquiry = &enquiryTrampoline,
             .size = &sizeTrampoline,
             .title_changed = &titleChangedTrampoline,
+            // NOTE(renderer-refactor): `pwd_changed` is left null during a
+            // Ghostty submodule update for the renderer/font refactor.
+            // This should be implemented after the refactor lands.
+            .pwd_changed = null,
             .xtversion = null,
         };
 
-        handle.stream = terminal.TerminalStream.initAlloc(alloc, handle.handler);
+        handle.stream = .initAlloc(alloc, handler);
         return handle;
     }
 
@@ -178,6 +182,7 @@ pub const TerminalHandle = struct {
         const alloc = self.alloc;
         self.render_state.deinit(alloc);
         self.stream.deinit();
+        self.gesture.deinit(&self.terminal_inst);
         self.terminal_inst.deinit(alloc);
         self.* = undefined;
         alloc.destroy(self);

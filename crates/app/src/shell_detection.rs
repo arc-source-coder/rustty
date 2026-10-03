@@ -180,6 +180,8 @@ fn parse_wsl_quiet_output(output: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     #[test]
@@ -198,7 +200,7 @@ mod tests {
         ];
         let default = select_default(&profiles);
         let selected = profiles.iter().find(|p| p.id == default).unwrap();
-        assert!(matches!(selected.shell_kind, ShellKind::Pwsh));
+        assert_matches!(selected.shell_kind, ShellKind::Pwsh);
     }
 
     #[test]
@@ -209,7 +211,7 @@ mod tests {
         ];
         let default = select_default(&profiles);
         let selected = profiles.iter().find(|p| p.id == default).unwrap();
-        assert!(matches!(selected.shell_kind, ShellKind::PowerShell));
+        assert_matches!(selected.shell_kind, ShellKind::PowerShell);
     }
 
     #[test]

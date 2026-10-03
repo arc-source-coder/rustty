@@ -1,723 +1,170 @@
-use std::mem::ManuallyDrop;
+use std::num::NonZeroU32;
 
 use anyhow::Result;
-use windows::Win32::Foundation::RECT;
+use harfbuzz::HbFont;
+
+use crate::metrics::FaceMetrics;
+use crate::types::{FontError, FontSize};
+
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_COLOR_F, DWRITE_COLOR_GLYPH_RUN1, DWRITE_FONT_METRICS, DWRITE_GLYPH_IMAGE_DATA,
-    DWRITE_GLYPH_IMAGE_FORMATS, DWRITE_GLYPH_IMAGE_FORMATS_CFF, DWRITE_GLYPH_IMAGE_FORMATS_COLR,
+    DWRITE_FONT_METRICS1, DWRITE_GLYPH_IMAGE_FORMATS, DWRITE_GLYPH_IMAGE_FORMATS_COLR,
     DWRITE_GLYPH_IMAGE_FORMATS_JPEG, DWRITE_GLYPH_IMAGE_FORMATS_PNG,
     DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8, DWRITE_GLYPH_IMAGE_FORMATS_SVG,
-    DWRITE_GLYPH_IMAGE_FORMATS_TIFF, DWRITE_GLYPH_IMAGE_FORMATS_TRUETYPE, DWRITE_GLYPH_METRICS,
-    DWRITE_GLYPH_OFFSET, DWRITE_GLYPH_RUN, DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_MATRIX,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_OUTLINE_THRESHOLD_ANTIALIASED,
-    DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_RENDERING_MODE_OUTLINE,
-    DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, DWRITE_TEXTURE_ALIASED_1x1, IDWriteFactory2,
-    IDWriteFactory4, IDWriteFontFace, IDWriteFontFace2, IDWriteFontFace4, IDWriteGlyphRunAnalysis,
-    IDWriteRenderingParams,
+    DWRITE_GLYPH_IMAGE_FORMATS_TIFF, DWRITE_GLYPH_METRICS, IDWriteFontFace5,
 };
-use windows::Win32::Graphics::Imaging::{
-    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
-    WICBitmapDitherTypeNone, WICBitmapPaletteTypeMedianCut, WICDecodeMetadataCacheOnDemand,
-};
-use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
-use windows::core::Interface;
-use windows_numerics::Vector2;
 
-use super::metrics::extract_metrics;
-use crate::cache::glyph_cache::GlyphAtlasKind;
-use crate::shared_grid::GridMetrics;
-
-#[derive(Clone, Copy, Debug)]
-pub struct DWriteGridMetricsConfig {
-    pub font_size: f32,
-    pub cell_width: f32,
-    pub line_height: f32,
-    pub baseline: f32,
+/// A DirectWrite face with a lazily initialized, size-specific HarfBuzz font.
+pub struct Face {
+    /// Point size and DPI used to initialize this face's HarfBuzz font.
+    /// Default-valued until `load` succeeds.
+    pub size: FontSize,
+    /// DirectWrite Face for this font
+    ///
+    /// We use a IDWriteFontFace5 here because it costs ~10KB more than
+    /// a "deferred" IDWriteFont3 but provides much more accurate data.
+    pub face: IDWriteFontFace5,
+    /// HarfBuzz font derived from `self.face`; `None` until `load` succeeds.
+    pub hb_font: Option<HbFont>,
 }
 
-#[derive(Clone, Copy)]
-struct FaceDimensions {
-    advance_width: f32,
-    ascent: f32,
-    line_gap: f32,
-    face_height: f32,
-}
-
-pub fn measure_grid_metrics(
-    face2: &IDWriteFontFace2,
-    config: &DWriteGridMetricsConfig,
-) -> Option<GridMetrics> {
-    let face = face2.cast::<IDWriteFontFace>().ok()?;
-    let measured = measure_face_dimensions(&face, config.font_size).ok()?;
-    if measured.face_height <= 0.0 {
-        return None;
-    }
-
-    let cell_width = if config.cell_width > 0.0 {
-        config.cell_width
-    } else {
-        measured.advance_width.round().max(1.0)
-    };
-    let cell_height = if config.line_height > 0.0 {
-        config.line_height.max(1.0)
-    } else {
-        measured.face_height.round().max(1.0)
-    };
-    let baseline = if config.baseline > 0.0 {
-        config.baseline.clamp(0.0, cell_height)
-    } else {
-        (measured.ascent + (measured.line_gap + cell_height - measured.face_height) / 2.0)
-            .round()
-            .clamp(0.0, cell_height)
-    };
-
-    Some(GridMetrics {
-        cell_width,
-        cell_height,
-        baseline,
-    })
-}
-
-fn measure_face_dimensions(face: &IDWriteFontFace, font_size: f32) -> Result<FaceDimensions> {
-    let metrics = extract_metrics(face, font_size)?;
-    let advance_width = measure_zero_advance_width(face, font_size)?
-        .unwrap_or(font_size * 0.5)
-        .max(1.0);
-    Ok(FaceDimensions {
-        advance_width,
-        ascent: metrics.ascent,
-        line_gap: metrics.line_gap,
-        face_height: (metrics.ascent + metrics.descent + metrics.line_gap).max(1.0),
-    })
-}
-
-fn measure_zero_advance_width(face: &IDWriteFontFace, font_size: f32) -> Result<Option<f32>> {
-    let mut raw = DWRITE_FONT_METRICS::default();
-    unsafe {
-        face.GetMetrics(&raw mut raw);
-    }
-    if raw.designUnitsPerEm == 0 {
-        return Ok(None);
-    }
-
-    let codepoint = ['0' as u32];
-    let mut glyph_index = [0u16; 1];
-    unsafe {
-        face.GetGlyphIndices(codepoint.as_ptr(), 1, glyph_index.as_mut_ptr())?;
-    }
-    if glyph_index[0] == 0 {
-        return Ok(None);
-    }
-
-    let mut glyph_metrics = [DWRITE_GLYPH_METRICS::default(); 1];
-    unsafe {
-        face.GetDesignGlyphMetrics(glyph_index.as_ptr(), 1, glyph_metrics.as_mut_ptr(), false)?;
-    }
-    let scale = font_size / f32::from(raw.designUnitsPerEm);
-    Ok(Some(glyph_metrics[0].advanceWidth as f32 * scale))
-}
-
-pub(crate) struct RasterizedGlyph {
-    pub atlas_kind: GlyphAtlasKind,
-    pub width: u32,
-    pub height: u32,
-    pub offset_x: i32,
-    pub offset_y: i32,
-    pub pixels: Vec<u8>,
-}
-
-#[derive(Clone)]
-pub struct DWriteGlyphRasterizer {
-    factory: IDWriteFactory2,
-    factory4: Option<IDWriteFactory4>,
-    wic_factory: Option<IWICImagingFactory>,
-    rendering_params: Option<IDWriteRenderingParams>,
-}
-
-impl DWriteGlyphRasterizer {
-    pub fn new(factory: IDWriteFactory2) -> Self {
-        let factory4 = factory.cast::<IDWriteFactory4>().ok();
-        let rendering_params = unsafe { factory.CreateRenderingParams() }.ok();
-        let wic_factory =
-            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }.ok();
+impl Face {
+    pub fn new(face: IDWriteFontFace5) -> Self {
         Self {
-            factory,
-            factory4,
-            wic_factory,
-            rendering_params,
+            size: FontSize::default(),
+            face,
+            hb_font: None,
         }
     }
 
-    pub(crate) fn rasterize(
-        &self,
-        face2: &IDWriteFontFace2,
-        glyph_index: u16,
-        font_size: f32,
-        scale_factor: f32,
-    ) -> Result<RasterizedGlyph> {
-        if let Some(color) = self.rasterize_color(face2, glyph_index, font_size, scale_factor)? {
-            return Ok(color);
+    /// Initialize the HarfBuzz font and size once. Later calls leave both
+    /// unchanged; a size change requires a face from a different font grid.
+    pub fn load(&mut self, size: FontSize) -> Result<(), FontError> {
+        if self.hb_font.is_none() {
+            std::hint::cold_path();
+
+            let mut hb_font = HbFont::from(&self.face)?;
+
+            // Convert scale to 26.6 FP format to pass to Harfbuzz
+            let scale = (size.pixels() * 64.0).round() as i32;
+            hb_font.set_scale(scale, scale);
+
+            self.size = size;
+            self.hb_font = Some(hb_font);
         }
-        self.rasterize_grayscale(face2, glyph_index, font_size, scale_factor)
+        Ok(())
     }
 
-    fn rasterize_color(
-        &self,
-        face2: &IDWriteFontFace2,
-        glyph_index: u16,
-        font_size: f32,
-        scale_factor: f32,
-    ) -> Result<Option<RasterizedGlyph>> {
-        if let Some(bitmap) =
-            self.rasterize_bitmap_color(face2, glyph_index, font_size, scale_factor)?
-        {
-            return Ok(Some(bitmap));
+    /// Get the glyph index for the given Unicode code point.
+    pub fn glyph_index(&self, codepoint: u32) -> Option<NonZeroU32> {
+        let mut gid: [u16; 1] = [0];
+        let cps = [codepoint];
+
+        unsafe {
+            let (ptr, len) = (cps.as_ptr(), cps.len() as u32);
+            self.face.GetGlyphIndices(ptr, len, gid.as_mut_ptr()).ok()?;
         }
 
-        let Some(factory4) = &self.factory4 else {
-            return Ok(None);
-        };
+        NonZeroU32::new(gid[0] as u32)
+    }
 
-        let face = face2.cast::<IDWriteFontFace>()?;
-        let glyph_indices = [glyph_index];
-        let advances = [0.0f32];
-        let offsets = [DWRITE_GLYPH_OFFSET::default()];
-        let glyph_run = DWRITE_GLYPH_RUN {
-            fontFace: ManuallyDrop::new(Some(face.clone())),
-            fontEmSize: font_size,
-            glyphCount: 1,
-            glyphIndices: glyph_indices.as_ptr(),
-            glyphAdvances: advances.as_ptr(),
-            glyphOffsets: offsets.as_ptr(),
-            isSideways: false.into(),
-            bidiLevel: 0,
-        };
-
-        let desired_formats = DWRITE_GLYPH_IMAGE_FORMATS_TRUETYPE
-            | DWRITE_GLYPH_IMAGE_FORMATS_CFF
-            | DWRITE_GLYPH_IMAGE_FORMATS_COLR
-            | DWRITE_GLYPH_IMAGE_FORMATS_SVG
-            | DWRITE_GLYPH_IMAGE_FORMATS_PNG
+    /// Returns true if the given glyph ID is colorized.
+    pub fn is_color_glyph(&self, gid: NonZeroU32) -> bool {
+        // Zed has a comment saying this does not work for ❤
+        // TODO: Test with ❤
+        let image_formats = unsafe { self.face.GetGlyphImageFormats(gid.get() as u16, 1, 4096) };
+        let color_formats: DWRITE_GLYPH_IMAGE_FORMATS = DWRITE_GLYPH_IMAGE_FORMATS_PNG
             | DWRITE_GLYPH_IMAGE_FORMATS_JPEG
             | DWRITE_GLYPH_IMAGE_FORMATS_TIFF
-            | DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8;
+            | DWRITE_GLYPH_IMAGE_FORMATS_COLR
+            | DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8
+            | DWRITE_GLYPH_IMAGE_FORMATS_SVG;
 
-        let enumerator = unsafe {
-            factory4.TranslateColorGlyphRun(
-                Vector2 { X: 0.0, Y: 0.0 },
-                &raw const glyph_run,
-                None,
-                desired_formats,
-                DWRITE_MEASURING_MODE_NATURAL,
-                None,
-                0,
-            )
-        };
-        let Ok(enumerator) = enumerator else {
-            return Ok(None);
-        };
-
-        let mut composed = ColorCompose::default();
-        let mut found_intrinsic = false;
-        while unsafe { enumerator.MoveNext()? }.as_bool() {
-            let run_ptr = unsafe { enumerator.GetCurrentRun()? };
-            if run_ptr.is_null() {
-                continue;
-            }
-            let run = unsafe { &*run_ptr };
-            found_intrinsic = true;
-            let format = run.glyphImageFormat;
-            if !glyph_image_formats_any(
-                format,
-                DWRITE_GLYPH_IMAGE_FORMATS_TRUETYPE
-                    | DWRITE_GLYPH_IMAGE_FORMATS_CFF
-                    | DWRITE_GLYPH_IMAGE_FORMATS_COLR,
-            ) {
-                continue;
-            }
-
-            if let Some(layer) = self.rasterize_color_outline_layer(run)? {
-                composed.blend(&layer, run.Base.runColor);
-            }
-        }
-
-        if !found_intrinsic || composed.width == 0 || composed.height == 0 {
-            return Ok(None);
-        }
-
-        Ok(Some(RasterizedGlyph {
-            atlas_kind: GlyphAtlasKind::Color,
-            width: composed.width,
-            height: composed.height,
-            offset_x: composed.left,
-            offset_y: composed.top,
-            pixels: composed.pixels,
-        }))
+        (image_formats.unwrap_or_default() & color_formats).0 != 0
     }
 
-    fn rasterize_bitmap_color(
-        &self,
-        face2: &IDWriteFontFace2,
-        glyph_index: u16,
-        font_size: f32,
-        scale_factor: f32,
-    ) -> Result<Option<RasterizedGlyph>> {
-        let Some(face4) = face2.cast::<IDWriteFontFace4>().ok() else {
-            return Ok(None);
-        };
-        let ppem = (font_size * scale_factor).round().max(1.0) as u32;
-        let formats = unsafe { face4.GetGlyphImageFormats(glyph_index, ppem, ppem) }?;
-
-        for format in [
-            DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8,
-            DWRITE_GLYPH_IMAGE_FORMATS_PNG,
-            DWRITE_GLYPH_IMAGE_FORMATS_JPEG,
-            DWRITE_GLYPH_IMAGE_FORMATS_TIFF,
-        ] {
-            if !glyph_image_formats_any(formats, format) {
-                continue;
-            }
-            if let Some(glyph) =
-                self.rasterize_bitmap_color_format(&face4, glyph_index, ppem, format)?
-            {
-                return Ok(Some(glyph));
-            }
+    pub fn get_metrics(&self) -> Result<FaceMetrics, FontError> {
+        if self.size == FontSize::default() {
+            return Err(FontError::FaceNotInitialized);
         }
 
-        Ok(None)
-    }
+        let mut metrics = DWRITE_FONT_METRICS1::default();
+        // SAFETY: `metrics` is a valid out-parameter for this COM call.
+        unsafe { self.face.GetMetrics(&raw mut metrics) };
 
-    fn rasterize_bitmap_color_format(
-        &self,
-        face4: &IDWriteFontFace4,
-        glyph_index: u16,
-        ppem: u32,
-        format: DWRITE_GLYPH_IMAGE_FORMATS,
-    ) -> Result<Option<RasterizedGlyph>> {
-        let mut data = DWRITE_GLYPH_IMAGE_DATA::default();
-        let mut context = std::ptr::null_mut();
-        let hr = unsafe {
-            face4.GetGlyphImageData(glyph_index, ppem, format, &raw mut data, &raw mut context)
-        };
-        if hr.is_err() {
-            return Ok(None);
+        if metrics.Base.designUnitsPerEm == 0 {
+            return Err(FontError::InvalidMetrics);
         }
 
-        let release = GlyphImageLease {
-            face4: face4.clone(),
-            context,
-        };
+        let px_per_em = f64::from(self.size.pixels());
+        let px_per_unit = px_per_em / f64::from(metrics.Base.designUnitsPerEm);
 
-        if data.imageData.is_null() || data.imageDataSize == 0 {
-            return Ok(None);
-        }
+        let ascent = f64::from(metrics.Base.ascent) * px_per_unit;
+        // DirectWrite's descent means positive = down
+        // Normalize to positive = up
+        let descent = -(f64::from(metrics.Base.descent) * px_per_unit);
+        let line_gap = f64::from(metrics.Base.lineGap) * px_per_unit;
 
-        let pixels = unsafe {
-            std::slice::from_raw_parts(data.imageData.cast::<u8>(), data.imageDataSize as usize)
-        };
-        let (decoded_pixels, width, height) =
-            if format == DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8 {
-                let width = data.pixelSize.width;
-                let height = data.pixelSize.height;
-                if width == 0 || height == 0 {
-                    return Ok(None);
-                }
-                let expected_len = width as usize * height as usize * 4;
-                if pixels.len() < expected_len {
-                    return Ok(None);
-                }
-                (pixels[..expected_len].to_vec(), width, height)
-            } else {
-                let Some((decoded_pixels, width, height)) = self.decode_wic_bitmap(pixels)? else {
-                    return Ok(None);
-                };
-                (decoded_pixels, width, height)
-            };
+        let underline_position = f64::from(metrics.Base.underlinePosition) * px_per_unit;
+        let underline_thickness = f64::from(metrics.Base.underlineThickness) * px_per_unit;
 
-        let _lease = release;
-        Ok(Some(RasterizedGlyph {
-            atlas_kind: GlyphAtlasKind::Color,
-            width,
-            height,
-            offset_x: -data.horizontalLeftOrigin.x,
-            offset_y: -data.horizontalLeftOrigin.y,
-            pixels: decoded_pixels,
-        }))
-    }
+        let strikethrough_position = f64::from(metrics.Base.strikethroughPosition) * px_per_unit;
+        let strikethrough_thickness = f64::from(metrics.Base.strikethroughThickness) * px_per_unit;
 
-    fn decode_wic_bitmap(&self, bytes: &[u8]) -> Result<Option<(Vec<u8>, u32, u32)>> {
-        let Some(factory) = &self.wic_factory else {
-            return Ok(None);
-        };
-        if bytes.is_empty() {
-            return Ok(None);
-        }
+        let cap_height = f64::from(metrics.Base.capHeight) * px_per_unit;
 
-        let stream = unsafe { factory.CreateStream()? };
-        unsafe { stream.InitializeFromMemory(bytes)? };
-        let decoder = unsafe {
-            factory.CreateDecoderFromStream(
-                &stream,
-                std::ptr::null(),
-                WICDecodeMetadataCacheOnDemand,
+        const ASCII_START: u32 = 0x20;
+        const ASCII_END: u32 = 0x7e;
+        const ASCII_COUNT: usize = (ASCII_END - ASCII_START + 1) as usize;
+
+        let codepoints: [u32; ASCII_COUNT] = std::array::from_fn(|i| ASCII_START + i as u32);
+        let mut glyph_indices: [u16; ASCII_COUNT] = [0; ASCII_COUNT];
+
+        unsafe {
+            self.face.GetGlyphIndices(
+                codepoints.as_ptr(),
+                ASCII_COUNT as u32,
+                glyph_indices.as_mut_ptr(),
             )?
         };
-        let frame = unsafe { decoder.GetFrame(0)? };
-        let converter = unsafe { factory.CreateFormatConverter()? };
+
+        let mut glyph_metrics = [DWRITE_GLYPH_METRICS::default(); ASCII_COUNT];
         unsafe {
-            converter.Initialize(
-                &frame,
-                &GUID_WICPixelFormat32bppPBGRA,
-                WICBitmapDitherTypeNone,
-                None,
-                0.0,
-                WICBitmapPaletteTypeMedianCut,
-            )?;
-        }
-
-        let mut width = 0;
-        let mut height = 0;
-        unsafe { converter.GetSize(&raw mut width, &raw mut height)? };
-        if width == 0 || height == 0 {
-            return Ok(None);
-        }
-
-        let stride = width * 4;
-        let mut pixels = vec![0u8; stride as usize * height as usize];
-        unsafe {
-            converter.CopyPixels(std::ptr::null(), stride, &mut pixels)?;
-        }
-        Ok(Some((pixels, width, height)))
-    }
-
-    fn rasterize_grayscale(
-        &self,
-        face2: &IDWriteFontFace2,
-        glyph_index: u16,
-        font_size: f32,
-        scale_factor: f32,
-    ) -> Result<RasterizedGlyph> {
-        let glyph_analysis = self.create_analysis(face2, glyph_index, font_size, scale_factor)?;
-        let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1) }?;
-        let width = (bounds.right - bounds.left).max(0) as u32;
-        let height = (bounds.bottom - bounds.top).max(0) as u32;
-        if width == 0 || height == 0 {
-            return Ok(RasterizedGlyph {
-                atlas_kind: GlyphAtlasKind::Grayscale,
-                width: 0,
-                height: 0,
-                offset_x: 0,
-                offset_y: 0,
-                pixels: Vec::new(),
-            });
-        }
-
-        let mut pixels = vec![0u8; (width * height) as usize];
-        unsafe {
-            glyph_analysis.CreateAlphaTexture(
-                DWRITE_TEXTURE_ALIASED_1x1,
-                &RECT {
-                    left: bounds.left,
-                    top: bounds.top,
-                    right: bounds.right,
-                    bottom: bounds.bottom,
-                },
-                &mut pixels,
-            )?;
-        }
-
-        Ok(RasterizedGlyph {
-            atlas_kind: GlyphAtlasKind::Grayscale,
-            width,
-            height,
-            offset_x: bounds.left,
-            offset_y: bounds.top,
-            pixels,
-        })
-    }
-
-    fn rasterize_color_outline_layer(
-        &self,
-        run: &DWRITE_COLOR_GLYPH_RUN1,
-    ) -> Result<Option<ColorLayer>> {
-        let glyph_analysis = self.create_analysis_from_run(&run.Base.glyphRun)?;
-        let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1) }?;
-        let width = (bounds.right - bounds.left).max(0) as u32;
-        let height = (bounds.bottom - bounds.top).max(0) as u32;
-        if width == 0 || height == 0 {
-            return Ok(None);
-        }
-
-        let mut coverage = vec![0u8; (width * height) as usize];
-        unsafe {
-            glyph_analysis.CreateAlphaTexture(
-                DWRITE_TEXTURE_ALIASED_1x1,
-                &RECT {
-                    left: bounds.left,
-                    top: bounds.top,
-                    right: bounds.right,
-                    bottom: bounds.bottom,
-                },
-                &mut coverage,
-            )?;
-        }
-
-        Ok(Some(ColorLayer {
-            left: bounds.left,
-            top: bounds.top,
-            width,
-            height,
-            coverage,
-        }))
-    }
-
-    fn create_analysis(
-        &self,
-        face2: &IDWriteFontFace2,
-        glyph_index: u16,
-        font_size: f32,
-        scale_factor: f32,
-    ) -> Result<IDWriteGlyphRunAnalysis> {
-        let face = face2.cast::<IDWriteFontFace>()?;
-        let glyph_indices = [glyph_index];
-        let advances = [0.0f32];
-        let offsets = [DWRITE_GLYPH_OFFSET::default()];
-        let glyph_run = DWRITE_GLYPH_RUN {
-            fontFace: ManuallyDrop::new(Some(face.clone())),
-            fontEmSize: font_size,
-            glyphCount: 1,
-            glyphIndices: glyph_indices.as_ptr(),
-            glyphAdvances: advances.as_ptr(),
-            glyphOffsets: offsets.as_ptr(),
-            isSideways: false.into(),
-            bidiLevel: 0,
-        };
-
-        // Prepare the transform.
-        let scale = scale_factor.max(1.0);
-        let transform = DWRITE_MATRIX {
-            m11: scale,
-            m12: 0.0,
-            m21: 0.0,
-            m22: scale,
-            dx: 0.0,
-            dy: 0.0,
-        };
-
-        let mut rendering_mode = DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC;
-        let mut grid_fit_mode = DWRITE_GRID_FIT_MODE_DEFAULT;
-        unsafe {
-            face2.GetRecommendedRenderingMode(
-                font_size,
-                96.0,
-                96.0,
-                Some(&raw const transform),
+            self.face.GetDesignGlyphMetrics(
+                glyph_indices.as_ptr(),
+                ASCII_COUNT as u32,
+                glyph_metrics.as_mut_ptr(),
                 false,
-                DWRITE_OUTLINE_THRESHOLD_ANTIALIASED,
-                DWRITE_MEASURING_MODE_NATURAL,
-                self.rendering_params.as_ref(),
-                &raw mut rendering_mode,
-                &raw mut grid_fit_mode,
             )?;
         }
-        if rendering_mode == DWRITE_RENDERING_MODE_OUTLINE {
-            rendering_mode = DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC;
-        }
 
-        Ok(unsafe {
-            self.factory.CreateGlyphRunAnalysis(
-                &raw const glyph_run,
-                Some(&raw const transform),
-                rendering_mode,
-                DWRITE_MEASURING_MODE_NATURAL,
-                grid_fit_mode,
-                DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,
-                0.0,
-                0.0,
-            )?
-        })
-    }
+        let mut max_advance: f64 = 0.0;
 
-    fn create_analysis_from_run(
-        &self,
-        glyph_run: &DWRITE_GLYPH_RUN,
-    ) -> Result<IDWriteGlyphRunAnalysis> {
-        Ok(unsafe {
-            self.factory.CreateGlyphRunAnalysis(
-                glyph_run,
-                None,
-                DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
-                DWRITE_MEASURING_MODE_NATURAL,
-                DWRITE_GRID_FIT_MODE_DEFAULT,
-                DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,
-                0.0,
-                0.0,
-            )?
-        })
-    }
-}
-
-// SAFETY: these factories are immutable COM interfaces used only through
-// SharedGrid's serialized glyph-render path. The renderer never aliases the
-// rasterizer directly, so cross-thread use is synchronized at the font-system
-// boundary.
-unsafe impl Send for DWriteGlyphRasterizer {}
-unsafe impl Sync for DWriteGlyphRasterizer {}
-
-#[derive(Default)]
-struct ColorCompose {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
-}
-
-struct ColorLayer {
-    left: i32,
-    top: i32,
-    width: u32,
-    height: u32,
-    coverage: Vec<u8>,
-}
-
-impl ColorCompose {
-    fn blend(&mut self, layer: &ColorLayer, run_color: DWRITE_COLOR_F) {
-        self.ensure_bounds(
-            layer.left,
-            layer.top,
-            layer.left + layer.width as i32,
-            layer.top + layer.height as i32,
-        );
-        if self.width == 0 || self.height == 0 {
-            return;
-        }
-
-        let a = (run_color.a.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let r = (run_color.r.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let g = (run_color.g.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let b = (run_color.b.clamp(0.0, 1.0) * 255.0).round() as u8;
-
-        let start_x = (layer.left - self.left) as usize;
-        let start_y = (layer.top - self.top) as usize;
-        let dst_stride = self.width as usize * 4;
-        let src_stride = layer.width as usize;
-
-        for y in 0..layer.height as usize {
-            let src_row = &layer.coverage[y * src_stride..(y + 1) * src_stride];
-            let dst_row_start = (start_y + y) * dst_stride + start_x * 4;
-            for (x, &coverage) in src_row.iter().enumerate() {
-                if coverage == 0 || a == 0 {
-                    continue;
-                }
-                let src_a = (u16::from(coverage) * u16::from(a) + 127) / 255;
-                if src_a == 0 {
-                    continue;
-                }
-                let src_b = ((u16::from(b) * src_a) + 127) / 255;
-                let src_g = ((u16::from(g) * src_a) + 127) / 255;
-                let src_r = ((u16::from(r) * src_a) + 127) / 255;
-
-                let idx = dst_row_start + x * 4;
-                let dst_b = u16::from(self.pixels[idx]);
-                let dst_g = u16::from(self.pixels[idx + 1]);
-                let dst_r = u16::from(self.pixels[idx + 2]);
-                let dst_a = u16::from(self.pixels[idx + 3]);
-                let inv_src_a = 255 - src_a;
-
-                let out_b = src_b + ((dst_b * inv_src_a + 127) / 255);
-                let out_g = src_g + ((dst_g * inv_src_a + 127) / 255);
-                let out_r = src_r + ((dst_r * inv_src_a + 127) / 255);
-                let out_a = src_a + ((dst_a * inv_src_a + 127) / 255);
-
-                self.pixels[idx] = out_b.min(255) as u8;
-                self.pixels[idx + 1] = out_g.min(255) as u8;
-                self.pixels[idx + 2] = out_r.min(255) as u8;
-                self.pixels[idx + 3] = out_a.min(255) as u8;
+        for (&glyph, metric) in glyph_indices.iter().zip(&glyph_metrics) {
+            if glyph == 0 {
+                continue;
             }
+            let advance = f64::from(metric.advanceWidth) * px_per_unit;
+            max_advance = f64::max(max_advance, advance);
         }
+
+        if max_advance <= 0.0 {
+            return Err(FontError::InvalidMetrics);
+        }
+
+        Ok(FaceMetrics {
+            cell_width: max_advance,
+
+            ascent,
+            descent,
+            line_gap,
+
+            underline_position,
+            underline_thickness,
+
+            strikethrough_position,
+            strikethrough_thickness,
+
+            cap_height,
+        })
     }
-
-    fn ensure_bounds(&mut self, left: i32, top: i32, right: i32, bottom: i32) {
-        if right <= left || bottom <= top {
-            return;
-        }
-        if self.width == 0 || self.height == 0 {
-            self.left = left;
-            self.top = top;
-            self.right = right;
-            self.bottom = bottom;
-            self.recreate();
-            return;
-        }
-
-        let new_left = self.left.min(left);
-        let new_top = self.top.min(top);
-        let new_right = self.right.max(right);
-        let new_bottom = self.bottom.max(bottom);
-        if new_left == self.left
-            && new_top == self.top
-            && new_right == self.right
-            && new_bottom == self.bottom
-        {
-            return;
-        }
-
-        let old_left = self.left;
-        let old_top = self.top;
-        let old_width = self.width as usize;
-        let old_height = self.height as usize;
-        let old_pixels = std::mem::take(&mut self.pixels);
-
-        self.left = new_left;
-        self.top = new_top;
-        self.right = new_right;
-        self.bottom = new_bottom;
-        self.recreate();
-        if old_width == 0 || old_height == 0 {
-            return;
-        }
-
-        let copy_x = (old_left - self.left) as usize;
-        let copy_y = (old_top - self.top) as usize;
-        let new_stride = self.width as usize * 4;
-        let old_stride = old_width * 4;
-        for row in 0..old_height {
-            let dst = (copy_y + row) * new_stride + copy_x * 4;
-            let src = row * old_stride;
-            self.pixels[dst..dst + old_stride].copy_from_slice(&old_pixels[src..src + old_stride]);
-        }
-    }
-
-    fn recreate(&mut self) {
-        self.width = (self.right - self.left).max(0) as u32;
-        self.height = (self.bottom - self.top).max(0) as u32;
-        self.pixels = vec![0u8; self.width as usize * self.height as usize * 4];
-    }
-}
-
-struct GlyphImageLease {
-    face4: IDWriteFontFace4,
-    context: *mut core::ffi::c_void,
-}
-
-impl Drop for GlyphImageLease {
-    fn drop(&mut self) {
-        if self.context.is_null() {
-            return;
-        }
-        unsafe {
-            self.face4.ReleaseGlyphImageData(self.context);
-        }
-    }
-}
-
-#[inline]
-fn glyph_image_formats_any(
-    value: DWRITE_GLYPH_IMAGE_FORMATS,
-    mask: DWRITE_GLYPH_IMAGE_FORMATS,
-) -> bool {
-    (value.0 & mask.0) != 0
 }

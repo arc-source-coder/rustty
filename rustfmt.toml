@@ -1,6 +1,5 @@
-array_width = 80
-attr_fn_like_width = 80
+style_edition = "2024"
+# use_small_heuristics = "Max"
+use_field_init_shorthand = true
 
-ignore = [
-  "vendor/" 
-]
+ignore = ["vendor/"]

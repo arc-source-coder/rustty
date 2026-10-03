@@ -1,378 +1,380 @@
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::Result;
+
+use config::{Config, SpawnConfig};
+use font::config::FontConfig;
+use font::shared_grid_set::SharedGridSet;
+
+use font::types::FontSize;
+use ghostty::{CellSize, TerminalEvent};
 use gpui::{
-    App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle, ElementId, Entity,
-    FocusHandle, FocusOutEvent, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent,
-    KeyUpEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent, Styled as _,
-    Subscription, Window, div, px,
+    App, AppContext as _, ClipboardItem, Context, CursorStyle, Entity, EventEmitter,
+    ExternalSurfaceEvent, ExternalSurfaceHost, FocusHandle, Focusable, Global,
+    InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Render, Styled as _, Task, Window, div,
 };
-use gpui::{AsyncApp, Task, WeakEntity};
-use terminal::{AppAction, MousePosition, TerminalSession};
+use terminal::{AppAction, IoEvent, MouseAction, Options, SessionEffect, TerminalSession};
 use ui::scrollbar::{ScrollbarEvent, ScrollbarState};
+use utils::floats::NotNan;
 
-use crate::gpu::{RendererCellMetrics, RendererTextConfig, RendererUiUpdate, TerminalRenderer};
+use crate::gpu::{RendererThread, RendererThreadHandle, RendererUiUpdate, ThreadOptions};
 use crate::terminal_element::TerminalElement;
+use crate::types::DerivedConfig;
 
-/// `TerminalElement` writes the surface bounds during prepaint; `TerminalView` reads them
-/// each frame for mouse-coordinate conversion and to sync the scrollbar snapshot.
-type SurfaceBoundsCell = Rc<Cell<Option<Bounds<Pixels>>>>;
+const FONT_SIZE_STEP: f32 = 1.0;
+const MIN_FONT_SIZE: f32 = 1.0;
+const MAX_FONT_SIZE: f32 = 255.0;
+
+struct GlobalGridSet(SharedGridSet);
+
+impl Global for GlobalGridSet {}
 
 /// GPUI entity that owns the renderer's view of a terminal session.
 ///
 /// Implements `Render` to produce a `TerminalElement` for each frame.
 /// Owns the `FocusHandle` so the terminal can receive keyboard input.
 pub struct TerminalView {
-    session: Entity<TerminalSession>,
-    element_id: ElementId,
-    focus_handle: FocusHandle,
-    /// Renderer-authoritative cell metrics. None until renderer publishes them.
-    cell_metrics: Option<RendererCellMetrics>,
-    /// Surface bounds written by `TerminalElement::prepaint` each frame.
-    /// Used to convert window-space mouse positions to element-local positions
-    /// and to sync the scrollbar geometry snapshot.
-    surface_bounds: SurfaceBoundsCell,
+    pub session: TerminalSession,
+
+    // TODO: Doc comments
+    pub host: Option<ExternalSurfaceHost>,
+    thread: RendererThreadHandle,
+
     /// Overlay scrollbar entity. Handles its own animation and input.
     scrollbar: Entity<ScrollbarState>,
-    /// Focus event subscriptions. Must be stored to keep the listeners active.
-    _subscriptions: Vec<Subscription>,
-    /// GPU renderer companion. Owns the renderer thread for this tab.
-    renderer: TerminalRenderer,
-    _renderer_update_task: Task<()>,
+    /// Zoom requests accumulate until prepaint applies them at the current DPI.
+    requested_font_points: NotNan<f32>,
+    font_size: FontSize,
+
+    focus_handle: FocusHandle,
+    /// A left press began on this terminal, independently of its current PTY/local route.
+    owns_left_press: bool,
+    autoscroll_task: Option<Task<()>>,
 }
+
+pub enum TerminalViewEvent {
+    TitleChanged,
+}
+
+impl EventEmitter<TerminalViewEvent> for TerminalView {}
 
 impl TerminalView {
     pub fn new(
-        session: Entity<TerminalSession>,
+        spawn_config: SpawnConfig,
+        config: Config,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Register focus event handlers.
         let focus_handle = cx.focus_handle();
 
-        // Register focus event handlers.
-        let focus_in_sub = cx.on_focus_in(&focus_handle, window, Self::handle_focus_in);
-        let focus_out_sub = cx.on_focus_out(&focus_handle, window, Self::handle_focus_out);
-
-        let element_id = {
-            let s = session.read(cx);
-            ElementId::Name(format!("terminal-{}", s.id.as_u64()).into())
-        };
-
-        let scrollbar = cx.new(|_cx| ScrollbarState::new());
-        let scrollbar_sub = cx.subscribe(&scrollbar, |this, _scrollbar, event, cx| {
-            this.handle_scrollbar_event(event, cx);
-        });
-
-        let renderer = {
-            let terminal = session.read(cx).terminal().clone();
-            let render_config = session.read(cx).render_config().read(cx).clone();
-            let (ui_tx, ui_rx) = async_channel::bounded(8);
-            let renderer = TerminalRenderer::new(
-                window,
-                terminal,
-                RendererTextConfig {
-                    font_family: render_config.font_family,
-                    font_size: px(render_config.font_size),
-                    scale_factor: window.scale_factor(),
-                    // Renderer thread owns metric resolution; zero here means
-                    // use renderer-side defaults until authoritative metrics are sent.
-                    cell_width: px(0.0),
-                    line_height: px(0.0),
-                    baseline: px(0.0),
-                },
-                ui_tx,
-            )
-            .expect("failed to create terminal external surface renderer");
-            session.read(cx).bind_renderer_sender(renderer.sender());
-            let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                while let Ok(update) = ui_rx.recv().await {
-                    let updated = this.update(cx, |this, cx| {
-                        match update {
-                            RendererUiUpdate::Scrollbar(info) => {
-                                this.scrollbar
-                                    .update(cx, |state, _cx| state.sync_snapshot(info));
-                            }
-                            RendererUiUpdate::Metrics(metrics) => {
-                                this.cell_metrics = Some(RendererCellMetrics {
-                                    cell_width: metrics.cell_width.max(1.0),
-                                    line_height: metrics.line_height.max(1.0),
-                                });
-                            }
-                        }
-                        cx.notify();
-                    });
-                    if updated.is_err() {
-                        break;
-                    }
+        cx.on_release_in(window, |this, window, _cx| {
+            this.cancel_left_press();
+            if let Some(host) = this.host.take() {
+                if host.close(window).is_err() {
+                    log::warn!("failed to close external surface host");
                 }
-            });
-            (renderer, task)
+            }
+        })
+        .detach();
+
+        // Called when the terminal gains focus (or a descendant gains focus).
+        cx.on_focus_in(&focus_handle, window, |this, _window, _cx| {
+            this.thread.set_focus(true);
+            this.session.send_focus_change(true);
+        })
+        .detach();
+        // Called when the terminal loses focus (including all descendants).
+        cx.on_focus_out(&focus_handle, window, |this, _event, _window, _cx| {
+            this.cancel_left_press();
+            this.thread.set_focus(false);
+            this.session.send_focus_change(false);
+        })
+        .detach();
+
+        cx.observe_window_activation(window, |this, window, _cx| {
+            if !window.is_window_active() {
+                this.cancel_left_press();
+            }
+        })
+        .detach();
+
+        // NOTE(renderer-refactor): Entity<ScrollbarState> looks redundant
+        let scrollbar = cx.new(|_cx| ScrollbarState::new());
+        cx.subscribe(&scrollbar, |this, _scrollbar, event, _cx| match event {
+            ScrollbarEvent::ScrollToRow(row) => this.session.scroll_to_row(*row),
+        })
+        .detach();
+
+        let font_config = FontConfig::from(&config);
+        let dpi = (window.scale_factor() * 96.0) as u16;
+        let font_size = FontSize {
+            points: NotNan::new(config.font_size).unwrap(),
+            x_dpi: dpi,
+            y_dpi: dpi,
         };
+
+        if !cx.has_global::<GlobalGridSet>() {
+            let grid_set = SharedGridSet::new().expect("failed to create initialize SharedGridSet");
+            cx.set_global(GlobalGridSet(grid_set));
+        }
+        let shared_grid_set = &mut cx.global_mut::<GlobalGridSet>().0;
+        let grid = shared_grid_set
+            .grid_ref(&font_config, font_size)
+            .expect("failed to create font grid for terminal");
+
+        let renderer_config = DerivedConfig::from(&config);
+
+        let mut event_rx = None;
+        let options = Options {
+            cell_size: CellSize {
+                width: grid.metrics.cell_width,
+                height: grid.metrics.cell_height,
+            },
+            event_rx: &mut event_rx,
+        };
+        let session = TerminalSession::new(spawn_config, config, options);
+
+        let event_rx = event_rx.unwrap();
+        cx.spawn(async move |this, cx| -> Result<()> {
+            while let Ok(event) = event_rx.recv().await {
+                this.update(cx, |this, cx| {
+                    let effect = match event {
+                        TerminalEvent::Bell => this.session.handle_io_event(IoEvent::Bell),
+                        TerminalEvent::TitleChanged(title) => {
+                            this.session.handle_io_event(IoEvent::TitleChanged(title))
+                        }
+                    };
+                    if effect == SessionEffect::TitleChanged {
+                        cx.emit(TerminalViewEvent::TitleChanged);
+                    }
+                    cx.notify();
+                })?;
+            }
+            Ok(())
+        })
+        .detach();
+
+        let (ui_tx, ui_rx) = async_channel::bounded(8);
+
+        let (event_tx, event_rx) = crossbeam_channel::unbounded::<ExternalSurfaceEvent>();
+        let host = window.create_external_surface_host(event_tx).unwrap();
+
+        let mut swap_chain = None;
+        let thread_options = ThreadOptions {
+            swap_chain: &mut swap_chain,
+            // `Workspace` immediately focuses every newly constructed terminal,
+            // but that assignment happens after this constructor returns.
+            focused: window.is_window_active(),
+        };
+        let thread = RendererThread::new(
+            renderer_config,
+            Arc::clone(&grid),
+            Arc::clone(session.terminal()),
+            ui_tx,
+            event_rx,
+            thread_options,
+        )
+        .expect("Failed to start terminal renderer thread");
+
+        let swap_chain = swap_chain.expect("missing renderer swapchain");
+        host.set_swap_chain(window, swap_chain)
+            .expect("Failed to set renderer swapchain");
+
+        // Courier
+        session.bind_renderer_sender(thread.waker());
+
+        cx.spawn(async move |this, cx| -> Result<()> {
+            while let Ok(update) = ui_rx.recv().await {
+                this.update(cx, |this, cx| {
+                    match update {
+                        RendererUiUpdate::Scrollbar(info) => this
+                            .scrollbar
+                            .update(cx, |state, _cx| state.sync_snapshot(info)),
+                    }
+                    cx.notify();
+                })?;
+            }
+            Ok(())
+        })
+        .detach();
 
         Self {
             session,
-            element_id,
+            host: Some(host),
+            thread,
             focus_handle,
-            cell_metrics: None,
-            surface_bounds: Rc::new(Cell::new(None)),
+            requested_font_points: font_size.points,
+            font_size,
             scrollbar,
-            _subscriptions: vec![focus_in_sub, focus_out_sub, scrollbar_sub],
-            renderer: renderer.0,
-            _renderer_update_task: renderer.1,
+            owns_left_press: false,
+            autoscroll_task: None,
         }
     }
 
-    /// Called when the terminal gains focus (or a descendant gains focus).
-    fn handle_focus_in(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.session.read(cx).send_focus_change(true);
+    /// Current terminal title, if one has been reported by the child process.
+    pub fn title(&self) -> Option<&str> {
+        self.session.metadata().title.as_deref()
     }
 
-    /// Called when the terminal loses focus (or a descendant loses focus).
-    fn handle_focus_out(
-        &mut self,
-        _event: FocusOutEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.session.update(cx, |session, _session_cx| {
-            session.surface_focus_out();
-        });
-        self.session.read(cx).send_focus_change(false);
+    /// Terminal background encoded as RGBA for GPUI.
+    pub fn default_background_rgba(&self) -> u32 {
+        0x1e1e2eff
     }
 
-    pub fn session(&self) -> &Entity<TerminalSession> {
-        &self.session
+    /// Clear the unread-output state when this terminal becomes active.
+    pub fn mark_output_read(&mut self) {
+        self.session.mark_output_read();
     }
 
-    fn handle_app_action(
-        &mut self,
-        action: AppAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match action {
-            AppAction::WriteClipboard(text) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
-            AppAction::ViewportScrolled => {
-                self.scrollbar
-                    .update(cx, |state, cx| state.on_scroll(window, cx));
-            }
-        }
+    pub fn increase_font_size(&mut self, cx: &mut Context<Self>) {
+        self.change_font_size(self.requested_font_points.get() + FONT_SIZE_STEP, cx);
     }
 
-    fn update_session_with_action(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        update: impl FnOnce(&mut TerminalSession, &mut dyn FnMut(AppAction)) -> bool,
-    ) {
-        let mut action = None;
-        self.session.update(cx, |session, _session_cx| {
-            let mut emit = |next| action = Some(next);
-            update(session, &mut emit);
-        });
-        if let Some(action) = action {
-            self.handle_app_action(action, window, cx);
-        }
+    pub fn decrease_font_size(&mut self, cx: &mut Context<Self>) {
+        self.change_font_size(self.requested_font_points.get() - FONT_SIZE_STEP, cx);
     }
 
-    fn handle_scrollbar_event(&mut self, event: &ScrollbarEvent, cx: &mut Context<Self>) {
-        match event {
-            ScrollbarEvent::ScrollToRow(row) => {
-                self.session.update(cx, |session, _session_cx| {
-                    session.scroll_to_row(*row);
-                });
-            }
-        }
+    pub fn reset_font_size(&mut self, cx: &mut Context<Self>) {
+        self.change_font_size(self.session.config.font_size, cx);
     }
 
-    fn mouse_position(&self, position: Point<Pixels>, scale_factor: f32) -> Option<MousePosition> {
-        let metrics = self.cell_metrics?;
-        // `event.position` is window-relative; subtract the element's origin
-        // (derived from surface bounds) to get a position local to the terminal surface.
-        let origin = self
-            .surface_bounds
-            .get()
-            .map(|b| b.origin)
-            .unwrap_or_default();
-        let x_px = position.x.as_f32() - f32::from(origin.x);
-        let y_px = position.y.as_f32() - f32::from(origin.y);
-        if x_px < 0.0 || y_px < 0.0 {
+    fn change_font_size(&mut self, points: f32, cx: &mut Context<Self>) {
+        self.requested_font_points =
+            NotNan::new(points.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)).unwrap();
+        cx.notify();
+    }
+
+    pub(crate) fn update_font(&mut self, scale: f32, cx: &mut Context<Self>) -> Option<CellSize> {
+        let dpi = (scale * 96.0) as u16;
+        let next_size = FontSize {
+            points: self.requested_font_points,
+            x_dpi: dpi,
+            y_dpi: dpi,
+        };
+
+        if next_size == self.font_size {
             return None;
         }
 
-        let bounds = self.surface_bounds.get()?;
-        let cols = (f32::from(bounds.size.width) / metrics.cell_width)
-            .floor()
-            .max(1.0) as u16;
-        let rows = (f32::from(bounds.size.height) / metrics.line_height)
-            .floor()
-            .max(1.0) as u16;
+        // Acquire the replacement before changing live terminal state so a
+        // font discovery failure leaves the current grid intact.
+        let font_config = FontConfig::from(&self.session.config);
+        let shared_grid_set = &mut cx.global_mut::<GlobalGridSet>().0;
+        let grid = match shared_grid_set.grid_ref(&font_config, next_size) {
+            Ok(grid) => grid,
+            Err(error) => {
+                log::warn!(
+                    "failed to acquire font grid for {}pt at {dpi} DPI: {error:#}",
+                    next_size.points
+                );
+                self.requested_font_points = self.font_size.points;
+                return None;
+            }
+        };
 
-        let mouse_col = (x_px / metrics.cell_width).floor() as u32;
-        let mouse_row = (y_px / metrics.line_height).floor() as u32;
-
-        Some(MousePosition {
-            // These will never be 0 because all grid construction sites clamp to min 1.
-            x: mouse_col.min(u32::from(cols - 1)),
-            y: mouse_row.min(u32::from(rows - 1)),
-            x_px: x_px * scale_factor,
-            y_px: y_px * scale_factor,
-        })
+        let cell_size = CellSize {
+            width: grid.metrics.cell_width,
+            height: grid.metrics.cell_height,
+        };
+        self.thread.set_font_grid(grid);
+        self.font_size = next_size;
+        Some(cell_size)
     }
 
-    fn handle_left_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Scrollbar drag takes priority: the scrollbar entity registers its own
-        // mouse handlers in `ScrollbarElement::paint`, so we only need to ensure
-        // that when the scrollbar is actively dragging we skip selection logic.
-        if self.scrollbar.read(cx).is_dragging() {
+    fn set_autoscroll(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !active {
+            self.autoscroll_task = None;
+            return;
+        }
+        if self.autoscroll_task.is_some() {
             return;
         }
 
-        window.focus(&self.focus_handle, cx);
-        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
-            return;
-        };
-
-        self.session.update(cx, |session, _session_cx| {
-            session.handle_left_mouse_down(position, event.click_count as u8, &event.modifiers)
-        });
+        self.autoscroll_task = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(15))
+                    .await;
+                let active = this.update_in(cx, |view, window, _cx| {
+                    let active = view.session.selection_autoscroll_tick(
+                        window.mouse_position(),
+                        window.modifiers(),
+                        window.scale_factor(),
+                    );
+                    if !active {
+                        view.autoscroll_task = None;
+                    }
+                    active
+                });
+                let Ok(true) = active else {
+                    break;
+                };
+            }
+        }));
     }
 
-    fn handle_right_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        window.focus(&self.focus_handle, cx);
-        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
-            return;
-        };
-        self.session.update(cx, |session, _session_cx| {
-            session.handle_right_mouse_down(position, &event.modifiers)
-        });
-    }
-
-    fn handle_middle_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        window.focus(&self.focus_handle, cx);
-        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
-            return;
-        };
-        self.session.update(cx, |session, _session_cx| {
-            session.handle_middle_mouse_down(position, &event.modifiers)
-        });
-    }
-
-    fn handle_left_mouse_up(
-        &mut self,
-        event: &MouseUpEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Scrollbar drag is ended by the scrollbar element's own mouse handler.
-        if self.scrollbar.read(cx).is_dragging() {
-            return;
+    fn cancel_left_press(&mut self) {
+        self.autoscroll_task = None;
+        if std::mem::take(&mut self.owns_left_press) {
+            self.session.terminal().reset_gesture();
         }
-
-        let position = self.mouse_position(event.position, window.scale_factor());
-        self.session.update(cx, |session, _session_cx| {
-            session.handle_left_mouse_up(position, &event.modifiers)
-        });
     }
 
-    fn handle_right_mouse_up(
-        &mut self,
-        event: &MouseUpEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let position = self.mouse_position(event.position, window.scale_factor());
-        self.update_session_with_action(window, cx, |session, emit| {
-            session.handle_right_mouse_up(position, &event.modifiers, emit)
-        });
+    pub(crate) fn owns_left_press(&self) -> bool {
+        self.owns_left_press
     }
 
-    fn handle_middle_mouse_up(
-        &mut self,
-        event: &MouseUpEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
-            return;
-        };
-        self.session.update(cx, |session, _session_cx| {
-            session.handle_middle_mouse_up(position, &event.modifiers)
-        });
-    }
-
-    fn handle_mouse_move(
+    pub fn handle_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Scrollbar drag is handled in the scrollbar element's own mouse handler.
-        if self.scrollbar.read(cx).is_dragging() {
-            return;
+        match (self.owns_left_press, event.pressed_button) {
+            (true, Some(MouseButton::Left)) => cx.stop_propagation(),
+            (true, _) => {
+                cx.stop_propagation();
+                self.cancel_left_press();
+                return;
+            }
+            (false, Some(MouseButton::Left)) => return,
+            (false, _) => {}
         }
-
-        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
-            return;
-        };
-
-        // Map GPUI mouse buttons to zconpty / Ghostty mouse buttons.
-        let button: terminal::MouseButton = match event.pressed_button {
-            Some(b) => match b {
-                MouseButton::Left => terminal::MouseButton::Left,
-                MouseButton::Right => terminal::MouseButton::Right,
-                MouseButton::Middle => terminal::MouseButton::Middle,
-                MouseButton::Navigate(_) => terminal::MouseButton::Unknown,
-            },
-            None => terminal::MouseButton::None,
-        };
-
-        self.session.update(cx, |session, _session_cx| {
-            session.handle_mouse_move(position, button, &event.modifiers)
-        });
+        if let Some(active) = self.session.handle_mouse_move(event, window.scale_factor()) {
+            self.set_autoscroll(active, window, cx);
+        }
     }
 
-    fn handle_scroll_wheel(
+    pub fn handle_mouse_up(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &MouseUpEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(position) = self.mouse_position(event.position, window.scale_factor()) else {
-            return;
-        };
-
-        let cell_h = self.cell_metrics.map_or(16.0, |m| m.line_height);
-
-        self.update_session_with_action(window, cx, |session, emit| {
-            session.handle_scroll_wheel(position, event.delta, cell_h, &event.modifiers, emit)
-        });
+        if event.button == MouseButton::Left {
+            if !std::mem::take(&mut self.owns_left_press) {
+                return;
+            }
+            cx.stop_propagation();
+            self.autoscroll_task = None;
+        }
+        let effect = self.session.handle_mouse_button(
+            MouseAction::Release,
+            event.button,
+            event.position,
+            event.modifiers,
+            window.scale_factor(),
+        );
+        if let AppAction::Autoscroll(active) = effect {
+            self.set_autoscroll(active, window, cx);
+        }
     }
 
-    fn handle_paste(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(clipboard) = cx.read_from_clipboard() else {
-            return false;
-        };
-
-        let Some(text) = clipboard.text() else {
+    fn handle_paste(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(ref text) = cx.read_from_clipboard().and_then(|i| i.text()) else {
             // Non-text clipboard payloads (e.g. images) should not be swallowed.
             // Let Ctrl+V propagate so TUI apps can handle native clipboard paste flows.
             return false;
@@ -382,40 +384,8 @@ impl TerminalView {
             return false;
         }
 
-        self.session.read(cx).send_paste(&text);
+        self.session.send_paste(text);
         true
-    }
-
-    fn handle_copy(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.session.read(cx).take_selection_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
-    }
-
-    /// Try to handle a keystroke as a scroll command.
-    /// Returns `true` if the key was consumed (should not be forwarded to PTY).
-    fn try_handle_scroll_key(
-        &mut self,
-        keystroke: &Keystroke,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let mut action = None;
-        let mut emit = |next| action = Some(next);
-        let handled = self.session.update(cx, |session, _cx| {
-            session.handle_scroll_key(keystroke, &mut emit)
-        });
-        if let Some(action) = action {
-            self.handle_app_action(action, window, cx);
-        }
-        if handled {
-            cx.notify();
-        }
-        handled
-    }
-
-    fn has_selection(&self, cx: &Context<Self>) -> bool {
-        self.session.read(cx).has_selection()
     }
 }
 
@@ -427,14 +397,6 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let terminal_element = TerminalElement::new(
-            self.session.clone(),
-            self.element_id.clone(),
-            Rc::clone(&self.surface_bounds),
-            self.renderer.host(),
-            self.cell_metrics,
-        );
-
         div()
             .size_full()
             .cursor(CursorStyle::IBeam)
@@ -443,63 +405,82 @@ impl Render for TerminalView {
                 let key = event.keystroke.key.to_lowercase();
                 let mods = &event.keystroke.modifiers;
 
-                // Intercept copy: Ctrl+C (Windows, if selection exists) or Ctrl+Shift+C (all platforms)
-                let is_copy = mods.control && key == "c" && (mods.shift || this.has_selection(cx));
-                if is_copy {
-                    this.handle_copy(window, cx);
-                    return;
+                // Intercept copy:
+                //  Ctrl+C (Windows, if selection exists)
+                //  Ctrl+Shift+C (all platforms)
+                if mods.control && key == "c" {
+                    if let Some(text) = this.session.take_selection_text() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        return;
+                    }
                 }
 
                 // Intercept paste: Ctrl+V (Windows) or Ctrl+Shift+V (Linux) or Cmd+V (macOS)
                 let is_paste = (mods.control || mods.platform) && key == "v";
-                if is_paste && this.handle_paste(window, cx) {
+                if is_paste && this.handle_paste(cx) {
                     return;
                 }
 
-                if this.try_handle_scroll_key(&event.keystroke, window, cx) {
+                // Try to handle this key as a scroll key
+                let effect = this.session.handle_scroll_key(&event.keystroke);
+                if effect == SessionEffect::ViewportScrolled {
+                    this.scrollbar.update(cx, |state, cx| {
+                        state.on_scroll(window, cx);
+                    });
+                    return;
+                }
+                // This event should be sent to the PTY
+                this.session.send_key_down_event(event);
+            }))
+            .on_key_up(cx.listener(|this, event: &KeyUpEvent, _window, _cx| {
+                this.session.send_key_up_event(event)
+            }))
+            .on_modifiers_changed(cx.listener(|this, event, _window, _cx| {
+                this.session.send_modifier_change(event);
+            }))
+            .on_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if event.button == MouseButton::Left && this.scrollbar.read(cx).is_dragging() {
+                    return;
+                }
+                if let MouseButton::Navigate(_) = event.button {
                     return;
                 }
 
-                this.session.read(cx).send_key_down(
-                    &event.keystroke,
-                    event.native_key,
-                    event.is_held,
+                window.focus(&this.focus_handle, cx);
+                if event.button == MouseButton::Left {
+                    this.cancel_left_press();
+                    this.owns_left_press = true;
+                }
+                let effect = this.session.handle_mouse_button(
+                    MouseAction::Press,
+                    event.button,
+                    event.position,
+                    event.modifiers,
+                    window.scale_factor(),
                 );
+                match effect {
+                    AppAction::WriteClipboard(text) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                    AppAction::Autoscroll(active) => {
+                        this.set_autoscroll(active, window, cx);
+                    }
+                    AppAction::None => {}
+                }
             }))
-            .on_key_up(cx.listener(|this, event: &KeyUpEvent, _window, cx| {
-                this.session
-                    .read(cx)
-                    .send_key_up(&event.keystroke, event.native_key);
+            .on_scroll_wheel(cx.listener(|this, event, window, cx| {
+                let effect = this
+                    .session
+                    .handle_scroll_wheel(event, window.scale_factor());
+                if let SessionEffect::ViewportScrolled = effect {
+                    this.scrollbar.update(cx, |state, cx| {
+                        state.on_scroll(window, cx);
+                    });
+                }
             }))
-            .on_modifiers_changed(cx.listener(
-                |this, event: &ModifiersChangedEvent, _window, cx| {
-                    let Some(native_key) = event.changed_native_key else {
-                        return;
-                    };
-
-                    this.session
-                        .read(cx)
-                        .send_modifier_change(&event.modifiers, native_key);
-                },
-            ))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_left_mouse_down))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_left_mouse_up))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(Self::handle_right_mouse_down),
-            )
-            .on_mouse_up(MouseButton::Right, cx.listener(Self::handle_right_mouse_up))
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(Self::handle_middle_mouse_down),
-            )
-            .on_mouse_up(
-                MouseButton::Middle,
-                cx.listener(Self::handle_middle_mouse_up),
-            )
-            .on_mouse_move(cx.listener(Self::handle_mouse_move))
-            .on_scroll_wheel(cx.listener(Self::handle_scroll_wheel))
-            .child(terminal_element)
+            .child(TerminalElement {
+                terminal_view: cx.entity(),
+            })
             .child(self.scrollbar.clone())
     }
 }

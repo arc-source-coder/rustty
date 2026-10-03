@@ -6,3 +6,5 @@ vendor/zed/
 zig/ghostty/
 # Vendored zconpty source
 vendor/zconpty
+# Vendored Harfbuzz source
+vendor/harfbuzz

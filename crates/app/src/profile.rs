@@ -1,4 +1,4 @@
-use terminal::SpawnConfig;
+use config::SpawnConfig;
 
 use crate::types::ProfileId;
 
@@ -68,6 +68,7 @@ impl ShellKind {
     }
 }
 
+// NOTE(renderer-refactor): Make this a method on ShellKind and remove SpawnConfig.
 fn spawn_config_for_kind(kind: &ShellKind) -> SpawnConfig {
     match kind {
         ShellKind::PowerShell => SpawnConfig {

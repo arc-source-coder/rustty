@@ -1,38 +1,12 @@
 use crossbeam_queue::ArrayQueue;
-pub use ghostty::TerminalDimensions;
 use std::path::PathBuf;
 use std::process::ExitStatus;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
 use zconpty::{KeyEvent, MouseEvent};
 
 use crate::platform::windows::io::sleep_100ns;
 use crate::platform::windows::ntdll::{Handle, NtAlertThread};
-
-// Stable Identity
-fn next_id() -> u64 {
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct SessionId(u64);
-
-impl SessionId {
-    pub fn new() -> Self {
-        Self(next_id())
-    }
-
-    pub fn as_u64(self) -> u64 {
-        self.0
-    }
-}
-
-impl Default for SessionId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[derive(Debug)]
 pub enum ProcessState {
@@ -77,6 +51,7 @@ pub enum IoInput {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Focus(bool),
+    // NOTE(renderer-refactor): This could be a slice
     Paste(Vec<u8>),
 }
 
@@ -86,16 +61,18 @@ pub enum IoMsg {
     /// ingress thread that calls into zconpty.
     Input(IoInput),
     /// Resize request. IO thread coalesces (25ms), then signals read thread.
-    Resize(TerminalDimensions),
+    Resize { rows: u16, cols: u16 },
     /// Scroll the viewport. IO thread acquires terminal mutex and applies.
     Scroll(ScrollOp),
     /// Begin/reset the 1-second synchronized output safety timer.
+    /// NOTE(renderer-refactor): Audit this.
     #[allow(dead_code)]
     StartSyncOutput,
     /// Ordered shutdown.
     Close,
 }
 
+// TODO: Courier
 pub struct IoThreadNotify {
     /// IO thread handle (set once before thread resume).
     io_thread: AtomicPtr<std::ffi::c_void>,
@@ -117,6 +94,7 @@ impl IoThreadNotify {
         }
     }
 
+    #[inline]
     pub fn set_io_thread(&self, handle: Handle) {
         self.io_thread.store(handle, Ordering::Release);
     }
@@ -155,6 +133,7 @@ impl IoThreadNotify {
     /// Best-effort enqueue for UI-driven traffic.
     ///
     /// Returns `true` if enqueued, `false` when queue is full.
+    #[inline]
     pub fn try_send(&self, msg: IoMsg) -> bool {
         match self.queue.push(msg) {
             Ok(()) => {
@@ -166,24 +145,15 @@ impl IoThreadNotify {
     }
 }
 
-/// Messages sent from the terminal/IO path to the renderer thread.
-///
-/// Reserve a `DeviceLost` variant for the next slice — the renderer thread
-/// must not outlive GPUI device recreation.
-#[derive(Debug)]
-pub enum RendererMessage {
-    /// A new terminal frame is ready; renderer should re-record and publish.
-    Wake,
-    /// Ordered shutdown; renderer thread should exit its loop.
-    Quit,
-}
-
 /// Direct wake path into the renderer thread.
 ///
 /// This is shared by Ghostty's output callback and by Rust-side terminal
 /// mutators that change render state without producing output.
+///
+/// TODO: Update doc comments
+// TODO: Courier
 pub struct RendererWake {
-    sender: Mutex<Option<crossbeam_channel::Sender<RendererMessage>>>,
+    sender: Mutex<Option<crossbeam_channel::Sender<()>>>,
 }
 
 impl RendererWake {
@@ -193,15 +163,17 @@ impl RendererWake {
         }
     }
 
-    pub fn bind(&self, sender: crossbeam_channel::Sender<RendererMessage>) {
+    #[inline]
+    pub fn bind(&self, sender: crossbeam_channel::Sender<()>) {
         let mut slot = self.sender.lock().expect("renderer wake mutex poisoned");
         *slot = Some(sender);
     }
 
+    #[inline]
     pub fn wake(&self) {
         let slot = self.sender.lock().expect("renderer wake mutex poisoned");
         if let Some(sender) = slot.as_ref() {
-            let _ = sender.try_send(RendererMessage::Wake);
+            let _ = sender.try_send(());
         }
     }
 }

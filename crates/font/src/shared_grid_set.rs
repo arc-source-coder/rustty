@@ -1,299 +1,177 @@
-use std::hash::Hash;
-use std::sync::Mutex;
+use std::collections::hash_map::Entry;
+use std::rc::Rc;
+use std::sync::{Arc, Weak};
 
-use rapidhash::RapidHashMap;
+use anyhow::{Result, anyhow};
+use rustc_hash::FxHashMap;
 
 #[cfg(target_os = "windows")]
-use crate::backend::dwrite::face::DWriteGridMetricsConfig;
-#[cfg(target_os = "windows")]
-use crate::backend::dwrite::fallback::FontFallbackContext;
-#[cfg(target_os = "windows")]
-use crate::backend::dwrite::variation::StyleVariationRequest;
-#[cfg(target_os = "windows")]
+use crate::backend::dwrite::discovery::DirectWrite as Discovery;
+
 use crate::collection::Collection;
-#[cfg(target_os = "windows")]
+use crate::config::FontConfig;
 use crate::resolver::CodepointResolver;
-#[cfg(target_os = "windows")]
-use crate::shared_grid::GridMetrics;
 use crate::shared_grid::SharedGrid;
-#[cfg(target_os = "windows")]
-use crate::types::{FontAxisSpec, Style};
-#[cfg(target_os = "windows")]
-use windows::Win32::Graphics::DirectWrite::IDWriteFactory6;
-#[cfg(target_os = "windows")]
-use windows_core::Interface as _;
+
+use crate::types::{FontDescriptor, FontSize, FontStyle};
+use utils::floats::NotNan;
+
+#[derive(Eq, PartialEq, Hash)]
+pub struct Key {
+    descriptors: Box<[FontDescriptor]>,
+    style_offsets: [usize; 4],
+    styles: [bool; 4],
+    font_size: FontSize,
+}
+
+impl Key {
+    pub fn new(config: &FontConfig, font_size: FontSize) -> Self {
+        let mut descriptors = Vec::new();
+
+        let regular_style = config.font_style_regular.name_value();
+        let bold_style = config.font_style_bold.name_value();
+        let italic_style = config.font_style_italic.name_value();
+        let bold_italic_style = config.font_style_bold_italic.name_value();
+
+        for family in &config.font_family_regular {
+            descriptors.push(FontDescriptor {
+                family: Rc::clone(family),
+                size: font_size.points,
+                style: regular_style.clone(),
+                bold: false,
+                italic: false,
+                variations: Rc::clone(&config.font_variations_regular),
+            });
+        }
+        for family in &config.font_family_bold {
+            descriptors.push(FontDescriptor {
+                family: Rc::clone(family),
+                size: font_size.points,
+                style: bold_style.clone(),
+                bold: bold_style.is_none(),
+                italic: false,
+                variations: Rc::clone(&config.font_variations_bold),
+            });
+        }
+        for family in &config.font_family_italic {
+            descriptors.push(FontDescriptor {
+                family: Rc::clone(family),
+                size: font_size.points,
+                style: italic_style.clone(),
+                bold: false,
+                italic: italic_style.is_none(),
+                variations: Rc::clone(&config.font_variations_italic),
+            });
+        }
+        for family in &config.font_family_bold_italic {
+            descriptors.push(FontDescriptor {
+                family: Rc::clone(family),
+                size: font_size.points,
+                style: bold_italic_style.clone(),
+                bold: bold_italic_style.is_none(),
+                italic: bold_italic_style.is_none(),
+                variations: Rc::clone(&config.font_variations_bold_italic),
+            });
+        }
+
+        let regular_offset = config.font_family_regular.len();
+        let bold_offset = regular_offset + config.font_family_bold.len();
+        let italic_offset = bold_offset + config.font_family_italic.len();
+        let bold_italic_offset = italic_offset + config.font_family_bold_italic.len();
+
+        Self {
+            descriptors: descriptors.into_boxed_slice(),
+            style_offsets: [
+                regular_offset,
+                bold_offset,
+                italic_offset,
+                bold_italic_offset,
+            ],
+            styles: [
+                true,
+                config.font_style_bold.is_enabled(),
+                config.font_style_italic.is_enabled(),
+                config.font_style_bold_italic.is_enabled(),
+            ],
+            font_size,
+        }
+    }
+
+    fn descriptors_for_style(&self, style: FontStyle) -> &[FontDescriptor] {
+        let idx = style as usize;
+        let start = if idx == 0 {
+            0
+        } else {
+            self.style_offsets[idx - 1]
+        };
+        let end = self.style_offsets[idx];
+        &self.descriptors[start..end]
+    }
+}
 
 /// Ghostty-style shared-grid registry keyed by derived font configuration.
-///
-/// This struct is intentionally explicit about ref/deref so renderer-side
-/// ownership can mirror Ghostty's surface lifecycle.
-pub struct SharedGridSet<K>
-where
-    K: Eq + Hash + Clone,
-{
-    inner: Mutex<RapidHashMap<K, ReffedGrid>>,
+/// Reuses live font grids with matching ordered font descriptors, enabled styles,
+/// point size, and DPI. Shaping features are renderer-local and not part of the key.
+pub struct SharedGridSet {
+    grids: FxHashMap<Key, Weak<SharedGrid>>,
+    discovery: Arc<Discovery>,
 }
 
-struct ReffedGrid {
-    grid: Box<SharedGrid>,
-    refs: u32,
-}
-
-/// Stable pointer to a SharedGrid owned by SharedGridSet.
-///
-/// Mirrors Ghostty's `*SharedGrid` return from `SharedGridSet.ref`.
-pub type SharedGridPtr = *const SharedGrid;
-
-impl<K> SharedGridSet<K>
-where
-    K: Eq + Hash + Clone,
-{
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(RapidHashMap::default()),
-        }
+impl SharedGridSet {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            grids: FxHashMap::default(),
+            discovery: Arc::new(Discovery::new()?),
+        })
     }
 
-    pub fn count(&self) -> usize {
-        self.inner.lock().expect("shared grid set poisoned").len()
-    }
+    /// Return a live grid for this configuration and size, or discover its fonts
+    /// and create one. Expired weak entries are pruned before lookup.
+    pub fn grid_ref(&mut self, config: &FontConfig, size: FontSize) -> Result<Arc<SharedGrid>> {
+        let key = Key::new(config, size);
 
-    /// Increment ref for `key`, creating a new grid with `init` when absent.
-    pub fn ref_or_insert_with<F>(&self, key: K, init: F) -> SharedGridPtr
-    where
-        F: FnOnce() -> SharedGrid,
-    {
-        self.try_ref_or_insert_with(key, || Ok::<_, core::convert::Infallible>(init()))
-            .expect("infallible init")
-    }
+        self.grids.retain(|_, v| v.strong_count() > 0);
+        match self.grids.entry(key) {
+            Entry::Occupied(existing) => Ok(existing.get().upgrade().unwrap()),
+            Entry::Vacant(slot) => {
+                let mut collection = Collection::new(size);
 
-    /// Increment ref for `key`, creating a new grid with a fallible `init` when absent.
-    // TODO: Do something about the generics
-    pub fn try_ref_or_insert_with<F, E>(
-        &self,
-        key: K,
-        init: F,
-    ) -> std::result::Result<SharedGridPtr, E>
-    where
-        F: FnOnce() -> std::result::Result<SharedGrid, E>,
-    {
-        {
-            let mut inner = self.inner.lock().expect("shared grid set poisoned");
-            if let Some(existing) = inner.get_mut(&key) {
-                existing.refs += 1;
-                return Ok(std::ptr::from_ref::<SharedGrid>(existing.grid.as_ref()));
+                for style in FontStyle::ALL {
+                    for descriptor in slot.key().descriptors_for_style(style) {
+                        if let Some(entry) = self.discovery.discover(descriptor)? {
+                            collection.add(entry, style)?;
+                        }
+                    }
+                }
+
+                // Add Segoe UI Emoji to the collection for emoji fallback on Windows.
+                #[cfg(target_os = "windows")]
+                {
+                    let descriptor = FontDescriptor {
+                        family: Rc::from("Segoe UI Emoji"),
+                        style: None,
+                        bold: false,
+                        italic: false,
+                        size: NotNan::new(0.0).ok_or_else(|| anyhow!("Unexpected NaN value"))?,
+                        variations: Rc::new([]),
+                    };
+                    let mut entry = self
+                        .discovery
+                        .discover(&descriptor)?
+                        .ok_or_else(|| anyhow!("Failed to find Segoe UI Emoji"))?;
+                    entry.fallback = true;
+                    collection.add(entry, FontStyle::Regular)?;
+                }
+
+                let resolver = CodepointResolver {
+                    collection,
+                    styles: slot.key().styles,
+                    discovery: Arc::clone(&self.discovery),
+                };
+                let grid = Arc::new(SharedGrid::new(resolver)?);
+                slot.insert(Arc::downgrade(&grid));
+                Ok(grid)
             }
         }
-
-        let grid = Box::new(init()?);
-        let mut inner = self.inner.lock().expect("shared grid set poisoned");
-        if let Some(existing) = inner.get_mut(&key) {
-            existing.refs += 1;
-            return Ok(std::ptr::from_ref::<SharedGrid>(existing.grid.as_ref()));
-        }
-        let ptr = grid.as_ref() as *const SharedGrid;
-        inner.insert(key, ReffedGrid { grid, refs: 1 });
-        Ok(ptr)
-    }
-
-    /// Decrement ref for `key`. When it reaches zero, removes the grid.
-    pub fn deref(&self, key: &K) {
-        let mut inner = self.inner.lock().expect("shared grid set poisoned");
-        let Some(entry) = inner.get_mut(key) else {
-            return;
-        };
-        if entry.refs > 1 {
-            entry.refs -= 1;
-            return;
-        }
-        inner.remove(key);
-    }
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct DWriteStyleKey {
-    pub family: String,
-    pub axes: Vec<(u32, i64)>,
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct DWriteFallbackKey {
-    pub base_family_ptr: u64,
-    pub base_collection_ptr: u64,
-    pub fallback_ptr: u64,
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct DWriteGridKey {
-    pub locale: String,
-    pub font_size_bits: u32,
-    pub raster_scale_factor_bits: u32,
-    pub cell_width_bits: u32,
-    pub line_height_bits: u32,
-    pub baseline_bits: u32,
-    pub max_atlas_size: u32,
-    pub styles: [DWriteStyleKey; Style::COUNT],
-    pub fallback: Option<DWriteFallbackKey>,
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Clone, Debug)]
-pub struct DWriteStyleConfig {
-    pub family: String,
-    pub axes: FontAxisSpec,
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Clone)]
-pub struct DWriteGridConfig {
-    pub locale: String,
-    pub styles: [DWriteStyleConfig; Style::COUNT],
-    pub font_size: f32,
-    pub raster_scale_factor: f32,
-    pub cell_width: f32,
-    pub line_height: f32,
-    pub baseline: f32,
-    pub max_atlas_size: u32,
-    pub fallback: Option<FontFallbackContext>,
-}
-
-#[cfg(target_os = "windows")]
-impl DWriteGridConfig {
-    pub fn with_single_family(family: impl Into<String>, locale: impl Into<String>) -> Self {
-        let family = family.into();
-        Self {
-            locale: locale.into(),
-            styles: std::array::from_fn(|_| DWriteStyleConfig {
-                family: family.clone(),
-                axes: FontAxisSpec::default(),
-            }),
-            font_size: 0.0,
-            raster_scale_factor: 1.0,
-            cell_width: 0.0,
-            line_height: 0.0,
-            baseline: 0.0,
-            max_atlas_size: 0,
-            fallback: None,
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl DWriteGridKey {
-    /// Ghostty reference:
-    /// `SharedGridSet.Key` and `discovery.Descriptor.hash` include family and
-    /// variation identity at grid lifecycle boundaries.
-    pub fn from_config(config: &DWriteGridConfig) -> Self {
-        Self {
-            locale: config.locale.clone(),
-            font_size_bits: config.font_size.to_bits(),
-            raster_scale_factor_bits: config.raster_scale_factor.to_bits(),
-            cell_width_bits: config.cell_width.to_bits(),
-            line_height_bits: config.line_height.to_bits(),
-            baseline_bits: config.baseline.to_bits(),
-            max_atlas_size: config.max_atlas_size,
-            styles: std::array::from_fn(|i| {
-                let style = &config.styles[i];
-                DWriteStyleKey {
-                    family: style.family.clone(),
-                    // Match Ghostty descriptor hashing spirit: axis tag + int value.
-                    axes: style
-                        .axes
-                        .values
-                        .iter()
-                        .map(|v| (v.axisTag.0, v.value as i64))
-                        .collect(),
-                }
-            }),
-            fallback: config.fallback.as_ref().map(|v| DWriteFallbackKey {
-                // We key by COM identity/pointer because fallback internals are
-                // COM objects and do not have value-based Rust equality.
-                base_family_ptr: v.base_family.as_ptr() as usize as u64,
-                base_collection_ptr: v.base_collection.as_raw().addr() as u64,
-                fallback_ptr: v.fallback.as_raw().addr() as u64,
-            }),
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl SharedGridSet<DWriteGridKey> {
-    /// Resolve/configure a shared grid from a Ghostty-like config key and return
-    /// `(key, grid)`. The key must later be passed to `deref`.
-    ///
-    /// Ghostty reference:
-    /// `SharedGridSet.ref` initializes a grid from config-derived key data.
-    pub fn ref_dwrite(
-        &self,
-        factory: &IDWriteFactory6,
-        config: &DWriteGridConfig,
-    ) -> anyhow::Result<(DWriteGridKey, SharedGridPtr)> {
-        let key = DWriteGridKey::from_config(config);
-        let grid =
-            self.try_ref_or_insert_with(key.clone(), move || -> anyhow::Result<SharedGrid> {
-                let mut grid = SharedGrid::with_atlas_max_size(
-                    CodepointResolver::new(Collection::new()),
-                    GridMetrics::default(),
-                    config.max_atlas_size,
-                );
-
-                let requests: [StyleVariationRequest<'_>; Style::COUNT] =
-                    std::array::from_fn(|i| StyleVariationRequest {
-                        family: &config.styles[i].family,
-                        axes: config.styles[i].axes.clone(),
-                    });
-                grid.configure_dwrite(
-                    factory,
-                    &requests,
-                    DWriteGridMetricsConfig {
-                        font_size: config.font_size,
-                        cell_width: config.cell_width,
-                        line_height: config.line_height,
-                        baseline: config.baseline,
-                    },
-                    config.raster_scale_factor,
-                    config.fallback.clone(),
-                    &config.locale,
-                )?;
-                Ok(grid)
-            })?;
-        Ok((key, grid))
-    }
-}
-
-impl<K> Default for SharedGridSet<K>
-where
-    K: Eq + Hash + Clone,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::collection::Collection;
-    use crate::shared_grid::GridMetrics;
-
-    #[test]
-    fn same_key_reuses_grid_and_refcounts() {
-        let set = SharedGridSet::<u64>::new();
-        let g1 = set.ref_or_insert_with(1, || {
-            SharedGrid::with_collection(Collection::new(), GridMetrics::default())
-        });
-        let g2 = set.ref_or_insert_with(1, || {
-            SharedGrid::with_collection(Collection::new(), GridMetrics::default())
-        });
-        assert_eq!(g1, g2);
-        assert_eq!(set.count(), 1);
-        set.deref(&1);
-        assert_eq!(set.count(), 1);
-        set.deref(&1);
-        assert_eq!(set.count(), 0);
     }
 }

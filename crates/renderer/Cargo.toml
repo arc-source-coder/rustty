@@ -3,22 +3,23 @@ name = "renderer"
 version.workspace = true
 edition.workspace = true
 
-[features]
-profiler = ["dep:tracy-client"]
-
 [dependencies]
-tracy-client = { workspace = true, optional = true }
 gpui.workspace = true
-bytemuck.workspace = true
-rapidhash.workspace = true
+
+rustc-hash.workspace = true
+
 terminal = { path = "../terminal" }
 ghostty = { path = "../ghostty" }
+config = { path = "../config" }
+utils = { path = "../utils" }
 font = { path = "../font" }
 ui = { path = "../ui" }
+
 log.workspace = true
-crossbeam-channel.workspace = true
+anyhow.workspace = true
+
 async-channel.workspace = true
-anyhow = "1.0"
+crossbeam-channel.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [

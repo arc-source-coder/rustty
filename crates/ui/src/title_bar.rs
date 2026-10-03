@@ -4,7 +4,8 @@ use gpui::{
     white,
 };
 
-use crate::components::{styled::h_flex, theme::ActiveTheme};
+use crate::components::styled::h_flex;
+use crate::components::theme::ActiveTheme;
 
 pub const TITLE_BAR_HEIGHT_WINDOWED: Pixels = px(40.);
 pub const TITLE_BAR_HEIGHT_MAXIMIZED: Pixels = px(36.);

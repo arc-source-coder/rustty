@@ -28,12 +28,6 @@ pub export fn ghostty_terminal_encode_key(
 ) callconv(.c) usize {
     if (buf == null) return 0;
 
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-
-    handle.lock();
-    const encode_opts = key_encode.Options.fromTerminal(&handle.terminal_inst);
-    handle.unlock();
-
     const event: input_key.KeyEvent = .{
         .key = @enumFromInt(key_val),
         .mods = mods,
@@ -42,6 +36,11 @@ pub export fn ghostty_terminal_encode_key(
         .utf8 = if (text_ptr) |p| p[0..text_len] else "",
         .unshifted_codepoint = @truncate(unshifted_codepoint),
     };
+
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
+    handle.lock();
+    const encode_opts = key_encode.Options.fromTerminal(&handle.terminal_inst);
+    handle.unlock();
 
     var writer: std.Io.Writer = .fixed(buf.?[0..buf_len]);
     key_encode.encode(&writer, event, encode_opts) catch return 0;
@@ -52,7 +51,7 @@ pub export fn ghostty_terminal_encode_key(
 pub export fn ghostty_terminal_encode_mouse(
     ptr: *anyopaque,
     button: i8,
-    action: input_mouse.Action,
+    action: u8,
     mods: input_key.Mods,
     x: f32,
     y: f32,
@@ -61,20 +60,19 @@ pub export fn ghostty_terminal_encode_mouse(
 ) callconv(.c) usize {
     if (buf == null) return 0;
 
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    handle.lock();
-    const encode_opts = mouse_encode.Options.fromTerminal(&handle.terminal_inst, handle.size);
-    handle.unlock();
-
     const event: mouse_encode.Event = .{
-        .action = action,
+        .action = @enumFromInt(action),
         .button = if (button >= 0) @enumFromInt(@as(u8, @intCast(button))) else null,
         .mods = mods,
-        .pos = .{
-            .x = x,
-            .y = y,
-        },
+        .pos = .{ .x = x, .y = y },
     };
+
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
+    handle.lock();
+    var encode_opts = mouse_encode.Options.fromTerminal(&handle.terminal_inst, handle.size);
+    handle.unlock();
+    encode_opts.any_button_pressed = button >= 0;
+    encode_opts.last_cell = &handle.mouse_last_cell;
 
     var writer: std.Io.Writer = .fixed(buf.?[0..buf_len]);
     mouse_encode.encode(&writer, event, encode_opts) catch return 0;
@@ -92,10 +90,10 @@ pub export fn ghostty_terminal_encode_paste(
     buf_len: usize,
 ) callconv(.c) usize {
     if (buf == null) return 0;
-    const text: []const u8 = if (text_ptr == null or text_len == 0)
-        ""
-    else
-        text_ptr.?[0..text_len];
+    const text: []const u8 = text: {
+        if (text_ptr == null or text_len == 0) break :text "";
+        break :text text_ptr.?[0..text_len];
+    };
 
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
     handle.lock();
@@ -105,7 +103,7 @@ pub export fn ghostty_terminal_encode_paste(
     const parts_const = input_paste.encode(text, encode_opts) catch |err| switch (err) {
         // Only allocate when paste encoding needs mutable bytes.
         error.MutableRequired => {
-            var stack = std.heap.stackFallback(4096, std.heap.smp_allocator);
+            var stack = std.heap.stackFallback(4096, handle.alloc);
             const alloc = stack.get();
 
             const mutable = alloc.dupe(u8, text) catch return 0;

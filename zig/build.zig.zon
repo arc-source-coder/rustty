@@ -19,8 +19,11 @@
             .url = "https://deps.files.ghostty.org/uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9.tar.gz",
             .hash = "uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9",
         },
+        .z2d = .{
+            .url = "https://deps.files.ghostty.org/z2d-0.10.0-j5P_Hu-6FgBsZNgwphIqh17jDnj8_yPtD8yzjO6PpHRQ.tar.gz",
+            .hash = "z2d-0.10.0-j5P_Hu-6FgBsZNgwphIqh17jDnj8_yPtD8yzjO6PpHRQ",
+        },
         .simdutf = .{ .path = "./ghostty/pkg/simdutf", .lazy = false },
         .highway = .{ .path = "./ghostty/pkg/highway", .lazy = false },
-        .utfcpp = .{ .path = "./ghostty/pkg/utfcpp", .lazy = false },
     },
 }

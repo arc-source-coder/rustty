@@ -4,10 +4,18 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-anyhow = "1.0"
-rapidhash.workspace = true
-ghostty = { path = "../ghostty" }
+anyhow.workspace = true
+rustc-hash.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
 unicode-properties = "0.1.4"
+
+utils = { path = "../utils" }
+config = { path = "../config" }
+ghostty = { path = "../ghostty" }
+harfbuzz = { path = "../harfbuzz" }
+log.workspace = true
+
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-core.workspace = true

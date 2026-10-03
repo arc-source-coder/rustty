@@ -9,11 +9,13 @@ fn main() {
 }
 
 fn compile_shaders() {
-    let shader_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/gpu");
-    let shader_path = shader_dir.join("shader.hlsl");
+    let shader_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/shaders");
+    let vs_path = shader_dir.join("shader_vs.hlsl");
+    let ps_path = shader_dir.join("shader_ps.hlsl");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
-    println!("cargo:rerun-if-changed={}", shader_path.display());
+    println!("cargo:rerun-if-changed={}", shader_dir.display());
 
     let fxc_path = find_fxc_compiler();
 
@@ -24,25 +26,39 @@ fn compile_shaders() {
 
     compile_shader(
         &fxc_path,
-        shader_path.to_str().unwrap(),
+        vs_path.to_str().unwrap(),
+        shader_dir.as_path(),
         &out_dir,
         &rust_binding_path,
-        "renderer",
+        "shader_vs",
         "vs_4_1",
-        "renderer_vertex",
+        "main",
         "RENDERER_VERTEX_BYTES",
         "renderer_vs.cso",
     );
     compile_shader(
         &fxc_path,
-        shader_path.to_str().unwrap(),
+        ps_path.to_str().unwrap(),
+        shader_dir.as_path(),
         &out_dir,
         &rust_binding_path,
-        "renderer",
+        "shader_ps_bg",
         "ps_4_1",
-        "renderer_fragment",
-        "RENDERER_FRAGMENT_BYTES",
-        "renderer_ps.cso",
+        "backgroundMain",
+        "RENDERER_BG_FRAGMENT_BYTES",
+        "renderer_background_ps.cso",
+    );
+    compile_shader(
+        &fxc_path,
+        ps_path.to_str().unwrap(),
+        shader_dir.as_path(),
+        &out_dir,
+        &rust_binding_path,
+        "shader_ps_fg",
+        "ps_4_1",
+        "foregroundMain",
+        "RENDERER_FG_FRAGMENT_BYTES",
+        "renderer_foreground_ps.cso",
     );
 }
 
@@ -101,8 +117,9 @@ fn find_windows_sdk_binary(binary: &str) -> Option<std::path::PathBuf> {
 fn compile_shader(
     fxc_path: &str,
     shader_path: &str,
-    out_dir: &std::path::Path,
-    rust_binding_path: &std::path::Path,
+    include_dir: &Path,
+    out_dir: &Path,
+    rust_binding_path: &Path,
     module: &str,
     profile: &str,
     entry_point: &str,
@@ -110,7 +127,6 @@ fn compile_shader(
     output_name: &str,
 ) {
     let output_path = out_dir.join(output_name);
-    let build_profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_owned());
     let mut args: Vec<&str> = vec![
         "/T",
         profile,
@@ -118,14 +134,12 @@ fn compile_shader(
         entry_point,
         "/Fo",
         output_path.to_str().unwrap(),
+        "/I",
+        include_dir.to_str().unwrap(),
         "/Ges",
         "/WX",
     ];
-    if build_profile == "release" {
-        args.extend(["/O3", "/Qstrip_debug", "/Qstrip_reflect"]);
-    } else {
-        args.extend(["/Zi", "/Od"]);
-    }
+    args.extend(["/O3", "/Qstrip_debug", "/Qstrip_reflect"]);
     args.push(shader_path);
 
     let status = Command::new(fxc_path)

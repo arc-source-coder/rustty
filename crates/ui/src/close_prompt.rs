@@ -1,8 +1,9 @@
+use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, Context, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement,
     IntoElement, KeyBinding, ParentElement, PromptButton, PromptHandle, PromptLevel,
     PromptResponse, Render, RenderablePromptHandle, StatefulInteractiveElement, Styled, Window,
-    WindowAppearance, actions, div, font, prelude::FluentBuilder, px, rgba,
+    WindowAppearance, actions, div, font, px, rgba,
 };
 
 const PROMPT_KEY_CONTEXT: &str = "ClosePrompt";

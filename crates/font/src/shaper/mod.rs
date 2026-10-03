@@ -1,6 +1,4 @@
-pub mod hash;
-pub mod run_iter;
-#[allow(clippy::module_inception)]
-pub mod shaper;
+pub mod harfbuzz;
+pub mod run_iterator;
 
-pub use shaper::{Codepoint, Shaper};
+pub use harfbuzz::Shaper;

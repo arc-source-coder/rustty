@@ -2,11 +2,14 @@
 resolver = "2"
 members = [
     "crates/app",
+    "crates/config",
     "crates/font",
     "crates/ghostty",
+    "crates/harfbuzz",
     "crates/renderer",
     "crates/terminal",
     "crates/ui",
+    "crates/utils",
     "crates/zconpty",
 ]
 
@@ -27,20 +30,22 @@ cognitive_complexity = "warn"
 # redundant_type_annotations = "warn"
 
 [workspace.dependencies]
+anyhow = "1.0"
+thiserror = "2.0.19"
+
 log = "0.4.29"
+
 async-channel = "2.5.0"
-crossbeam-channel = "0.5.15"
 crossbeam-queue = "0.3.12"
-bytemuck = { version = "1.25.0", features = ["derive"] }
-rapidhash = "4.4.0"
+crossbeam-channel = "0.5.15"
+
+rustc-hash = "2.1.1"
+parking_lot = "0.12.5"
 better_mimalloc_rs = "0.1.1"
 
-tracy-client = { version = "0.18", default-features = false, features = ["enable", "sampling", "callstack-inlines", "system-tracing", "context-switch-tracing"] }
-
-windows = "0.61"
-windows-core = "0.61"
-windows-sys = { version = "0.59" }
-windows-numerics = "0.2"
+windows = "0.62"
+windows-core = "0.62"
+windows-numerics = "0.3"
 
 gpui = { git = "https://github.com/arc-source-coder/zed/" }
 gpui_platform = { git = "https://github.com/arc-source-coder/zed/" }

@@ -12,17 +12,16 @@ use gpui::{
     WindowOptions, px, size,
 };
 use gpui_platform::application;
-use terminal::RenderConfig;
-use ui::{components::theme::Theme, title_bar::title_bar_options};
+use ui::components::theme::Theme;
+use ui::title_bar::title_bar_options;
 
 use crate::actions::{
-    CloseActiveTab, NewTab, SelectNextTab, SelectPreviousTab, SelectTab1, SelectTab2, SelectTab3,
-    SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
+    CloseActiveTab, DecreaseFontSize, IncreaseFontSize, NewTab, ResetFontSize, SelectNextTab,
+    SelectPreviousTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
+    SelectTab7, SelectTab8, SelectTab9,
 };
 use crate::profile_registry::ProfileRegistry;
 use crate::workspace::Workspace;
-#[cfg(feature = "profiler")]
-use tracy_client::Client;
 
 const WORKSPACE_KEY_CONTEXT: Option<&str> = Some("Workspace");
 
@@ -30,9 +29,6 @@ const WORKSPACE_KEY_CONTEXT: Option<&str> = Some("Workspace");
 static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() {
-    #[cfg(feature = "profiler")]
-    let _client = Client::start();
-
     application().run(|cx: &mut App| {
         ui::close_prompt::register(cx);
 
@@ -50,14 +46,15 @@ fn main() {
             KeyBinding::new("ctrl-7", SelectTab7, WORKSPACE_KEY_CONTEXT),
             KeyBinding::new("ctrl-8", SelectTab8, WORKSPACE_KEY_CONTEXT),
             KeyBinding::new("ctrl-9", SelectTab9, WORKSPACE_KEY_CONTEXT),
+            KeyBinding::new("ctrl-=", IncreaseFontSize, WORKSPACE_KEY_CONTEXT),
+            KeyBinding::new("ctrl-+", IncreaseFontSize, WORKSPACE_KEY_CONTEXT),
+            KeyBinding::new("ctrl--", DecreaseFontSize, WORKSPACE_KEY_CONTEXT),
+            KeyBinding::new("ctrl-0", ResetFontSize, WORKSPACE_KEY_CONTEXT),
         ]);
 
         // Detect available shells and build profile list.
         let (profiles, default_id) = shell_detection::detect_profiles();
         let profiles = cx.new(|_| ProfileRegistry::new(profiles, default_id));
-
-        // Shared render config (v0: defaults only, no config file).
-        let render_config = cx.new(|_| RenderConfig::default());
 
         // Window sizing: 60% x 70% of primary display, centered.
         let display_bounds = cx.primary_display().map_or_else(
@@ -81,7 +78,7 @@ fn main() {
 
         cx.open_window(window_options, |window, cx| {
             Theme::sync_system_appearance(window, cx);
-            let workspace = cx.new(|cx| Workspace::new(profiles, render_config, window, cx));
+            let workspace = cx.new(|cx| Workspace::new(profiles, window, cx));
             let focus = workspace.read(cx).active_terminal_focus_handle(cx);
             window.focus(&focus, cx);
 
