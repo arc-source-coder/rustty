@@ -10,6 +10,17 @@ use std::{marker::PhantomData, rc::Rc};
 pub enum TerminalEvent {
     Bell,
     TitleChanged(String),
+    ClipboardWrite(ClipboardWrite),
+}
+
+/// A terminal application's request to update the host clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardWrite {
+    /// Clear all clipboard formats, including non-text data.
+    Clear,
+    /// Replace all clipboard contents with UTF-8 plain text.
+    /// An empty string publishes empty text rather than clearing the clipboard.
+    Text(String),
 }
 
 struct CallbackSink {
@@ -42,6 +53,33 @@ unsafe extern "C" fn title_trampoline(userdata: *mut c_void, ptr: *const u8, len
         };
         let _ = sink.event_tx.try_send(TerminalEvent::TitleChanged(title));
     });
+}
+
+unsafe extern "C" fn clipboard_write_trampoline(
+    userdata: *mut c_void,
+    ptr: *const u8,
+    len: usize,
+) -> bool {
+    std::panic::catch_unwind(|| {
+        let sink = unsafe { &*(userdata as *const CallbackSink) };
+        if sink.event_tx.is_closed() || sink.event_tx.is_full() {
+            return false;
+        }
+        let write = match ptr.is_null() {
+            true => ClipboardWrite::Clear,
+            false => {
+                let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+                let Ok(text) = str::from_utf8(bytes) else {
+                    return false;
+                };
+                ClipboardWrite::Text(text.to_owned())
+            }
+        };
+        sink.event_tx
+            .try_send(TerminalEvent::ClipboardWrite(write))
+            .is_ok()
+    })
+    .unwrap_or(false)
 }
 
 unsafe extern "C" fn output_trampoline(userdata: *mut c_void) {
@@ -96,7 +134,7 @@ impl Terminal {
         f(&mut terminal)
     }
 
-    /// Register bell/title/output callbacks.
+    /// Register terminal event and output callbacks.
     /// Locks internally.
     pub fn set_event_sender(
         &self,
@@ -115,6 +153,7 @@ impl Terminal {
                 userdata,
                 Some(bell_trampoline),
                 Some(title_trampoline),
+                Some(clipboard_write_trampoline),
                 Some(output_trampoline),
             );
         }
@@ -467,7 +506,14 @@ impl std::error::Error for RenderUpdateError {}
 impl Drop for CallbackHandle {
     fn drop(&mut self) {
         unsafe {
-            ghostty_terminal_set_callbacks(self.terminal, std::ptr::null_mut(), None, None, None);
+            ghostty_terminal_set_callbacks(
+                self.terminal,
+                std::ptr::null_mut(),
+                None,
+                None,
+                None,
+                None,
+            );
         }
     }
 }

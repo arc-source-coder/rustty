@@ -17,11 +17,15 @@ pub const BellCallback = *const fn (?*anyopaque) callconv(.c) void;
 pub const TitleCallback = *const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void;
 pub const OutputCallback = *const fn (?*anyopaque) callconv(.c) void;
 pub const WriteInputCallback = *const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void;
+pub const ClipboardWriteCallback = *const fn (?*anyopaque, ?[*]const u8, usize) callconv(.c) bool;
+
+const max_clipboard_write_bytes = 1024 * 1024;
 
 const EventCallbacks = struct {
     userdata: ?*anyopaque = null,
     bell: ?BellCallback = null,
     title: ?TitleCallback = null,
+    clipboard_write: ?ClipboardWriteCallback = null,
 };
 
 const OutputCallbackState = struct {
@@ -76,6 +80,29 @@ pub const TerminalHandle = struct {
         cb(handle.event_callbacks.userdata);
     }
 
+    fn clipboardWriteTrampoline(
+        handler_ptr: *terminal.TerminalStream.Handler,
+        write: terminal.clipboard.Write,
+    ) terminal.clipboard.WriteResult {
+        const handle = fromEffectsHandler(handler_ptr);
+        const callback = handle.event_callbacks.clipboard_write orelse return .unsupported;
+
+        if (write.contents.len == 0) {
+            return if (callback(handle.event_callbacks.userdata, null, 0)) .success else .busy;
+        }
+
+        const content = for (write.contents) |content| {
+            if (std.mem.eql(u8, content.mime, "text/plain")) break content;
+        } else return .unsupported;
+
+        if (content.data.len > max_clipboard_write_bytes) return .invalid_data;
+        return if (callback(
+            handle.event_callbacks.userdata,
+            content.data.ptr,
+            content.data.len,
+        )) .success else .busy;
+    }
+
     pub fn outputTrampoline(self: *TerminalHandle) void {
         const cb = self.output_callback.output orelse return;
         cb(self.output_callback.userdata);
@@ -95,8 +122,7 @@ pub const TerminalHandle = struct {
     }
 
     fn deviceAttributesTrampoline(_: *terminal.TerminalStream.Handler) terminal.device_attributes.Attributes {
-        // Use Ghostty's default attributes and encoding behavior.
-        return .{};
+        return .{ .primary = .{ .features = &.{ .ansi_color, .clipboard } } };
     }
 
     fn enquiryTrampoline(_: *terminal.TerminalStream.Handler) []const u8 {
@@ -148,12 +174,12 @@ pub const TerminalHandle = struct {
 
         var handler: terminal.TerminalStream.Handler = .init(&handle.terminal_inst);
 
-        // Install effects callbacks once. They dispatch through Callbacks,
+        // Install effects callbacks once. They dispatch through callbacks,
         // so updating callbacks later takes effect immediately.
         handler.effects = .{
             .write_pty = &writePtyTrampoline,
             .bell = &bellTrampoline,
-            .clipboard_write = null,
+            .clipboard_write = &clipboardWriteTrampoline,
             .color_scheme = &colorSchemeTrampoline,
             .device_attributes = &deviceAttributesTrampoline,
             .enquiry = &enquiryTrampoline,

@@ -18,6 +18,7 @@ pub const input = @import("src/input.zig");
 pub const queries = @import("src/queries.zig");
 
 const BellCallback = handle_mod.BellCallback;
+const ClipboardWriteCallback = handle_mod.ClipboardWriteCallback;
 const OutputCallback = handle_mod.OutputCallback;
 const TitleCallback = handle_mod.TitleCallback;
 const TerminalHandle = handle_mod.TerminalHandle;
@@ -59,6 +60,7 @@ pub export fn ghostty_terminal_set_callbacks(
     userdata: ?*anyopaque,
     bell: ?BellCallback,
     title: ?TitleCallback,
+    clipboard_write: ?ClipboardWriteCallback,
     output: ?OutputCallback,
 ) callconv(.c) void {
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
@@ -68,6 +70,7 @@ pub export fn ghostty_terminal_set_callbacks(
         .userdata = userdata,
         .bell = bell,
         .title = title,
+        .clipboard_write = clipboard_write,
     };
     handle.output_callback = .{
         .userdata = userdata,

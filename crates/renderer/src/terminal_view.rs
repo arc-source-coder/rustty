@@ -8,7 +8,7 @@ use font::config::FontConfig;
 use font::shared_grid_set::SharedGridSet;
 
 use font::types::FontSize;
-use ghostty::{CellSize, TerminalEvent};
+use ghostty::{CellSize, ClipboardWrite, TerminalEvent};
 use gpui::{
     App, AppContext as _, ClipboardItem, Context, CursorStyle, Entity, EventEmitter,
     ExternalSurfaceEvent, ExternalSurfaceHost, FocusHandle, Focusable, Global,
@@ -142,6 +142,16 @@ impl TerminalView {
                         TerminalEvent::Bell => this.session.handle_io_event(IoEvent::Bell),
                         TerminalEvent::TitleChanged(title) => {
                             this.session.handle_io_event(IoEvent::TitleChanged(title))
+                        }
+                        TerminalEvent::ClipboardWrite(write) => {
+                            let item = match write {
+                                ClipboardWrite::Clear => ClipboardItem {
+                                    entries: Vec::new(),
+                                },
+                                ClipboardWrite::Text(text) => ClipboardItem::new_string(text),
+                            };
+                            cx.write_to_clipboard(item);
+                            return;
                         }
                     };
                     if effect == SessionEffect::TitleChanged {

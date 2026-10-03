@@ -16,6 +16,8 @@ pub struct SelectionUpdate {
 
 pub type BellCallback = unsafe extern "C" fn(userdata: *mut c_void);
 pub type TitleCallback = unsafe extern "C" fn(userdata: *mut c_void, ptr: *const u8, len: usize);
+pub type ClipboardWriteCallback =
+    unsafe extern "C" fn(userdata: *mut c_void, ptr: *const u8, len: usize) -> bool;
 pub type OutputCallback = unsafe extern "C" fn(userdata: *mut c_void);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

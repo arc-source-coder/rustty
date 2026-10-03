@@ -7,14 +7,14 @@ mod zig;
 
 use core::ffi::{c_int, c_void};
 use std::ptr::NonNull;
-pub(crate) use types::{BellCallback, OutputCallback, TitleCallback};
+pub(crate) use types::{BellCallback, ClipboardWriteCallback, OutputCallback, TitleCallback};
 
 pub use ffi::{
     BoldColor, CellStyle, Color, ColorRGB, CursorViewport, CursorVisualStyle, OptionalColorRGB,
     OptionalCursorViewport, OptionalSelection, RenderColors, RenderCursor, StyleColor, U21,
     UnderlineStyle,
 };
-pub use terminal::{CallbackHandle, Terminal, TerminalEvent};
+pub use terminal::{CallbackHandle, ClipboardWrite, Terminal, TerminalEvent};
 pub use terminal::{LockedTerminal, PendingUpdate, RenderFrame, RenderState, RenderUpdateError};
 pub use types::{
     CellSize, ContentTag, CursorCoordinate, Dirty, GridSize, MouseMode, RawCell, ScreenSize,
@@ -33,6 +33,7 @@ unsafe extern "C" {
         userdata: *mut c_void,
         bell: Option<BellCallback>,
         title: Option<TitleCallback>,
+        clipboard_write: Option<ClipboardWriteCallback>,
         output: Option<OutputCallback>,
     );
 

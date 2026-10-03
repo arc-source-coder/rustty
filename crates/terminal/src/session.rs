@@ -29,6 +29,7 @@ pub const DEFAULT_BG: ColorRGB = ColorRGB::new(0x1E, 0x1E, 0x2E);
 /// Input now flows through this queue as typed events, so keep some headroom for
 /// short bursts of key, mouse, resize, and paste traffic.
 const IO_MSG_CHANNEL_CAPACITY: usize = 256;
+const TERMINAL_EVENT_CHANNEL_CAPACITY: usize = 32;
 
 /// A terminal's UI-side session, holding its shared Ghostty terminal, ConPTY
 /// connection, IO thread/mailbox, callbacks, and renderer wake binding.
@@ -107,8 +108,9 @@ impl TerminalSession {
         let renderer_wake = Arc::new(RendererWake::new());
         let callback_renderer_wake = Arc::clone(&renderer_wake);
 
-        // event_tx/rx: unbounded channel for bell/title events — Ghostty callbacks → GPUI task
-        let (event_tx, event_rx) = async_channel::unbounded::<TerminalEvent>();
+        // Callbacks run under the terminal lock, so event delivery must never block.
+        let (event_tx, event_rx) =
+            async_channel::bounded::<TerminalEvent>(TERMINAL_EVENT_CHANNEL_CAPACITY);
         let callback_handle =
             terminal.set_event_sender(event_tx, move || callback_renderer_wake.wake());
         *options.event_rx = Some(event_rx);
