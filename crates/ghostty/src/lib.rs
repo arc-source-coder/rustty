@@ -67,13 +67,18 @@ unsafe extern "C" {
     pub(crate) fn ghostty_terminal_render_clear_dirty(terminal: NonNull<c_void>);
     pub(crate) fn ghostty_terminal_render_rows(terminal: NonNull<c_void>) -> u16;
     pub(crate) fn ghostty_terminal_render_cols(terminal: NonNull<c_void>) -> u16;
-    pub(crate) fn ghostty_terminal_render_row_dirty(terminal: NonNull<c_void>, row: u16) -> bool;
 
     pub(crate) fn ghostty_terminal_render_cursor(
         terminal: NonNull<c_void>,
         out: NonNull<CursorState>,
     );
     pub(crate) fn ghostty_terminal_render_colors(terminal: NonNull<c_void>) -> *const RenderColors;
+
+    pub(crate) fn ghostty_terminal_render_dirty_rows(
+        terminal: NonNull<c_void>,
+        len: NonNull<u16>,
+    ) -> *const bool;
+
     pub(crate) fn ghostty_terminal_render_row_raw(
         terminal: NonNull<c_void>,
         row: u16,

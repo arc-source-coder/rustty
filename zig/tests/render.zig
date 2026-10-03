@@ -50,7 +50,10 @@ fn test_render_partial_dirty() !void {
     try support.renderUpdate(handle);
 
     try std.testing.expect(root.ghostty_terminal_render_dirty(handle) > 0);
-    try std.testing.expect(root.ghostty_terminal_render_row_dirty(handle, 0));
+    var test_len: u16 = 0;
+    const dirty_rows = root.ghostty_terminal_render_dirty_rows(handle, &test_len);
+    try std.testing.expect(test_len > 0);
+    try std.testing.expect(dirty_rows[0]);
 }
 
 fn test_render_cursor() !void {

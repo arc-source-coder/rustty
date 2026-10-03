@@ -392,6 +392,19 @@ pub struct RenderFrame {
 }
 
 impl RenderFrame {
+    /// Per-row dirty flags for the current render frame.
+    ///
+    /// The returned slice is zero-copy into Ghostty's `RenderState` and has
+    /// one entry per viewport row. It remains valid until the next
+    /// `render_update()` call.
+    #[inline(always)]
+    pub fn dirty_rows(&self) -> &[bool] {
+        let mut len: u16 = 0;
+        let len_ptr = unsafe { NonNull::new_unchecked(&mut len) };
+        let ptr = unsafe { ghostty_terminal_render_dirty_rows(self.handle, len_ptr) };
+        unsafe { std::slice::from_raw_parts(ptr, len as usize) }
+    }
+
     /// Get raw cell data for a row (zero-copy pointer into Zig memory).
     /// Returns `None` if row is out of bounds.
     ///
@@ -475,12 +488,6 @@ impl RenderFrame {
     #[inline(always)]
     pub fn cols(&self) -> u16 {
         unsafe { ghostty_terminal_render_cols(self.handle) }
-    }
-
-    /// Whether a specific row has changed since last clear.
-    #[inline(always)]
-    pub fn row_dirty(&self, y: u16) -> bool {
-        unsafe { ghostty_terminal_render_row_dirty(self.handle, y) }
     }
 
     /// Get selection range for a row. Returns `Some((start_x, end_x))` if

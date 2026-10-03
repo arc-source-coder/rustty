@@ -284,11 +284,14 @@ pub(crate) fn build_batch(
         contents.reset();
     }
 
-    for y in 0..rows {
+    let dirty_rows = frame.dirty_rows();
+    debug_assert_eq!(dirty_rows.len(), rows);
+
+    for (y, &row_dirty) in dirty_rows.iter().enumerate() {
         let y_u16 = y as u16;
 
         if !full_rebuild {
-            if dirty != DirtyState::Partial || !frame.row_dirty(y_u16) {
+            if dirty != DirtyState::Partial || !row_dirty {
                 continue;
             }
 

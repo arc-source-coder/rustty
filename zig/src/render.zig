@@ -200,13 +200,6 @@ pub export fn ghostty_terminal_render_cols(ptr: *anyopaque) callconv(.c) u16 {
     return handle.render_state.cols;
 }
 
-/// Whether the given row is dirty.
-pub export fn ghostty_terminal_render_row_dirty(ptr: *anyopaque, row: u16) callconv(.c) bool {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    if (row >= handle.render_state.rows) return false;
-    return handle.render_state.row_data.items(.dirty)[row];
-}
-
 /// Get cursor state from the current render state.
 pub export fn ghostty_terminal_render_cursor(ptr: *anyopaque, out: *CursorState) callconv(.c) void {
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
@@ -261,6 +254,20 @@ pub export fn ghostty_terminal_render_row_selection(
         return true;
     }
     return false;
+}
+
+/// Returns a pointer to the per-row dirty flags in RenderState.
+///
+/// `out_len` is set to the number of viewport rows. The returned pointer is
+/// into `RenderState` memory and is valid until the next `render_update()` call.
+pub export fn ghostty_terminal_render_dirty_rows(
+    ptr: *anyopaque,
+    out_len: *u16,
+) callconv(.c) [*]bool {
+    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
+    const dirty = handle.render_state.row_data.items(.dirty);
+    out_len.* = @intCast(dirty.len);
+    return dirty.ptr;
 }
 
 /// Returns a direct pointer into RenderState's page.Cell array for a row.
