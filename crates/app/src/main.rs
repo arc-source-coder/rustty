@@ -16,9 +16,9 @@ use ui::components::theme::Theme;
 use ui::title_bar::title_bar_options;
 
 use crate::actions::{
-    CloseActiveTab, DecreaseFontSize, IncreaseFontSize, NewTab, ResetFontSize, SelectNextTab,
-    SelectPreviousTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
-    SelectTab7, SelectTab8, SelectTab9,
+    CloseActiveTab, CloseWindow, DecreaseFontSize, IncreaseFontSize, NewTab, ResetFontSize,
+    SelectNextTab, SelectPreviousTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5,
+    SelectTab6, SelectTab7, SelectTab8, SelectTab9,
 };
 use crate::profile_registry::ProfileRegistry;
 use crate::workspace::Workspace;
@@ -35,6 +35,7 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("ctrl-t", NewTab, WORKSPACE_KEY_CONTEXT),
             KeyBinding::new("ctrl-w", CloseActiveTab, WORKSPACE_KEY_CONTEXT),
+            KeyBinding::new("alt-f4", CloseWindow, WORKSPACE_KEY_CONTEXT),
             KeyBinding::new("ctrl-tab", SelectNextTab, WORKSPACE_KEY_CONTEXT),
             KeyBinding::new("ctrl-shift-tab", SelectPreviousTab, WORKSPACE_KEY_CONTEXT),
             KeyBinding::new("ctrl-1", SelectTab1, WORKSPACE_KEY_CONTEXT),

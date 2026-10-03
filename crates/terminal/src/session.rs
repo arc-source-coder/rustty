@@ -285,6 +285,26 @@ impl TerminalSession {
         }
     }
 
+    pub fn send_text(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let selection_changed = self.terminal.clear_selection();
+        let viewport_changed = !self.terminal.viewport_is_bottom();
+
+        if viewport_changed {
+            self.terminal.scroll_to_bottom();
+        }
+
+        self.io_notify
+            .send_lossless(IoMsg::Input(IoInput::Text(text.as_bytes().to_vec())));
+
+        if selection_changed || viewport_changed {
+            self.renderer_wake.wake();
+        }
+    }
+
     pub fn send_paste(&self, text: &str) {
         let selection_changed = self.terminal.clear_selection();
         let viewport_changed = !self.terminal.viewport_is_bottom();

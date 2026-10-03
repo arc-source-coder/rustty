@@ -150,6 +150,11 @@ export fn zconpty_send_paste(
     sessionFromHandle(session).input_subsystem.sendPaste(text_ptr[0..text_len]);
 }
 
+export fn zconpty_send_text(session: isize, text_ptr: [*]const u8, text_len: usize) callconv(.c) void {
+    if (text_len == 0) return;
+    sessionFromHandle(session).input_subsystem.writeInput(text_ptr[0..text_len]);
+}
+
 export fn zconpty_send_resize(session: isize, cols: u16, rows: u16) callconv(.c) void {
     sessionFromHandle(session).input_subsystem.sendResize(cols, rows);
 }

@@ -1,9 +1,9 @@
 use ghostty::ScreenSize;
 use gpui::{
-    App, Bounds, DefiniteLength, DispatchPhase, Element, ElementId, Entity, ExternalSurfaceId,
-    ExternalSurfaceState, GlobalElementId, HitboxBehavior, HitboxId, InspectorElementId,
-    IntoElement, LayoutId, Length, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Style,
-    Window,
+    App, Bounds, DefiniteLength, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
+    ExternalSurfaceId, ExternalSurfaceState, Focusable as _, GlobalElementId, HitboxBehavior,
+    HitboxId, InspectorElementId, IntoElement, LayoutId, Length, MouseButton, MouseMoveEvent,
+    MouseUpEvent, Pixels, Style, Window,
 };
 
 use crate::TerminalView;
@@ -100,8 +100,14 @@ impl Element for TerminalElement {
         _request_layout: &mut Self::RequestLayoutState,
         layout: &mut Self::PrepaintState,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) {
+        let focus_handle = self.terminal_view.focus_handle(cx);
+        if focus_handle.is_focused(window) {
+            let input_handler = ElementInputHandler::new(bounds, self.terminal_view.clone());
+            window.handle_input(&focus_handle, input_handler, cx);
+        }
+
         // Owned left presses continue outside the hitbox, before ordinary bubble listeners.
         let hitbox = layout.hitbox;
         window.on_mouse_event({

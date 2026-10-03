@@ -12,9 +12,9 @@ use renderer::{TerminalView, TerminalViewEvent};
 use ui::title_bar::WindowsWindowControls;
 
 use crate::actions::{
-    CloseActiveTab, DecreaseFontSize, IncreaseFontSize, NewTab, ResetFontSize, SelectNextTab,
-    SelectPreviousTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
-    SelectTab7, SelectTab8, SelectTab9,
+    CloseActiveTab, CloseWindow, DecreaseFontSize, IncreaseFontSize, NewTab, ResetFontSize,
+    SelectNextTab, SelectPreviousTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5,
+    SelectTab6, SelectTab7, SelectTab8, SelectTab9,
 };
 use crate::profile::ProfileIconKind;
 use crate::profile_registry::ProfileRegistry;
@@ -1454,6 +1454,11 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_close_active_tab))
+            .on_action(cx.listener(|this, _: &CloseWindow, window, cx| {
+                if this.handle_window_should_close(window, cx) {
+                    window.remove_window();
+                }
+            }))
             .on_action(cx.listener(Self::on_select_next_tab))
             .on_action(cx.listener(Self::on_select_previous_tab))
             .on_action(cx.listener(Self::on_select_tab_1))

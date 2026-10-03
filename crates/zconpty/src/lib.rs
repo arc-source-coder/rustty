@@ -7,6 +7,7 @@ unsafe extern "C" {
     fn zconpty_send_key(session: isize, event: KeyEvent);
     fn zconpty_send_mouse(session: isize, event: MouseEvent);
     fn zconpty_send_paste(session: isize, ptr: *const u8, len: usize);
+    fn zconpty_send_text(session: isize, ptr: *const u8, len: usize);
     fn zconpty_send_focus(session: isize, focused: bool);
     fn zconpty_send_resize(session: isize, cols: u16, rows: u16);
     fn zconpty_w3c_code_from_bytes(code_ptr: *const u8, code_len: usize) -> i32;
@@ -252,6 +253,15 @@ impl ConPTY {
     #[inline]
     pub fn send_mouse(&self, event: MouseEvent) {
         unsafe { zconpty_send_mouse(self.session, event) };
+    }
+
+    #[inline]
+    pub fn send_text(&self, text: &[u8]) {
+        if text.is_empty() {
+            return;
+        }
+
+        unsafe { zconpty_send_text(self.session, text.as_ptr(), text.len()) };
     }
 
     #[inline]

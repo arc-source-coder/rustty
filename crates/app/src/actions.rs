@@ -5,6 +5,7 @@ actions!(
     [
         NewTab,
         CloseActiveTab,
+        CloseWindow,
         SelectNextTab,
         SelectPreviousTab,
         SelectTab1,

@@ -138,6 +138,7 @@ impl IoThread {
                 IoInput::Key(event) => self.console_session.send_key(event),
                 IoInput::Mouse(event) => self.console_session.send_mouse(event),
                 IoInput::Focus(focused) => self.console_session.send_focus(focused),
+                IoInput::Text(text) => self.console_session.send_text(&text),
                 IoInput::Paste(text) => self.console_session.send_paste(&text),
             },
             IoMsg::Resize(dimensions) => {

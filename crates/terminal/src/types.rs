@@ -52,6 +52,7 @@ pub enum IoInput {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Focus(bool),
+    Text(Vec<u8>),
     // NOTE(renderer-refactor): This could be a slice
     Paste(Vec<u8>),
 }

@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,10 +11,11 @@ use font::shared_grid_set::SharedGridSet;
 use font::types::FontSize;
 use ghostty::{CellSize, ClipboardWrite, TerminalEvent};
 use gpui::{
-    App, AppContext as _, ClipboardItem, Context, CursorStyle, Entity, EventEmitter,
-    ExternalSurfaceEvent, ExternalSurfaceHost, FocusHandle, Focusable, Global,
-    InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Render, Styled as _, Task, Window, div,
+    App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle, Entity, EntityInputHandler,
+    EventEmitter, ExternalSurfaceEvent, ExternalSurfaceHost, FocusHandle, Focusable, Global,
+    InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
+    Styled as _, Task, UTF16Selection, Window, div,
 };
 use terminal::{AppAction, IoEvent, MouseAction, Options, SessionEffect, TerminalSession};
 use ui::scrollbar::{ScrollbarEvent, ScrollbarState};
@@ -399,6 +401,81 @@ impl Focusable for TerminalView {
     }
 }
 
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        _range: Range<usize>,
+        _adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        None
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        // Terminal input is an insertion stream, not an editable document.
+        self.session.send_text(text);
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        _new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        // Preedit must stay out of the input stream until committed.
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        None
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -406,8 +483,19 @@ impl Render for TerminalView {
             .cursor(CursorStyle::IBeam)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.to_lowercase();
-                let mods = &event.keystroke.modifiers;
+                let (keystroke, mods) = (&event.keystroke, &event.keystroke.modifiers);
+
+                // Let Windows open the native system menu for Alt+Space.
+                if keystroke.key == "space" && keystroke.modifiers == Modifiers::alt() {
+                    return;
+                }
+
+                // Let Windows produce text/IME events; its key-up still reaches the PTY.
+                if event.prefer_character_input {
+                    return;
+                }
+
+                let key = keystroke.key.to_lowercase();
 
                 // Intercept copy:
                 //  Ctrl+C (Windows, if selection exists)
@@ -415,26 +503,28 @@ impl Render for TerminalView {
                 if mods.control && key == "c" {
                     if let Some(text) = this.session.take_selection_text() {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
-                        return;
+                        return cx.stop_propagation();
                     }
                 }
 
                 // Intercept paste: Ctrl+V (Windows) or Ctrl+Shift+V (Linux) or Cmd+V (macOS)
                 let is_paste = (mods.control || mods.platform) && key == "v";
                 if is_paste && this.handle_paste(cx) {
-                    return;
+                    return cx.stop_propagation();
                 }
 
                 // Try to handle this key as a scroll key
-                let effect = this.session.handle_scroll_key(&event.keystroke);
+                let effect = this.session.handle_scroll_key(keystroke);
                 if effect == SessionEffect::ViewportScrolled {
                     this.scrollbar.update(cx, |state, cx| {
                         state.on_scroll(window, cx);
                     });
-                    return;
+                    return cx.stop_propagation();
                 }
                 // This event should be sent to the PTY
                 this.session.send_key_down_event(event);
+                // Consuming the key prevents Windows from also generating WM_CHAR.
+                cx.stop_propagation()
             }))
             .on_key_up(cx.listener(|this, event: &KeyUpEvent, _window, _cx| {
                 this.session.send_key_up_event(event)
