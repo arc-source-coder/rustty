@@ -2,7 +2,6 @@ use anyhow::Result;
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
-use std::hash::{Hash, Hasher};
 
 use crate::backend::dwrite::face::Face;
 use crate::metrics::FontMetrics;
@@ -20,28 +19,27 @@ struct SharedGridInner {
     codepoints: FxHashMap<CodepointKey, Option<FontIndex>>,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-struct CodepointKey {
-    cp: u32,
-    style: FontStyle,
-    presentation: Option<Presentation>,
-}
+/// Packed cache key for codepoint-to-font resolution.
+///
+/// Bit layout:
+/// [31:0]  Unicode codepoint
+/// [39:32] font style
+/// [47:40] presentation (0 = none, 1 = text, 2 = emoji)
+/// [63:48] reserved
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[repr(transparent)]
+struct CodepointKey(u64);
 
-impl Hash for CodepointKey {
+impl CodepointKey {
     #[inline]
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let presentation = match self.presentation {
+    fn new(cp: u32, style: FontStyle, presentation: Option<Presentation>) -> Self {
+        let presentation: u64 = match presentation {
             None => 0,
             Some(Presentation::Text) => 1,
             Some(Presentation::Emoji) => 2,
         };
 
-        // Bit layout
-        // [31:0]  Unicode codepoint
-        // [39:32] font style
-        // [47:40] presentation (0 = none, 1 = text, 2 = emoji)
-        // [63:48] _padding
-        state.write_u64(u64::from(self.cp) | ((self.style as u64) << 32) | (presentation << 40));
+        Self(u64::from(cp) | ((style as u64) << 32) | (presentation << 40))
     }
 }
 
@@ -67,11 +65,7 @@ impl SharedGrid {
         style: FontStyle,
         presentation: Option<Presentation>,
     ) -> Result<Option<FontIndex>, FontError> {
-        let key = CodepointKey {
-            cp,
-            style,
-            presentation,
-        };
+        let key = CodepointKey::new(cp, style, presentation);
 
         {
             if let Some(&found) = self.inner.read().codepoints.get(&key) {
