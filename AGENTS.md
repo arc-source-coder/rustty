@@ -14,6 +14,4 @@ Rustty is a fast, clean, GPU-accelerated terminal emulator for Windows using GPU
 5. `vendor/zed/crates/terminal` - Core business logic for Zed's terminal - based off the Alacritty crate.
 6. `vendor/zed/crates/terminal_view` - UI layer / Rendering through GPUI for the Alacritty-based terminal.
 7. `vendor/zed/crates/ui` - General Zed UI components for reference.
-8. `docs/architecture` - architecture information. Refer as needed.
-9. `docs/reference` - mockup UI images
-10. `opensrc/packages/microsoft/windows-rs` - `windows` / `windows-sys` crate source code.
+8. `opensrc/packages/microsoft/windows-rs` - `windows` / `windows-sys` crate source code.
