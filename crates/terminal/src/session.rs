@@ -15,7 +15,8 @@ use crate::types::{ProcessState, RendererWake, ScrollOp, SessionMetadata};
 
 use config::{Config, SpawnConfig};
 use ghostty::{
-    CallbackHandle, CellSize, ColorRGB, ScreenSize, Terminal, TerminalDimensions, TerminalEvent,
+    CallbackHandle, CellSize, ColorRGB, GridSize, ScreenSize, Terminal, TerminalDimensions,
+    TerminalEvent,
 };
 use zconpty::{
     ConPTY, KeyAction, KeyEvent, MouseAction, MouseButton, MouseEvent, MousePosition, W3cCode,
@@ -83,17 +84,23 @@ pub struct Options<'a> {
 impl TerminalSession {
     // TODO(renderer-refactor): Remove SpawnConfig
     pub fn new(spawn_config: SpawnConfig, config: Config, options: Options) -> Self {
-        let terminal = Arc::new(
-            Terminal::new(
-                spawn_config.initial_cols,
-                spawn_config.initial_rows,
-                DEFAULT_FG,
-                DEFAULT_BG,
-            )
-            .expect("failed to allocate ghostty terminal"),
-        );
-        terminal.set_cell_dimensions(options.cell_size);
+        let columns = spawn_config.initial_cols.max(1);
+        let rows = spawn_config.initial_rows.max(1);
 
+        let dimensions = TerminalDimensions {
+            grid: GridSize { columns, rows },
+            screen: ScreenSize::new(
+                u32::from(columns).saturating_mul(options.cell_size.width.get()),
+                u32::from(rows).saturating_mul(options.cell_size.height.get()),
+            )
+            .unwrap(),
+            cell: options.cell_size,
+        };
+
+        let terminal = Arc::new(
+            Terminal::new(dimensions, DEFAULT_FG, DEFAULT_BG)
+                .expect("failed to allocate ghostty terminal"),
+        );
         let console_session =
             Arc::new(ConPTY::new(terminal.handle()).expect("failed to start zconpty session"));
 
@@ -134,7 +141,6 @@ impl TerminalSession {
         io_notify.set_io_thread(io_thread.handle());
         io_thread.resume().expect("failed to resume IO thread");
 
-        let dimensions = terminal.dimensions();
         Self {
             config,
             terminal,
@@ -169,28 +175,23 @@ impl TerminalSession {
         self.renderer_wake.bind(sender);
     }
 
-    #[inline]
-    pub fn update_metrics(&mut self) {
-        self.dimensions = self.terminal.dimensions();
-    }
-
     /// Apply surface size and optional replacement font metrics with one PTY resize.
     #[inline]
     pub fn apply_resize(&mut self, size: ScreenSize, cell_size: Option<CellSize>) {
         if size == self.dimensions.screen && cell_size.is_none() {
             return;
         }
-        if let Some(cell_size) = cell_size {
-            self.terminal.set_cell_dimensions(cell_size);
-            self.dimensions.cell = cell_size;
-        }
-        self.terminal.set_screen_dimensions(size);
-        self.dimensions.screen = size;
+        let cell = cell_size.unwrap_or(self.dimensions.cell);
+        self.dimensions = TerminalDimensions {
+            grid: GridSize {
+                columns: (size.width.get() / cell.width.get()).clamp(1, u16::MAX.into()) as u16,
+                rows: (size.height.get() / cell.height.get()).clamp(1, u16::MAX.into()) as u16,
+            },
+            screen: size,
+            cell,
+        };
 
-        let rows = (size.height / self.dimensions.cell.height) as u16;
-        let cols = (size.width / self.dimensions.cell.width) as u16;
-
-        let _ = self.io_notify.try_send(IoMsg::Resize { rows, cols });
+        self.io_notify.send_lossless(IoMsg::Resize(self.dimensions));
     }
 
     /// Current process state.
@@ -498,7 +499,7 @@ impl TerminalSession {
                 _ => return SessionEffect::None,
             },
             ScrollDelta::Pixels(pixels) => {
-                let cell_height = self.dimensions.cell.height as f32;
+                let cell_height = self.dimensions.cell.height.get() as f32;
                 let total = self.pending_scroll_y + f32::from(pixels.y);
                 let rows = (total / cell_height).trunc();
 
@@ -559,8 +560,6 @@ impl TerminalSession {
     }
 
     pub fn handle_scroll_key(&mut self, keystroke: &Keystroke) -> SessionEffect {
-        let rows = (self.dimensions.screen.height / self.dimensions.cell.height.max(1)).max(1);
-
         // Locks internally.
         let mode = self.terminal.mouse_mode();
         let shift_pressed = keystroke.modifiers.shift;
@@ -579,7 +578,7 @@ impl TerminalSession {
                 return SessionEffect::None;
             }
 
-            let page_rows = rows.saturating_sub(1).max(1) as i32;
+            let page_rows = self.dimensions.grid.rows.saturating_sub(1).max(1) as i32;
             ScrollOp::Delta(direction * page_rows)
         };
         match self.io_notify.try_send(IoMsg::Scroll(scroll_operation)) {

@@ -2,6 +2,7 @@ use utils::asserts::unreachable;
 
 use crate::ffi::ColorRGB;
 use core::ffi::c_void;
+use core::num::NonZeroU32;
 
 /// Effects of a selection gesture, captured under the terminal lock.
 #[repr(C)]
@@ -149,36 +150,51 @@ pub struct MouseMode {
     pub is_mouse_shift_capture: bool,
 }
 
-/// Mirrors Ghostty's `renderer.size.Size` ABI.
 #[repr(C)]
-#[derive(Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ScreenSize {
+    pub width: NonZeroU32,
+    pub height: NonZeroU32,
+}
+
+impl ScreenSize {
+    pub fn new(width: u32, height: u32) -> Option<Self> {
+        Some(Self {
+            width: NonZeroU32::new(width)?,
+            height: NonZeroU32::new(height)?,
+        })
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CellSize {
+    pub width: NonZeroU32,
+    pub height: NonZeroU32,
+}
+
+impl CellSize {
+    pub fn new(width: u32, height: u32) -> Option<Self> {
+        Some(Self {
+            width: NonZeroU32::new(width)?,
+            height: NonZeroU32::new(height)?,
+        })
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GridSize {
+    pub columns: u16,
+    pub rows: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TerminalDimensions {
+    pub grid: GridSize,
     pub screen: ScreenSize,
     pub cell: CellSize,
-    pub padding: Padding,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Default, Eq, PartialEq)]
-pub struct ScreenSize {
-    pub width: u32,
-    pub height: u32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Default, Eq, PartialEq)]
-pub struct CellSize {
-    pub width: u32,
-    pub height: u32,
-}
-
-#[repr(C)]
-#[derive(Default, Eq, PartialEq)]
-pub struct Padding {
-    pub top: u32,
-    pub bottom: u32,
-    pub right: u32,
-    pub left: u32,
 }
 
 #[repr(C)]

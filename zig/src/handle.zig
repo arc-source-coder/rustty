@@ -6,10 +6,10 @@ const color = terminal.color;
 
 const size = @import("../ghostty/src/renderer/size.zig");
 
-pub const Size = extern struct {
+pub const TerminalDimensions = extern struct {
+    grid: size.GridSize,
     screen: size.ScreenSize,
     cell: size.CellSize,
-    padding: size.Padding,
 };
 
 // --- Callback function pointer types ---
@@ -108,7 +108,6 @@ pub const TerminalHandle = struct {
 
     fn sizeTrampoline(handler_ptr: *terminal.TerminalStream.Handler) ?terminal.size_report.Size {
         const handle = fromEffectsHandler(handler_ptr);
-        if (handle.size.cell.width == 0 or handle.size.cell.height == 0) return null;
 
         return .{
             .rows = handler_ptr.terminal.rows,
@@ -118,14 +117,15 @@ pub const TerminalHandle = struct {
         };
     }
 
-    pub fn init(alloc: Allocator, cols: u16, rows: u16, fg: color.RGB, bg: color.RGB) !*TerminalHandle {
+    pub fn init(alloc: Allocator, dimensions: TerminalDimensions, fg: color.RGB, bg: color.RGB) !*TerminalHandle {
         const handle = try alloc.create(TerminalHandle);
         errdefer alloc.destroy(handle);
 
         var t = try terminal.Terminal.init(alloc, .{
-            .cols = cols,
-            .rows = rows,
+            .cols = dimensions.grid.columns,
+            .rows = dimensions.grid.rows,
             .max_scrollback = 20_000_000,
+            .default_cursor_blink = true,
             .colors = .{
                 .background = color.DynamicRGB.init(bg),
                 .foreground = color.DynamicRGB.init(fg),
@@ -133,7 +133,8 @@ pub const TerminalHandle = struct {
                 .palette = .default,
             },
         });
-        t.modes.set(.cursor_blinking, true);
+        t.width_px = dimensions.screen.width;
+        t.height_px = dimensions.screen.height;
 
         handle.* = .{
             .alloc = alloc,
@@ -146,22 +147,17 @@ pub const TerminalHandle = struct {
             .output_callback = .{},
             .write_input = .{},
 
-            // Rust will set these values after startup
-            .size = .{
-                .screen = .{ .width = 0, .height = 0 },
-                .cell = .{ .width = 0, .height = 0 },
-                .padding = .{ .top = 0, .bottom = 0, .right = 0, .left = 0 },
-            },
+            .size = .{ .screen = dimensions.screen, .cell = dimensions.cell, .padding = .{} },
         };
 
         var handler: terminal.TerminalStream.Handler = .init(&handle.terminal_inst);
-        handler.default_cursor_blink = true;
 
         // Install effects callbacks once. They dispatch through Callbacks,
         // so updating callbacks later takes effect immediately.
         handler.effects = .{
             .write_pty = &writePtyTrampoline,
             .bell = &bellTrampoline,
+            .clipboard_write = null,
             .color_scheme = &colorSchemeTrampoline,
             .device_attributes = &deviceAttributesTrampoline,
             .enquiry = &enquiryTrampoline,

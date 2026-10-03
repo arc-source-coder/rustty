@@ -66,8 +66,8 @@ unsafe impl Sync for Terminal {}
 impl Terminal {
     /// Create a new terminal with the given dimensions and default colors.
     /// Returns `None` if allocation fails.
-    pub fn new(cols: u16, rows: u16, fg: ColorRGB, bg: ColorRGB) -> Option<Self> {
-        let handle = unsafe { ghostty_terminal_new(cols, rows, fg.to_u32(), bg.to_u32()) };
+    pub fn new(dimensions: TerminalDimensions, fg: ColorRGB, bg: ColorRGB) -> Option<Self> {
+        let handle = unsafe { ghostty_terminal_new(dimensions, fg.to_u32(), bg.to_u32()) };
         let h = NonNull::new(handle)?;
         Some(Terminal { handle: h })
     }
@@ -137,25 +137,8 @@ impl Terminal {
     /// Resize the terminal grid.
     /// Locks internally.
     #[inline]
-    pub fn resize(&self, cols: u16, rows: u16) {
-        unsafe { ghostty_terminal_resize(self.handle, cols, rows) };
-    }
-
-    // TODO: Add doc comments for the below 3
-
-    #[inline]
-    pub fn set_screen_dimensions(&self, size: ScreenSize) {
-        unsafe { ghostty_terminal_set_screen_dimensions(self.handle, size) };
-    }
-
-    #[inline]
-    pub fn set_cell_dimensions(&self, size: CellSize) {
-        unsafe { ghostty_terminal_set_cell_dimensions(self.handle, size) };
-    }
-
-    #[inline]
-    pub fn dimensions(&self) -> TerminalDimensions {
-        unsafe { ghostty_terminal_get_render_dimensions(self.handle) }
+    pub fn resize(&self, dimensions: TerminalDimensions) {
+        unsafe { ghostty_terminal_resize(self.handle, dimensions) };
     }
 
     /// Update the persistent render state and return a detached frame accessor.

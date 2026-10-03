@@ -101,9 +101,9 @@ comptime {
     std.debug.assert(@offsetOf(ZigMultiArrayList, "len") == @offsetOf(RowMal, "len"));
     std.debug.assert(@offsetOf(ZigMultiArrayList, "capacity") == @offsetOf(RowMal, "capacity"));
 
-    std.debug.assert(malOffset(RowMal, .cells) == 40);
-    std.debug.assert(malOffset(RowMal, .selection) == 88);
-    std.debug.assert(malOffset(RowMal, .dirty) == 94);
+    std.debug.assert(malOffset(RowMal, .cells) == 48);
+    std.debug.assert(malOffset(RowMal, .selection) == 96);
+    std.debug.assert(malOffset(RowMal, .dirty) == 102);
     std.debug.assert(@sizeOf(?[2]u16) == @sizeOf(OptionalSelection));
     std.debug.assert(@alignOf(?[2]u16) == @alignOf(OptionalSelection));
 

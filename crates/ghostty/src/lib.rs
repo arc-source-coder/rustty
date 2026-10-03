@@ -16,13 +16,13 @@ pub use ffi::{
 };
 pub use terminal::{CallbackHandle, RenderFrame, Terminal, TerminalEvent};
 pub use types::{
-    CellSize, ContentTag, CursorCoordinate, Dirty, MouseMode, Padding, RawCell, ScreenSize,
+    CellSize, ContentTag, CursorCoordinate, Dirty, GridSize, MouseMode, RawCell, ScreenSize,
     ScrollbarInfo, SelectionUpdate, TerminalDimensions, Width,
 };
 pub use zig::{CellView, GraphemeView, RowView, ZigMultiArrayList};
 
 unsafe extern "C" {
-    fn ghostty_terminal_new(cols: u16, rows: u16, fg: u32, bg: u32) -> *mut c_void;
+    fn ghostty_terminal_new(dimensions: TerminalDimensions, fg: u32, bg: u32) -> *mut c_void;
     fn ghostty_terminal_free(terminal: NonNull<c_void>);
     fn ghostty_terminal_lock(terminal: NonNull<c_void>);
     fn ghostty_terminal_unlock(terminal: NonNull<c_void>);
@@ -37,11 +37,7 @@ unsafe extern "C" {
 
     fn ghostty_terminal_feed(terminal: NonNull<c_void>, bytes: *const u8, len: usize);
 
-    fn ghostty_terminal_resize(terminal: NonNull<c_void>, cols: u16, rows: u16) -> c_int;
-
-    fn ghostty_terminal_set_screen_dimensions(terminal: NonNull<c_void>, size: ScreenSize);
-    fn ghostty_terminal_set_cell_dimensions(terminal: NonNull<c_void>, size: CellSize);
-    fn ghostty_terminal_get_render_dimensions(terminal: NonNull<c_void>) -> TerminalDimensions;
+    fn ghostty_terminal_resize(terminal: NonNull<c_void>, dimensions: TerminalDimensions);
 
     fn ghostty_terminal_is_synchronized_output(terminal: NonNull<c_void>) -> bool;
     fn ghostty_terminal_reset_synchronized_output(terminal: NonNull<c_void>);

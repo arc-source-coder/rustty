@@ -172,6 +172,7 @@ fn writeRectRow(
 
     const screen = handle.terminal_inst.screens.active;
     const pin = screen.pages.pin(.{ .viewport = .{ .x = clipped.x, .y = clipped.y + row_offset } }).?;
+    const page = pin.node.page();
 
     for (source) |cell| {
         const id = addStyleIdForPin(pin, cell.style) catch {
@@ -187,7 +188,7 @@ fn writeRectRow(
 
     splitRowBoundary(screen, pin, rac.row, clipped.x);
     splitRowBoundary(screen, pin, rac.row, clipped.x + clipped.width);
-    screen.clearCells(&pin.node.data, rac.row, target);
+    screen.clearCells(page, rac.row, target);
     rac.row.dirty = true;
 
     var source_index: usize = 0;
@@ -218,7 +219,7 @@ fn writeRectRow(
                 target[source_index] = makeWideLeadCell(source_cell.codepoint, style_ids.items()[source_index]);
                 target[source_index + 1] = makeWideTailCell();
                 if (style_ids.items()[source_index] != stylepkg.default_id) {
-                    pin.node.data.styles.use(pin.node.data.memory, style_ids.items()[source_index]);
+                    page.styles.use(page.memory, style_ids.items()[source_index]);
                     rac.row.styled = true;
                 }
                 source_index += 2;
@@ -245,6 +246,7 @@ fn fillContentRow(
     const cols = handle.terminal_inst.cols;
     const screen = handle.terminal_inst.screens.active;
     const pin = screen.pages.pin(.{ .viewport = .{ .x = start_x, .y = row_y } }).?;
+    const page = pin.node.page();
     const rac = pin.rowAndCell();
     const row_cells = pin.cells(.all);
 
@@ -275,7 +277,7 @@ fn fillContentRow(
     const end_x = cursor_x;
     splitRowBoundary(screen, pin, rac.row, start_x);
     splitRowBoundary(screen, pin, rac.row, end_x);
-    screen.clearCells(&pin.node.data, rac.row, row_cells[start_x..end_x]);
+    screen.clearCells(page, rac.row, row_cells[start_x..end_x]);
     rac.row.dirty = true;
 
     cursor_x = start_x;
@@ -299,7 +301,7 @@ fn fillContentRow(
                 row_cells[cursor_x] = makeWideLeadCell(cell.codepoint, style_id);
                 row_cells[cursor_x + 1] = makeWideTailCell();
                 if (style_id != stylepkg.default_id) {
-                    pin.node.data.styles.use(pin.node.data.memory, style_id);
+                    page.styles.use(page.memory, style_id);
                     rac.row.styled = true;
                 }
                 cursor_x += 2;
@@ -330,6 +332,7 @@ fn fillStyleRow(
 
     const screen = handle.terminal_inst.screens.active;
     const pin = screen.pages.pin(.{ .viewport = .{ .x = start_x, .y = row_y } }).?;
+    const page = pin.node.page();
 
     var i: u32 = 0;
     while (i < count) : (i += 1) {
@@ -355,14 +358,14 @@ fn fillStyleRow(
 
         var target = &row_cells[actual];
         if (target.style_id != stylepkg.default_id) {
-            pin.node.data.styles.release(pin.node.data.memory, target.style_id);
+            page.styles.release(page.memory, target.style_id);
         }
         target.style_id = style_ids.items()[i];
         if (style_ids.items()[i] != stylepkg.default_id) rac.row.styled = true;
         rac.row.dirty = true;
     }
 
-    pin.node.data.updateRowStyledFlag(rac.row);
+    page.updateRowStyledFlag(rac.row);
     return count;
 }
 
@@ -462,14 +465,16 @@ fn backgroundIndex(style: stylepkg.Style, cell: pagepkg.Cell, fallback: u4) u4 {
 
 fn addStyleIdForPin(pin: Pin, style: abi.Style) !stylepkg.Id {
     const ghostty_style = ghosttyStyle(style);
-    return pin.node.data.styles.add(pin.node.data.memory, ghostty_style);
+    const page = pin.node.page();
+    return page.styles.add(page.memory, ghostty_style);
 }
 
 fn releaseStyleIdsForPin(pin: Pin, ids: []const stylepkg.Id) void {
     if (ids.len == 0) return;
+    const page = pin.node.page();
     for (ids) |id| {
         if (id == stylepkg.default_id) continue;
-        pin.node.data.styles.release(pin.node.data.memory, id);
+        page.styles.release(page.memory, id);
     }
 }
 
@@ -553,7 +558,7 @@ fn resolveStyleTargetColumn(row_cells: []const pagepkg.Cell, col: usize) usize {
 }
 
 fn splitRowBoundary(screen: *Screen, pin: Pin, row: *Row, x: usize) void {
-    const page = &pin.node.data;
+    const page = pin.node.page();
     page.pauseIntegrityChecks(true);
     defer page.pauseIntegrityChecks(false);
 
@@ -577,9 +582,10 @@ fn splitRowBoundary(screen: *Screen, pin: Pin, row: *Row, x: usize) void {
             if (pin.up(1)) |prev_row| {
                 const prev_rac = prev_row.rowAndCell();
                 const prev_cells = prev_row.cells(.all);
-                const prev_col = prev_row.node.data.size.cols - 1;
+                const prev_page = prev_row.node.page();
+                const prev_col = prev_page.size.cols - 1;
                 if (prev_cells[prev_col].wide == .spacer_head) {
-                    screen.clearCells(&prev_row.node.data, prev_rac.row, prev_cells[prev_col..][0..1]);
+                    screen.clearCells(prev_page, prev_rac.row, prev_cells[prev_col..][0..1]);
                     prev_rac.row.dirty = true;
                 }
             }

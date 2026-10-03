@@ -9,7 +9,7 @@ use font::shaper::Shaper;
 use font::shaper::run_iterator::{RunIterator, RunOptions};
 use font::shared_grid::SharedGrid;
 use font::types::{FontIndex, FontSize, FontStyle, ShapeOptions};
-use ghostty::{CellView, ColorRGB, Terminal};
+use ghostty::{CellSize, CellView, ColorRGB, GridSize, ScreenSize, Terminal, TerminalDimensions};
 use utils::floats::NotNan;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FACE_TYPE_TRUETYPE, DWRITE_FONT_SIMULATIONS_NONE,
@@ -55,8 +55,19 @@ fn jetbrains_mono_grid() -> SharedGrid {
 #[test]
 fn terminal_runs_shape_with_position_independent_hashes() {
     let grid = jetbrains_mono_grid();
-    let terminal =
-        Terminal::new(12, 4, ColorRGB::new(255, 255, 255), ColorRGB::new(0, 0, 0)).unwrap();
+    let terminal = Terminal::new(
+        TerminalDimensions {
+            grid: GridSize {
+                columns: 12,
+                rows: 4,
+            },
+            screen: ScreenSize::new(12, 4).unwrap(),
+            cell: CellSize::new(1, 1).unwrap(),
+        },
+        ColorRGB::new(255, 255, 255),
+        ColorRGB::new(0, 0, 0),
+    )
+    .unwrap();
     terminal.feed(
         concat!(
             "Ae\u{301}B\r\n",         // Baseline: e + combining acute occupies one cell.

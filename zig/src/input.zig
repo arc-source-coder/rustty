@@ -71,7 +71,10 @@ pub export fn ghostty_terminal_encode_mouse(
     handle.lock();
     var encode_opts = mouse_encode.Options.fromTerminal(&handle.terminal_inst, handle.size);
     handle.unlock();
+
     encode_opts.any_button_pressed = button >= 0;
+    // Mouse input is serialized by the IO thread, so deduplication state does
+    // not need the terminal-state mutex after taking the options snapshot.
     encode_opts.last_cell = &handle.mouse_last_cell;
 
     var writer: std.Io.Writer = .fixed(buf.?[0..buf_len]);

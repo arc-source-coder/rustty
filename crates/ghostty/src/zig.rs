@@ -17,9 +17,9 @@ pub const MULTI_ARRAY_LIST_SIZE: usize = 24;
 pub const MULTI_ARRAY_LIST_ALIGN: usize = 8;
 
 /// Prefix sizes for directly-read `std.MultiArrayList(terminal.RenderState.Row)` columns.
-pub const ROW_MAL_CELLS_PREFIX_SIZE: usize = 40;
-pub const ROW_MAL_SELECTION_PREFIX_SIZE: usize = 88;
-pub const ROW_MAL_DIRTY_ROWS_PREFIX_SIZE: usize = 94;
+pub const ROW_MAL_CELLS_PREFIX_SIZE: usize = 48;
+pub const ROW_MAL_SELECTION_PREFIX_SIZE: usize = 96;
+pub const ROW_MAL_DIRTY_ROWS_PREFIX_SIZE: usize = 102;
 
 /// Prefix sizes for directly-read `std.MultiArrayList(terminal.RenderState.Cell)` columns.
 pub const CELL_MAL_RAW_CELLS_PREFIX_SIZE: usize = 0;

@@ -10,8 +10,13 @@ use TerminalEvent::{Bell, TitleChanged};
 const DEFAULT_FG: ColorRGB = ColorRGB::new(0xDD, 0xDD, 0xDD);
 const DEFAULT_BG: ColorRGB = ColorRGB::new(0x1E, 0x1E, 0x2E);
 
-fn terminal(cols: u16, rows: u16) -> Terminal {
-    Terminal::new(cols, rows, DEFAULT_FG, DEFAULT_BG).expect("failed to create terminal")
+fn terminal(columns: u16, rows: u16) -> Terminal {
+    let dimensions = TerminalDimensions {
+        grid: GridSize { columns, rows },
+        screen: ScreenSize::new(u32::from(columns), u32::from(rows)).unwrap(),
+        cell: CellSize::new(1, 1).unwrap(),
+    };
+    Terminal::new(dimensions, DEFAULT_FG, DEFAULT_BG).expect("failed to create terminal")
 }
 
 fn render_frame(terminal: &Terminal) -> RenderFrame {
@@ -161,13 +166,13 @@ fn feed_delivers_events_in_order_and_wakes_once() {
 #[test]
 fn selection_autoscroll_moves_viewport_until_release_and_is_consumed() {
     let terminal = terminal(8, 4);
-    terminal.set_cell_dimensions(CellSize {
-        width: 10,
-        height: 20,
-    });
-    terminal.set_screen_dimensions(ScreenSize {
-        width: 80,
-        height: 80,
+    terminal.resize(TerminalDimensions {
+        grid: GridSize {
+            columns: 8,
+            rows: 4,
+        },
+        screen: ScreenSize::new(80, 80).unwrap(),
+        cell: CellSize::new(10, 20).unwrap(),
     });
 
     terminal.feed(b"00\r\n01\r\n02\r\n03\r\n04\r\n05\r\n06\r\n07\r\n08\r\n09\r\n10");

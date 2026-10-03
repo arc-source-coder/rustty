@@ -138,7 +138,13 @@ const SpriteRasterizer = struct {
             0, 1 => self.metrics.cell_width,
             2, 3 => self.metrics.cell_width * cell_width,
         };
-        const height = self.metrics.cell_height;
+        const height = switch (cp) {
+            @intFromEnum(Sprite.cursor_rect),
+            @intFromEnum(Sprite.cursor_hollow_rect),
+            @intFromEnum(Sprite.cursor_bar),
+            => self.metrics.cursor_height,
+            else => self.metrics.cell_height,
+        };
         const padding_x = width / 4;
         const padding_y = height / 4;
 
@@ -207,7 +213,9 @@ const SpriteRasterizer = struct {
             .width = region_width,
             .height = region_height,
             .offset_x = @as(i32, @intCast(canvas.clip_left)) - @as(i32, @intCast(padding_x)),
-            .offset_y = @as(i32, @intCast(canvas.clip_top)) - @as(i32, @intCast(padding_y)),
+            .offset_y = @as(i32, @intCast(canvas.clip_top)) -
+                @as(i32, @intCast(padding_y)) +
+                @divTrunc(@as(i32, @intCast(self.metrics.cell_height)) - @as(i32, @intCast(height)), 2),
         };
     }
 

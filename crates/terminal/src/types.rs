@@ -1,4 +1,5 @@
 use crossbeam_queue::ArrayQueue;
+use ghostty::TerminalDimensions;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -61,7 +62,7 @@ pub enum IoMsg {
     /// ingress thread that calls into zconpty.
     Input(IoInput),
     /// Resize request. IO thread coalesces (25ms), then signals read thread.
-    Resize { rows: u16, cols: u16 },
+    Resize(TerminalDimensions),
     /// Scroll the viewport. IO thread acquires terminal mutex and applies.
     Scroll(ScrollOp),
     /// Begin/reset the 1-second synchronized output safety timer.

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use ghostty::Terminal;
+use ghostty::{Terminal, TerminalDimensions};
 use zconpty::ConPTY;
 
 use crate::platform::windows::io::alertable_wait;
@@ -76,7 +76,7 @@ struct IoThread {
     renderer_wake: Arc<RendererWake>,
 
     resize_deadline: Option<Instant>,
-    pending_resize: Option<(u16, u16)>,
+    pending_resize: Option<TerminalDimensions>,
     sync_output_deadline: Option<Instant>,
 }
 
@@ -140,8 +140,8 @@ impl IoThread {
                 IoInput::Focus(focused) => self.console_session.send_focus(focused),
                 IoInput::Paste(text) => self.console_session.send_paste(&text),
             },
-            IoMsg::Resize { rows, cols } => {
-                self.pending_resize = Some((rows, cols));
+            IoMsg::Resize(dimensions) => {
+                self.pending_resize = Some(dimensions);
                 self.resize_deadline =
                     Some(resize_deadline_after(self.resize_deadline, Instant::now()));
             }
@@ -182,8 +182,8 @@ impl IoThread {
             && now >= deadline
         {
             self.resize_deadline = None;
-            if let Some((rows, columns)) = self.pending_resize.take() {
-                self.apply_resize(rows, columns);
+            if let Some(dimensions) = self.pending_resize.take() {
+                self.apply_resize(dimensions);
             }
         }
 
@@ -206,9 +206,10 @@ impl IoThread {
         self.renderer_wake.wake();
     }
 
-    fn apply_resize(&self, rows: u16, cols: u16) {
-        self.terminal.resize(cols.max(1), rows.max(1));
-        self.console_session.send_resize(cols.max(1), rows.max(1));
+    fn apply_resize(&self, dimensions: TerminalDimensions) {
+        self.terminal.resize(dimensions);
+        self.console_session
+            .send_resize(dimensions.grid.columns, dimensions.grid.rows);
         self.renderer_wake.wake();
     }
 

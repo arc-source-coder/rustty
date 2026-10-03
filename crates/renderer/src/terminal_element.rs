@@ -66,10 +66,11 @@ impl Element for TerminalElement {
 
             let surface_changed = prev_state != Some(next_surface_state);
 
-            let screen_size = ScreenSize {
-                width: bounds.size.scale(scale_factor).width.0.max(1.0) as u32,
-                height: bounds.size.scale(scale_factor).height.0.max(1.0) as u32,
-            };
+            let screen_size = ScreenSize::new(
+                bounds.size.scale(scale_factor).width.0.max(1.0) as u32,
+                bounds.size.scale(scale_factor).height.0.max(1.0) as u32,
+            )
+            .unwrap();
 
             let external_surface_id = self.terminal_view.update(cx, |view, cx| {
                 view.session.surface_bounds = bounds;

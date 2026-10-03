@@ -129,10 +129,7 @@ impl TerminalView {
 
         let mut event_rx = None;
         let options = Options {
-            cell_size: CellSize {
-                width: grid.metrics.cell_width,
-                height: grid.metrics.cell_height,
-            },
+            cell_size: CellSize::new(grid.metrics.cell_width, grid.metrics.cell_height).unwrap(),
             event_rx: &mut event_rx,
         };
         let session = TerminalSession::new(spawn_config, config, options);
@@ -275,10 +272,7 @@ impl TerminalView {
             }
         };
 
-        let cell_size = CellSize {
-            width: grid.metrics.cell_width,
-            height: grid.metrics.cell_height,
-        };
+        let cell_size = CellSize::new(grid.metrics.cell_width, grid.metrics.cell_height).unwrap();
         self.thread.set_font_grid(grid);
         self.font_size = next_size;
         Some(cell_size)

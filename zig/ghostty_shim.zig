@@ -21,16 +21,16 @@ const BellCallback = handle_mod.BellCallback;
 const OutputCallback = handle_mod.OutputCallback;
 const TitleCallback = handle_mod.TitleCallback;
 const TerminalHandle = handle_mod.TerminalHandle;
+const TerminalDimensions = handle_mod.TerminalDimensions;
 const WriteInputCallback = handle_mod.WriteInputCallback;
 
 const terminal = @import("ghostty/src/terminal/main.zig");
-const size = @import("ghostty/src/renderer/size.zig");
 
-pub export fn ghostty_terminal_new(cols: u16, rows: u16, fg: u32, bg: u32) callconv(.c) ?*anyopaque {
+pub export fn ghostty_terminal_new(dimensions: TerminalDimensions, fg: u32, bg: u32) callconv(.c) ?*anyopaque {
     const alloc = std.heap.smp_allocator;
     const foreground: terminal.color.RGB = @bitCast(@as(u24, @truncate(fg)));
     const background: terminal.color.RGB = @bitCast(@as(u24, @truncate(bg)));
-    const handle = TerminalHandle.init(alloc, cols, rows, foreground, background) catch return null;
+    const handle = TerminalHandle.init(alloc, dimensions, foreground, background) catch return null;
 
     return @ptrCast(handle);
 }
@@ -106,60 +106,17 @@ pub export fn ghostty_terminal_feed(
     handle.outputTrampoline();
 }
 
-pub export fn ghostty_terminal_resize(
-    ptr: *anyopaque,
-    cols: u16,
-    rows: u16,
-) callconv(.c) c_int {
+pub export fn ghostty_terminal_resize(ptr: *anyopaque, dimensions: TerminalDimensions) callconv(.c) void {
     const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
     handle.lock();
     defer handle.unlock();
-    handle.terminal_inst.resize(handle.alloc, cols, rows) catch return 2;
-
-    const cell_w = handle.size.cell.width;
-    const cell_h = handle.size.cell.height;
-    // Update pixel dimensions for Kitty graphics protocol.
-    // We read cell dimensions from handle since they're stored separately.
-    if (cell_w > 0 and cell_h > 0) {
-        handle.terminal_inst.width_px = @as(u32, cols) * cell_w;
-        handle.terminal_inst.height_px = @as(u32, rows) * cell_h;
-    }
-
-    return 0;
-}
-
-// TODO: Add doc comments for the below
-
-pub export fn ghostty_terminal_set_screen_dimensions(
-    ptr: *anyopaque,
-    dimensions: size.ScreenSize,
-) callconv(.c) void {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-
-    handle.size.screen = dimensions;
-
-    // Update pixel dimensions for Kitty graphics protocol.
-    handle.terminal_inst.width_px = handle.size.screen.width;
-    handle.terminal_inst.height_px = handle.size.screen.height;
-}
-
-pub export fn ghostty_terminal_set_cell_dimensions(
-    ptr: *anyopaque,
-    dimensions: size.CellSize,
-) callconv(.c) void {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-
-    // Store cell dimensions for resize calculations and CSI reports
-    handle.size.cell = dimensions;
-}
-
-pub export fn ghostty_terminal_get_render_dimensions(
-    ptr: *anyopaque,
-) callconv(.c) handle_mod.Size {
-    const handle: *TerminalHandle = @ptrCast(@alignCast(ptr));
-    return .{
-        .cell = handle.size.cell,
-        .screen = handle.size.screen,
-        .padding = handle.size.padding,
-    };
+    handle.stream.handler.resize(.{
+        .cols = dimensions.grid.columns,
+        .rows = dimensions.grid.rows,
+        .cell_size_px = .{
+            .width = dimensions.cell.width,
+            .height = dimensions.cell.height,
+        },
+    }) catch |err| @panic(@errorName(err));
+    handle.size = .{ .screen = dimensions.screen, .cell = dimensions.cell, .padding = .{} };
 }
