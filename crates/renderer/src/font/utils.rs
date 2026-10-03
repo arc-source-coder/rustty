@@ -33,10 +33,5 @@ pub fn get_gamma_correction_ratios(gamma: f32) -> [f32; 4] {
     let index = ((gamma * 10.0 + 0.5) as isize).clamp(10, 22) as usize - 10;
     let ratios = GAMMA_CORRECTION_RATIOS[index];
 
-    [
-        ratios[0] * NORM_XZ,
-        ratios[1] * NORM_YW,
-        ratios[2] * NORM_XZ,
-        ratios[3] * NORM_YW,
-    ]
+    [ratios[0] * NORM_XZ, ratios[1] * NORM_YW, ratios[2] * NORM_XZ, ratios[3] * NORM_YW]
 }

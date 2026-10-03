@@ -35,12 +35,7 @@ pub fn spawn_suspended(
     io_notify: Arc<IoThreadNotify>,
     renderer_wake: Arc<RendererWake>,
 ) -> io::Result<PlatformThread> {
-    let ctx = Box::new(IoThreadContext {
-        console_session,
-        terminal,
-        io_notify,
-        renderer_wake,
-    });
+    let ctx = Box::new(IoThreadContext { console_session, terminal, io_notify, renderer_wake });
     let ctx_ptr = Box::into_raw(ctx).cast::<c_void>();
     match PlatformThread::spawn_suspended(io_thread_entry, ctx_ptr) {
         Ok(thread) => Ok(thread),
@@ -58,12 +53,8 @@ unsafe extern "system" fn io_thread_entry(context: *mut c_void) -> u32 {
 
     // SAFETY: context comes from Box::into_raw in spawn_suspended.
     let ctx = unsafe { Box::from_raw(context.cast::<IoThreadContext>()) };
-    let mut thread = IoThread::new(
-        ctx.console_session,
-        ctx.terminal,
-        ctx.io_notify,
-        ctx.renderer_wake,
-    );
+    let mut thread =
+        IoThread::new(ctx.console_session, ctx.terminal, ctx.io_notify, ctx.renderer_wake);
     thread.run();
     0
 }
@@ -209,8 +200,7 @@ impl IoThread {
 
     fn apply_resize(&self, dimensions: TerminalDimensions) {
         self.terminal.resize(dimensions);
-        self.console_session
-            .send_resize(dimensions.grid.columns, dimensions.grid.rows);
+        self.console_session.send_resize(dimensions.grid.columns, dimensions.grid.rows);
         self.renderer_wake.wake();
     }
 

@@ -34,11 +34,7 @@ impl DirectWrite {
         let fonts: IDWriteFontSet2 = unsafe { factory.GetSystemFontSet(false)? };
         let fallback: IDWriteFontFallback1 = unsafe { factory.GetSystemFontFallback()? }.cast()?;
 
-        Ok(Self {
-            fonts,
-            fallback,
-            locale: locale_utf16,
-        })
+        Ok(Self { fonts, fallback, locale: locale_utf16 })
     }
 
     pub fn discover(&self, font: &FontDescriptor) -> Result<Option<FontEntry>, FontError> {
@@ -92,26 +88,13 @@ impl DirectWrite {
         let mut text: [u16; 2] = [0; 2];
         let text_len = codepoint.encode_utf16(&mut text).len() as u32;
 
-        let analysis: IDWriteTextAnalysisSource = FallbackAnalysisSource {
-            locale: self.locale,
-            text,
-            text_len,
-        }
-        .into();
+        let analysis: IDWriteTextAnalysisSource =
+            FallbackAnalysisSource { locale: self.locale, text, text_len }.into();
 
         const DEFAULT_AXES: [DWRITE_FONT_AXIS_VALUE; 3] = [
-            DWRITE_FONT_AXIS_VALUE {
-                axisTag: DWRITE_FONT_AXIS_TAG_WEIGHT,
-                value: 400.0,
-            },
-            DWRITE_FONT_AXIS_VALUE {
-                axisTag: DWRITE_FONT_AXIS_TAG_ITALIC,
-                value: 0.0,
-            },
-            DWRITE_FONT_AXIS_VALUE {
-                axisTag: DWRITE_FONT_AXIS_TAG_SLANT,
-                value: 0.0,
-            },
+            DWRITE_FONT_AXIS_VALUE { axisTag: DWRITE_FONT_AXIS_TAG_WEIGHT, value: 400.0 },
+            DWRITE_FONT_AXIS_VALUE { axisTag: DWRITE_FONT_AXIS_TAG_ITALIC, value: 0.0 },
+            DWRITE_FONT_AXIS_VALUE { axisTag: DWRITE_FONT_AXIS_TAG_SLANT, value: 0.0 },
         ];
 
         let mut mapped_face = None;
@@ -138,10 +121,7 @@ impl DirectWrite {
         // Match the Windows Terminal assertion
         debug_assert_eq!(dwrite_scale, 1.0);
 
-        Ok(mapped_face.map(|face| FontEntry {
-            face: Face::new(face),
-            fallback: true,
-        }))
+        Ok(mapped_face.map(|face| FontEntry { face: Face::new(face), fallback: true }))
     }
 }
 

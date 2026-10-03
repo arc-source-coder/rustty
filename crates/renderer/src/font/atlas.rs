@@ -180,10 +180,7 @@ impl AtlasResources {
             MipLevels: 1,
             ArraySize: 1,
             Format: dxgi_format,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32 | D3D11_BIND_RENDER_TARGET.0 as u32,
             CPUAccessFlags: 0,
@@ -215,11 +212,7 @@ impl AtlasResources {
         let bitmap: ID2D1Bitmap1 =
             unsafe { ctx.CreateBitmapFromDxgiSurface(&surface, Some(&raw const properties))? };
 
-        Ok(AtlasResources {
-            bitmap,
-            texture,
-            srv: view,
-        })
+        Ok(AtlasResources { bitmap, texture, srv: view })
     }
 
     #[inline]

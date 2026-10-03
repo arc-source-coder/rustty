@@ -26,19 +26,11 @@ pub fn windows_symbol_font() -> String {
 }
 
 pub fn title_bar_height(window: &Window) -> Pixels {
-    if window.is_maximized() {
-        TITLE_BAR_HEIGHT_MAXIMIZED
-    } else {
-        TITLE_BAR_HEIGHT_WINDOWED
-    }
+    if window.is_maximized() { TITLE_BAR_HEIGHT_MAXIMIZED } else { TITLE_BAR_HEIGHT_WINDOWED }
 }
 
 pub fn title_bar_options() -> TitlebarOptions {
-    TitlebarOptions {
-        title: None,
-        appears_transparent: true,
-        traffic_light_position: None,
-    }
+    TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: None }
 }
 
 #[derive(IntoElement)]
@@ -49,10 +41,7 @@ pub struct WindowsWindowControls {
 
 impl WindowsWindowControls {
     pub fn new(button_height: Pixels) -> Self {
-        Self {
-            button_height,
-            icon_font: windows_symbol_font(),
-        }
+        Self { button_height, icon_font: windows_symbol_font() }
     }
 }
 

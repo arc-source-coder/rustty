@@ -94,13 +94,10 @@ impl Renderer {
         ui_tx: async_channel::Sender<RendererUiUpdate>,
         focused: bool,
     ) -> Result<Self> {
-        let mut backend = Backend::new(BackendOptions {
-            background_opacity: config.background_opacity,
-        })?;
+        let mut backend =
+            Backend::new(BackendOptions { background_opacity: config.background_opacity })?;
 
-        let shaper = Shaper::new(ShapeOptions {
-            features: config.features.as_slice(),
-        })?;
+        let shaper = Shaper::new(ShapeOptions { features: config.features.as_slice() })?;
         let rasterizer = Rasterizer::new(backend.gpu_context(), &grid)?;
         backend.set_text_rendering_params(rasterizer.text_rendering_params());
 
@@ -113,10 +110,7 @@ impl Renderer {
             ui_tx,
         };
 
-        backend.set_cell_size(
-            state.metrics.cell_width as f32,
-            state.metrics.cell_height as f32,
-        );
+        backend.set_cell_size(state.metrics.cell_width as f32, state.metrics.cell_height as f32);
 
         Ok(Self {
             backend,
@@ -139,8 +133,7 @@ impl Renderer {
 
     pub fn set_font_grid(&mut self, grid: Arc<SharedGrid>) -> Result<()> {
         let rasterizer = Rasterizer::new(self.backend.gpu_context(), &grid)?;
-        self.backend
-            .set_text_rendering_params(rasterizer.text_rendering_params());
+        self.backend.set_text_rendering_params(rasterizer.text_rendering_params());
 
         self.state.metrics = grid.metrics.clone();
         self.grid = grid;
@@ -339,14 +332,9 @@ impl Renderer {
             (u32::from(x) * metrics.cell_width) as i16,
             (u32::from(viewport.y) * metrics.cell_height) as i16,
         ];
-        let cell_size = [
-            metrics.cell_width as u16 * u16::from(grid_width),
-            metrics.cell_height as u16,
-        ];
-        let color = colors
-            .cursor_color()
-            .unwrap_or(colors.foreground)
-            .with_alpha(255);
+        let cell_size =
+            [metrics.cell_width as u16 * u16::from(grid_width), metrics.cell_height as u16];
+        let color = colors.cursor_color().unwrap_or(colors.foreground).with_alpha(255);
 
         if style == CursorVisualStyle::Block {
             let text_rect = [
@@ -685,15 +673,12 @@ impl Renderer {
             self.contents.fg_rows.lists.as_slice(),
             self.contents.fg_count as u32,
         )?;
-        self.backend.sync_background(
-            self.contents.bg_cells.as_slice(),
-            self.contents.bg_generation,
-        )?;
+        self.backend
+            .sync_background(self.contents.bg_cells.as_slice(), self.contents.bg_generation)?;
 
         // `self.rasterizer.atlases()` is a workaround since Direct2D needs to own its atlas.
         // Ownership of the atlases should move into the backend when replacing D2D.
-        self.backend
-            .draw(self.rasterizer.atlases(), self.contents.fg_count);
+        self.backend.draw(self.rasterizer.atlases(), self.contents.fg_count);
 
         Ok(self.backend.present(self.contents.damage.rect())?)
     }
@@ -738,21 +723,16 @@ impl Rasterizer {
             Entry::Vacant(entry) => {
                 let font_index = key.font_index();
                 let glyph_index = key.glyph_index();
-                let options = RenderOptions {
-                    metrics,
-                    grid_width: key.grid_width(),
-                };
+                let options = RenderOptions { metrics, grid_width: key.grid_width() };
 
                 let result = match font_index.special() {
                     Some(SpecialFont::Sprite) => {
-                        let bitmap = self
-                            .sprite_rasterizer
-                            .rasterize(glyph_index, options.grid_width)?;
+                        let bitmap =
+                            self.sprite_rasterizer.rasterize(glyph_index, options.grid_width)?;
                         self.font_backend.upload_sprite(&bitmap)?
                     }
                     None => grid.with_face(font_index, |face| {
-                        self.font_backend
-                            .rasterize_and_upload(glyph_index, face, options)
+                        self.font_backend.rasterize_and_upload(glyph_index, face, options)
                     })??,
                 };
 
@@ -888,10 +868,7 @@ impl Contents {
         }
 
         let rows = self.size.rows as usize;
-        for instance in self.fg_rows.lists[0]
-            .iter()
-            .chain(self.fg_rows.lists[rows + 1].iter())
-        {
+        for instance in self.fg_rows.lists[0].iter().chain(self.fg_rows.lists[rows + 1].iter()) {
             self.damage.include(instance);
         }
 

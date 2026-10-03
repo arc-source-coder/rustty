@@ -23,12 +23,7 @@ impl TextRenderingParams {
         let contrast_factor =
             (3.0 - 4.0 * (color[0] * 0.30 + color[1] * 0.59 + color[2] * 0.11)).clamp(0.0, 1.0);
 
-        [
-            self.grayscale_enhanced_contrast * contrast_factor,
-            -p,
-            p - q,
-            1.0 + q,
-        ]
+        [self.grayscale_enhanced_contrast * contrast_factor, -p, p - q, 1.0 + q]
     }
 }
 

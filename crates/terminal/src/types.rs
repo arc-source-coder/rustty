@@ -160,9 +160,7 @@ pub struct RendererWake {
 
 impl RendererWake {
     pub fn new() -> Self {
-        Self {
-            sender: Mutex::new(None),
-        }
+        Self { sender: Mutex::new(None) }
     }
 
     #[inline]

@@ -11,12 +11,7 @@ const DEFAULT_ACCENT_COLOR: u32 = 0x005FB8FF;
 
 actions!(
     close_prompt,
-    [
-        ActivatePromptButton,
-        DismissPrompt,
-        FocusNextPromptButton,
-        FocusPreviousPromptButton,
-    ]
+    [ActivatePromptButton, DismissPrompt, FocusNextPromptButton, FocusPreviousPromptButton,]
 );
 
 /// Register the Fluent-style close prompt renderer as the global prompt builder.
@@ -29,11 +24,7 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("left", FocusPreviousPromptButton, Some(PROMPT_KEY_CONTEXT)),
         KeyBinding::new("right", FocusNextPromptButton, Some(PROMPT_KEY_CONTEXT)),
         KeyBinding::new("tab", FocusNextPromptButton, Some(PROMPT_KEY_CONTEXT)),
-        KeyBinding::new(
-            "shift-tab",
-            FocusPreviousPromptButton,
-            Some(PROMPT_KEY_CONTEXT),
-        ),
+        KeyBinding::new("shift-tab", FocusPreviousPromptButton, Some(PROMPT_KEY_CONTEXT)),
     ]);
 }
 
@@ -53,10 +44,7 @@ fn render_prompt(
         let button_focus_handles = (0..actions.len())
             .map(|index| cx.focus_handle().tab_index(index as isize).tab_stop(true))
             .collect::<Vec<_>>();
-        let focus = button_focus_handles
-            .first()
-            .cloned()
-            .unwrap_or_else(|| cx.focus_handle());
+        let focus = button_focus_handles.first().cloned().unwrap_or_else(|| cx.focus_handle());
 
         ClosePromptRenderer {
             message: message.to_string(),
@@ -127,10 +115,8 @@ struct PromptPalette {
 
 impl PromptPalette {
     fn for_window(window: &Window) -> Self {
-        let is_dark = matches!(
-            window.appearance(),
-            WindowAppearance::Dark | WindowAppearance::VibrantDark
-        );
+        let is_dark =
+            matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
 
         if is_dark {
             Self {
@@ -284,11 +270,8 @@ impl Render for ClosePromptRenderer {
                     .justify_center()
                     .gap(px(10.))
                     .children(
-                        self.actions
-                            .iter()
-                            .zip(self.button_focus_handles.iter())
-                            .enumerate()
-                            .map(|(ix, (action, focus_handle))| {
+                        self.actions.iter().zip(self.button_focus_handles.iter()).enumerate().map(
+                            |(ix, (action, focus_handle))| {
                                 let is_primary = ix == 0;
                                 let focus_handle = focus_handle.clone();
                                 let label = action.label().clone();
@@ -385,7 +368,8 @@ impl Render for ClosePromptRenderer {
                                             this.respond(ix, cx);
                                         },
                                     ))
-                            }),
+                            },
+                        ),
                     ),
             );
 

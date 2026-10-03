@@ -101,9 +101,7 @@ fn find_windows_sdk_binary(binary: &str) -> Option<std::path::PathBuf> {
         .filter_map(|entry| entry.file_name().into_string().ok())
         .collect();
     versions.sort_by_key(|s| {
-        s.split('.')
-            .filter_map(|part| part.parse::<u32>().ok())
-            .collect::<Vec<_>>()
+        s.split('.').filter_map(|part| part.parse::<u32>().ok()).collect::<Vec<_>>()
     });
 
     versions
@@ -147,10 +145,7 @@ fn compile_shader(
         .status()
         .unwrap_or_else(|err| panic!("failed to compile {module} shader with fxc.exe: {err}"));
 
-    assert!(
-        status.success(),
-        "fxc.exe failed compiling {module} shader entry {entry_point}"
-    );
+    assert!(status.success(), "fxc.exe failed compiling {module} shader entry {entry_point}");
 
     let mut rust_bindings = OpenOptions::new()
         .create(true)

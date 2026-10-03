@@ -53,34 +53,24 @@ impl Global for Theme {}
 
 impl Theme {
     pub fn light() -> Self {
-        Self {
-            colors: ThemeColors::light(),
-            is_dark: false,
-        }
+        Self { colors: ThemeColors::light(), is_dark: false }
     }
 
     pub fn dark() -> Self {
-        Self {
-            colors: ThemeColors::dark(),
-            is_dark: true,
-        }
+        Self { colors: ThemeColors::dark(), is_dark: true }
     }
 
     /// Sync the theme global to the current window appearance.
     pub fn sync_system_appearance(window: &mut Window, cx: &mut App) {
-        let is_dark = matches!(
-            window.appearance(),
-            WindowAppearance::Dark | WindowAppearance::VibrantDark
-        );
+        let is_dark =
+            matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
         let theme = if is_dark { Self::dark() } else { Self::light() };
         cx.set_global(theme);
     }
 
     /// Returns the current global theme, falling back to light if uninitialised.
     pub fn get(cx: &App) -> Theme {
-        cx.try_global::<Theme>()
-            .copied()
-            .unwrap_or_else(Self::light)
+        cx.try_global::<Theme>().copied().unwrap_or_else(Self::light)
     }
 }
 

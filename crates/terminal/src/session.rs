@@ -269,8 +269,7 @@ impl TerminalSession {
             self.terminal.scroll_to_bottom();
         }
 
-        self.io_notify
-            .send_lossless(IoMsg::Input(IoInput::Key(event)));
+        self.io_notify.send_lossless(IoMsg::Input(IoInput::Key(event)));
 
         if selection_changed || viewport_changed {
             self.renderer_wake.wake();
@@ -280,8 +279,7 @@ impl TerminalSession {
     #[inline]
     pub fn send_modifier_change(&self, event: &ModifiersChangedEvent) {
         if let Some(event) = event.to_key_event() {
-            self.io_notify
-                .send_lossless(IoMsg::Input(IoInput::Key(event)));
+            self.io_notify.send_lossless(IoMsg::Input(IoInput::Key(event)));
         }
     }
 
@@ -297,8 +295,7 @@ impl TerminalSession {
             self.terminal.scroll_to_bottom();
         }
 
-        self.io_notify
-            .send_lossless(IoMsg::Input(IoInput::Text(text.as_bytes().to_vec())));
+        self.io_notify.send_lossless(IoMsg::Input(IoInput::Text(text.as_bytes().to_vec())));
 
         if selection_changed || viewport_changed {
             self.renderer_wake.wake();
@@ -313,8 +310,7 @@ impl TerminalSession {
             self.terminal.scroll_to_bottom();
         }
 
-        self.io_notify
-            .send_lossless(IoMsg::Input(IoInput::Paste(text.as_bytes().to_vec())));
+        self.io_notify.send_lossless(IoMsg::Input(IoInput::Paste(text.as_bytes().to_vec())));
 
         if selection_changed || viewport_changed {
             self.renderer_wake.wake();
@@ -323,8 +319,7 @@ impl TerminalSession {
 
     #[inline]
     pub fn send_focus_change(&self, focused: bool) {
-        self.io_notify
-            .send_lossless(IoMsg::Input(IoInput::Focus(focused)));
+        self.io_notify.send_lossless(IoMsg::Input(IoInput::Focus(focused)));
     }
 
     /// Copy the current selection and clear it.
@@ -341,9 +336,7 @@ impl TerminalSession {
     /// Scroll the viewport by delta rows. Negative = up (towards history).
     #[inline]
     pub fn scroll_viewport(&self, delta: i32) {
-        let _ = self
-            .io_notify
-            .try_send(IoMsg::Scroll(ScrollOp::Delta(delta)));
+        let _ = self.io_notify.try_send(IoMsg::Scroll(ScrollOp::Delta(delta)));
     }
 
     /// Scroll to the top of scrollback.
@@ -391,8 +384,7 @@ impl TerminalSession {
 
         // Finish the gesture before routing; local release preserves multi-click history.
         if button == MouseButton::Left && action == MouseAction::Release {
-            self.terminal
-                .send_gesture_release(position.x_px, position.y_px);
+            self.terminal.send_gesture_release(position.x_px, position.y_px);
         }
 
         if mode.is_mouse_reporting && (!modifiers.shift || mode.is_mouse_shift_capture) {
@@ -402,14 +394,8 @@ impl TerminalSession {
                 self.renderer_wake.wake();
             }
 
-            let event = MouseEvent {
-                action,
-                button,
-                modifiers: modifiers.mods(),
-                position,
-            };
-            self.io_notify
-                .send_lossless(IoMsg::Input(IoInput::Mouse(event)));
+            let event = MouseEvent { action, button, modifiers: modifiers.mods(), position };
+            self.io_notify.send_lossless(IoMsg::Input(IoInput::Mouse(event)));
             return AppAction::Autoscroll(false);
         }
 
@@ -464,15 +450,13 @@ impl TerminalSession {
                 modifiers: event.modifiers.mods(),
                 position,
             };
-            self.io_notify
-                .send_lossless(IoMsg::Input(IoInput::Mouse(event)));
+            self.io_notify.send_lossless(IoMsg::Input(IoInput::Mouse(event)));
             return None;
         }
 
         if button == MouseButton::Left {
             let update =
-                self.terminal
-                    .send_gesture_drag(position.x_px, position.y_px, event.modifiers.alt);
+                self.terminal.send_gesture_drag(position.x_px, position.y_px, event.modifiers.alt);
             if update.needs_redraw {
                 self.renderer_wake.wake();
             }
@@ -490,8 +474,7 @@ impl TerminalSession {
     ) -> bool {
         let position = self.mouse_position(position, scale_factor);
         let update =
-            self.terminal
-                .send_gesture_autoscroll_tick(position.x_px, position.y_px, modifiers.alt);
+            self.terminal.send_gesture_autoscroll_tick(position.x_px, position.y_px, modifiers.alt);
         if update.needs_redraw {
             self.renderer_wake.wake();
         }
@@ -505,10 +488,7 @@ impl TerminalSession {
         let x_px = position.x.as_f32() - f32::from(self.surface_bounds.origin.x);
         let y_px = position.y.as_f32() - f32::from(self.surface_bounds.origin.y);
 
-        MousePosition {
-            x_px: x_px * scale_factor,
-            y_px: y_px * scale_factor,
-        }
+        MousePosition { x_px: x_px * scale_factor, y_px: y_px * scale_factor }
     }
 
     pub fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, scale: f32) -> SessionEffect {

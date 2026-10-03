@@ -19,10 +19,8 @@ fn main() {
 
     let zig_target = format!("{zig_arch}-windows-{zig_env}");
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("unexpected crate layout");
+    let workspace_root =
+        manifest_dir.parent().and_then(|p| p.parent()).expect("unexpected crate layout");
     let conpty_paths: Vec<PathBuf> = vec![
         workspace_root.join("vendor/zconpty/src"),
         workspace_root.join("vendor/zconpty/build.zig"),

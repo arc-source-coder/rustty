@@ -189,10 +189,6 @@ impl FaceMetrics {
     /// Returns the authored cap height or estimates it as 75% of the ascent.
     #[inline]
     pub fn cap_height(&self) -> f64 {
-        if self.cap_height > 0.0 {
-            self.cap_height
-        } else {
-            0.75 * self.ascent
-        }
+        if self.cap_height > 0.0 { self.cap_height } else { 0.75 * self.ascent }
     }
 }

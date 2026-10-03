@@ -112,11 +112,8 @@ impl TerminalView {
 
         let font_config = FontConfig::from(&config);
         let dpi = (window.scale_factor() * 96.0) as u16;
-        let font_size = FontSize {
-            points: NotNan::new(config.font_size).unwrap(),
-            x_dpi: dpi,
-            y_dpi: dpi,
-        };
+        let font_size =
+            FontSize { points: NotNan::new(config.font_size).unwrap(), x_dpi: dpi, y_dpi: dpi };
 
         if !cx.has_global::<GlobalGridSet>() {
             let grid_set = SharedGridSet::new().expect("failed to create initialize SharedGridSet");
@@ -147,9 +144,7 @@ impl TerminalView {
                         }
                         TerminalEvent::ClipboardWrite(write) => {
                             let item = match write {
-                                ClipboardWrite::Clear => ClipboardItem {
-                                    entries: Vec::new(),
-                                },
+                                ClipboardWrite::Clear => ClipboardItem { entries: Vec::new() },
                                 ClipboardWrite::Text(text) => ClipboardItem::new_string(text),
                             };
                             cx.write_to_clipboard(item);
@@ -189,8 +184,7 @@ impl TerminalView {
         .expect("Failed to start terminal renderer thread");
 
         let swap_chain = swap_chain.expect("missing renderer swapchain");
-        host.set_swap_chain(window, swap_chain)
-            .expect("Failed to set renderer swapchain");
+        host.set_swap_chain(window, swap_chain).expect("Failed to set renderer swapchain");
 
         // Courier
         session.bind_renderer_sender(thread.waker());
@@ -199,9 +193,9 @@ impl TerminalView {
             while let Ok(update) = ui_rx.recv().await {
                 this.update(cx, |this, cx| {
                     match update {
-                        RendererUiUpdate::Scrollbar(info) => this
-                            .scrollbar
-                            .update(cx, |state, _cx| state.sync_snapshot(info)),
+                        RendererUiUpdate::Scrollbar(info) => {
+                            this.scrollbar.update(cx, |state, _cx| state.sync_snapshot(info))
+                        }
                     }
                     cx.notify();
                 })?;
@@ -258,11 +252,7 @@ impl TerminalView {
 
     pub(crate) fn update_font(&mut self, scale: f32, cx: &mut Context<Self>) -> Option<CellSize> {
         let dpi = (scale * 96.0) as u16;
-        let next_size = FontSize {
-            points: self.requested_font_points,
-            x_dpi: dpi,
-            y_dpi: dpi,
-        };
+        let next_size = FontSize { points: self.requested_font_points, x_dpi: dpi, y_dpi: dpi };
 
         if next_size == self.font_size {
             return None;
@@ -301,9 +291,7 @@ impl TerminalView {
 
         self.autoscroll_task = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(15))
-                    .await;
+                cx.background_executor().timer(Duration::from_millis(15)).await;
                 let active = this.update_in(cx, |view, window, _cx| {
                     let active = view.session.selection_autoscroll_tick(
                         window.mouse_position(),
@@ -418,10 +406,7 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        Some(UTF16Selection {
-            range: 0..0,
-            reversed: false,
-        })
+        Some(UTF16Selection { range: 0..0, reversed: false })
     }
 
     fn marked_text_range(
@@ -563,18 +548,14 @@ impl Render for TerminalView {
                 }
             }))
             .on_scroll_wheel(cx.listener(|this, event, window, cx| {
-                let effect = this
-                    .session
-                    .handle_scroll_wheel(event, window.scale_factor());
+                let effect = this.session.handle_scroll_wheel(event, window.scale_factor());
                 if let SessionEffect::ViewportScrolled = effect {
                     this.scrollbar.update(cx, |state, cx| {
                         state.on_scroll(window, cx);
                     });
                 }
             }))
-            .child(TerminalElement {
-                terminal_view: cx.entity(),
-            })
+            .child(TerminalElement { terminal_view: cx.entity() })
             .child(self.scrollbar.clone())
     }
 }

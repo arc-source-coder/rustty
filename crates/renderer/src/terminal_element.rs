@@ -84,10 +84,7 @@ impl Element for TerminalElement {
                 host.id
             });
 
-            let layout = LayoutState {
-                hitbox,
-                external_surface_id,
-            };
+            let layout = LayoutState { hitbox, external_surface_id };
             (layout, next_surface_state)
         })
     }

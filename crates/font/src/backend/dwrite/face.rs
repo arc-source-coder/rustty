@@ -29,11 +29,7 @@ pub struct Face {
 
 impl Face {
     pub fn new(face: IDWriteFontFace5) -> Self {
-        Self {
-            size: FontSize::default(),
-            face,
-            hb_font: None,
-        }
+        Self { size: FontSize::default(), face, hb_font: None }
     }
 
     /// Initialize the HarfBuzz font and size once. Later calls leave both

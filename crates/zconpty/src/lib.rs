@@ -307,11 +307,7 @@ pub struct StartError {
 
 impl Display for StartError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "failed to start ConPTY console session: HRESULT=0x{:08X}",
-            self.hresult
-        )
+        write!(f, "failed to start ConPTY console session: HRESULT=0x{:08X}", self.hresult)
     }
 }
 
@@ -343,10 +339,7 @@ mod tests {
         assert_eq!(W3cCode::parse("enter"), W3cCode::from_bytes(b"enter"));
         assert_eq!(W3cCode::parse("enter"), W3cCode::parse("return")); // aliases
         assert_eq!(W3cCode::parse("escape"), W3cCode::from_bytes(b"escape"));
-        assert_eq!(
-            W3cCode::parse("backspace"),
-            W3cCode::from_bytes(b"backspace")
-        );
+        assert_eq!(W3cCode::parse("backspace"), W3cCode::from_bytes(b"backspace"));
         assert_eq!(W3cCode::parse("tab"), W3cCode::from_bytes(b"tab"));
         assert_eq!(W3cCode::parse("left"), W3cCode::from_bytes(b"arrow_left"));
         assert_eq!(W3cCode::parse("f1"), W3cCode::from_bytes(b"f1"));

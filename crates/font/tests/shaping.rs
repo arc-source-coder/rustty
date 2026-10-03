@@ -36,15 +36,9 @@ fn jetbrains_mono_grid() -> SharedGrid {
         )
     }
     .unwrap();
-    let mut collection = Collection::new(FontSize {
-        points: NotNan::new(12.0).unwrap(),
-        x_dpi: 96,
-        y_dpi: 96,
-    });
-    let entry = FontEntry {
-        face: Face::new(face.cast().unwrap()),
-        fallback: false,
-    };
+    let mut collection =
+        Collection::new(FontSize { points: NotNan::new(12.0).unwrap(), x_dpi: 96, y_dpi: 96 });
+    let entry = FontEntry { face: Face::new(face.cast().unwrap()), fallback: false };
     collection.add(entry, FontStyle::Regular).unwrap();
     SharedGrid::new(CodepointResolver {
         collection,
@@ -59,10 +53,7 @@ fn terminal_runs_shape_with_position_independent_hashes() {
     let grid = jetbrains_mono_grid();
     let terminal = Terminal::new(
         TerminalDimensions {
-            grid: GridSize {
-                columns: 12,
-                rows: 4,
-            },
+            grid: GridSize { columns: 12, rows: 4 },
             screen: ScreenSize::new(12, 4).unwrap(),
             cell: CellSize::new(1, 1).unwrap(),
         },
@@ -80,10 +71,7 @@ fn terminal_runs_shape_with_position_independent_hashes() {
         .as_bytes(),
     );
     let mut render_state = RenderState::new().unwrap();
-    let frame = terminal
-        .with_lock(|t| t.begin_update(&mut render_state))
-        .unwrap()
-        .finish();
+    let frame = terminal.with_lock(|t| t.begin_update(&mut render_state)).unwrap().finish();
     let rows = frame.render_rows();
     let mut shaper = Shaper::new(ShapeOptions { features: &[] }).unwrap();
 
@@ -99,10 +87,7 @@ fn terminal_runs_shape_with_position_independent_hashes() {
             let width = glyphs.len() as u16;
             let run = runs.next(&mut shaper).unwrap().expect("missing run");
             assert_eq!((run.offset, run.cells), (offset, width));
-            assert!(
-                run.font_index == FontIndex::DEFAULT,
-                "unexpected font fallback"
-            );
+            assert!(run.font_index == FontIndex::DEFAULT, "unexpected font fallback");
             let shaped = shaper.shape(&run).unwrap();
             assert_eq!(shaped.len(), glyphs.len(), "column {offset}");
             for (x, (cell, &glyph)) in shaped.iter().zip(glyphs).enumerate() {
@@ -120,18 +105,11 @@ fn terminal_runs_shape_with_position_independent_hashes() {
     };
 
     let cells: [_; 4] = std::array::from_fn(|y| CellView::from(&rows.cell_multi_array_lists()[y]));
-    let options = |row| RunOptions {
-        cells: &cells[row],
-        grid: &grid,
-        selection: None,
-        cursor_x: None,
-    };
+    let options =
+        |row| RunOptions { cells: &cells[row], grid: &grid, selection: None, cursor_x: None };
     let original = check_row(options(0), &[&[1, 226, 26]]);
     let shifted = check_row(
-        RunOptions {
-            selection: Some([2, 4]),
-            ..options(1)
-        },
+        RunOptions { selection: Some([2, 4]), ..options(1) },
         &[&[367, 367], &[1, 226, 26]],
     );
     let changed = check_row(options(2), &[&[1, 226, 27]]);
@@ -139,11 +117,7 @@ fn terminal_runs_shape_with_position_independent_hashes() {
     // Selection B..E, strikethrough CD, and cursor G split ABCDEFGH as:
     // A | B | CD | E | F | G | H.
     check_row(
-        RunOptions {
-            selection: Some([1, 4]),
-            cursor_x: Some(6),
-            ..options(3)
-        },
+        RunOptions { selection: Some([1, 4]), cursor_x: Some(6), ..options(3) },
         &[&[1], &[26], &[27, 33], &[37], &[56], &[57], &[64]],
     );
 

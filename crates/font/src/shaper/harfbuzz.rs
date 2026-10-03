@@ -38,12 +38,11 @@ impl Shaper {
     /// Ghostty: `Shaper.shape(run) -> []const Cell`
     pub fn shape(&mut self, run: &TextRun) -> Result<&[Cell], FontError> {
         if run.font_index.special().is_none() {
-            run.grid
-                .with_face(run.font_index, |face| -> Result<(), HarfbuzzError> {
-                    let hb_font = face.hb_font.as_ref().unwrap();
-                    harfbuzz::shape(hb_font, &mut self.buffer, self.features.as_slice())?;
-                    Ok(())
-                })??;
+            run.grid.with_face(run.font_index, |face| -> Result<(), HarfbuzzError> {
+                let hb_font = face.hb_font.as_ref().unwrap();
+                harfbuzz::shape(hb_font, &mut self.buffer, self.features.as_slice())?;
+                Ok(())
+            })??;
         }
 
         if self.buffer.is_empty() {

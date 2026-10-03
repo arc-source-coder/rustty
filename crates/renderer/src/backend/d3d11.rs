@@ -129,10 +129,7 @@ impl D3D11 {
             Height: 1,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
             Stereo: false.into(),
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
             BufferCount: 3,
             Scaling: DXGI_SCALING_STRETCH,
@@ -245,9 +242,7 @@ impl D3D11 {
         };
 
         // +1 for the background instance
-        self.resources
-            .vertex_buffers
-            .reserve(&self.gpu, count + 1)?;
+        self.resources.vertex_buffers.reserve(&self.gpu, count + 1)?;
         let instances = &self.resources.vertex_buffers.instances;
 
         unsafe {
@@ -380,16 +375,10 @@ impl D3D11 {
         unsafe { device.CreateRenderTargetView(&texture, None, Some(&raw mut output))? };
         let rtv = output.context("Failed to create RTV")?;
 
-        self.target = Some(RenderTarget {
-            rtv: rtv.clone(),
-            rtv_bind: [Some(rtv)],
-            height,
-            width,
-        });
-        self.resources.vs_globals.set(
-            |globals| &mut globals.position_scale,
-            [2.0 / width as f32, -2.0 / height as f32],
-        );
+        self.target = Some(RenderTarget { rtv: rtv.clone(), rtv_bind: [Some(rtv)], height, width });
+        self.resources
+            .vs_globals
+            .set(|globals| &mut globals.position_scale, [2.0 / width as f32, -2.0 / height as f32]);
         self.force_full_presentation = true;
         Ok(())
     }
@@ -401,39 +390,31 @@ impl D3D11 {
 
     #[inline]
     pub fn set_background(&mut self, color: [f32; 4]) -> bool {
-        self.resources
-            .ps_globals
-            .set(|globals| &mut globals.background_color, color)
+        self.resources.ps_globals.set(|globals| &mut globals.background_color, color)
     }
 
     #[inline]
     pub fn set_cell_size(&mut self, width: f32, height: f32) {
-        self.resources.ps_globals.set(
-            |globals| &mut globals.cell_size_inv,
-            [1.0 / width, 1.0 / height],
-        );
+        self.resources
+            .ps_globals
+            .set(|globals| &mut globals.cell_size_inv, [1.0 / width, 1.0 / height]);
     }
 
     #[inline]
     pub fn set_grid_size(&mut self, size: GridSize) {
-        self.resources.ps_globals.set(
-            |globals| &mut globals.grid_size,
-            [size.columns.into(), size.rows.into()],
-        );
+        self.resources
+            .ps_globals
+            .set(|globals| &mut globals.grid_size, [size.columns.into(), size.rows.into()]);
     }
 
     #[inline]
     pub fn set_text_rendering_params(&mut self, params: TextRenderingParams) {
-        self.resources
-            .vs_globals
-            .set(|globals| &mut globals.text_rendering_params, params);
+        self.resources.vs_globals.set(|globals| &mut globals.text_rendering_params, params);
     }
 
     pub fn set_cursor(&mut self, rect: Option<[f32; 4]>, text_color: [u8; 4]) {
         let Some(rect) = rect else {
-            self.resources
-                .cursor_globals
-                .set(|globals| &mut globals.cursor_rect, [0.0; 4]);
+            self.resources.cursor_globals.set(|globals| &mut globals.cursor_rect, [0.0; 4]);
             return;
         };
 
@@ -443,12 +424,7 @@ impl D3D11 {
             f32::from(text_color[2]) / 255.0,
         ];
         let alpha = f32::from(text_color[3]) / 255.0;
-        let color = [
-            straight[0] * alpha,
-            straight[1] * alpha,
-            straight[2] * alpha,
-            alpha,
-        ];
+        let color = [straight[0] * alpha, straight[1] * alpha, straight[2] * alpha, alpha];
         let params = &self.resources.vs_globals.globals.text_rendering_params;
         self.resources.cursor_globals.set(
             |globals| globals,
@@ -562,10 +538,7 @@ impl VertexBuffers {
         desc.ByteWidth = aligned_size;
 
         let mut vertex_buf = None;
-        unsafe {
-            gpu.device
-                .CreateBuffer(&raw const desc, None, Some(&raw mut vertex_buf))?
-        };
+        unsafe { gpu.device.CreateBuffer(&raw const desc, None, Some(&raw mut vertex_buf))? };
         let vertex_buf = vertex_buf.context("CreateBuffer returned null")?;
 
         self.instances = vertex_buf.clone();
@@ -608,12 +581,7 @@ impl<T> ConstantBuffer<T> {
         unsafe { device.CreateBuffer(&raw const desc, None, Some(&raw mut buffer))? };
         let buffer = buffer.context("CreateBuffer returned null")?;
 
-        Ok(Self {
-            buffer: buffer.clone(),
-            bind: [Some(buffer)],
-            globals,
-            dirty: true,
-        })
+        Ok(Self { buffer: buffer.clone(), bind: [Some(buffer)], globals, dirty: true })
     }
 
     #[inline]
@@ -805,12 +773,7 @@ impl Background {
         let mut srv = None;
         unsafe { device.CreateShaderResourceView(&buffer, None, Some(&raw mut srv))? };
 
-        Ok(Self {
-            buffer,
-            capacity: 1,
-            srv,
-            generation: 0,
-        })
+        Ok(Self { buffer, capacity: 1, srv, generation: 0 })
     }
 
     fn create_buffer(device: &ID3D11Device5, capacity: usize) -> Result<ID3D11Buffer> {
@@ -838,10 +801,7 @@ impl Background {
         let next = capacity.next_power_of_two();
         let buffer = Self::create_buffer(&gpu.device, next)?;
         let mut srv = None;
-        unsafe {
-            gpu.device
-                .CreateShaderResourceView(&buffer, None, Some(&raw mut srv))?
-        };
+        unsafe { gpu.device.CreateShaderResourceView(&buffer, None, Some(&raw mut srv))? };
 
         self.buffer = buffer;
         self.srv = srv;
@@ -859,13 +819,7 @@ impl Background {
         self.reserve(gpu, bg.len())?;
         unsafe {
             let mut mapped = std::mem::zeroed();
-            gpu.context.Map(
-                &self.buffer,
-                0,
-                D3D11_MAP_WRITE_DISCARD,
-                0,
-                Some(&raw mut mapped),
-            )?;
+            gpu.context.Map(&self.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&raw mut mapped))?;
             std::ptr::copy_nonoverlapping(bg.as_ptr(), mapped.pData.cast::<[u8; 4]>(), bg.len());
             gpu.context.Unmap(&self.buffer, 0);
         }

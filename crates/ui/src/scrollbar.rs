@@ -34,26 +34,11 @@ const VERTICAL_PADDING: Pixels = px(4.0);
 const HOVER_ZONE_WIDTH: Pixels = px(16.0);
 
 /// Thumb color (normal state, semi-transparent).
-const THUMB_COLOR: Hsla = Hsla {
-    h: 0.0,
-    s: 0.0,
-    l: 0.7,
-    a: 0.40,
-};
+const THUMB_COLOR: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.7, a: 0.40 };
 /// Thumb color when hovered.
-const THUMB_HOVER_COLOR: Hsla = Hsla {
-    h: 0.0,
-    s: 0.0,
-    l: 0.75,
-    a: 0.55,
-};
+const THUMB_HOVER_COLOR: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.75, a: 0.55 };
 /// Thumb color when being dragged.
-const THUMB_DRAG_COLOR: Hsla = Hsla {
-    h: 0.0,
-    s: 0.0,
-    l: 0.80,
-    a: 0.70,
-};
+const THUMB_DRAG_COLOR: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.80, a: 0.70 };
 
 /// A value that linearly interpolates from `from` to `to` over `duration`.
 /// Call `current()` each frame. Returns `true` from `is_animating` while
@@ -68,21 +53,11 @@ struct AnimatedFloat {
 
 impl AnimatedFloat {
     fn immediate(value: f32) -> Self {
-        Self {
-            from: value,
-            to: value,
-            start: Instant::now(),
-            duration: Duration::ZERO,
-        }
+        Self { from: value, to: value, start: Instant::now(), duration: Duration::ZERO }
     }
 
     fn transition(from: f32, to: f32, duration: Duration) -> Self {
-        Self {
-            from,
-            to,
-            start: Instant::now(),
-            duration,
-        }
+        Self { from, to, start: Instant::now(), duration }
     }
 
     /// Current interpolated value.
@@ -207,11 +182,8 @@ impl ScrollbarState {
             return;
         }
 
-        let new_state = if hovered {
-            InteractionState::Hovered
-        } else {
-            InteractionState::Inactive
-        };
+        let new_state =
+            if hovered { InteractionState::Hovered } else { InteractionState::Inactive };
 
         if self.interaction == new_state {
             return;
@@ -326,10 +298,8 @@ impl ScrollbarState {
         let thumb_bounds = Bounds::new(thumb_origin, thumb_size);
 
         // Track bounds: same width as thumb, full padded height.
-        let track_bounds = Bounds::new(
-            Point::new(thumb_left, track_top),
-            Size::new(width, track_height),
-        );
+        let track_bounds =
+            Bounds::new(Point::new(thumb_left, track_top), Size::new(width, track_height));
 
         // Hover zone: wider detection area anchored to the right edge.
         // Intentionally extends the full surface height so hover can wake the scrollbar
@@ -361,11 +331,7 @@ impl ScrollbarState {
         let thumb_start = (mouse_y - layout.track_top - grab_offset)
             .clamp(px(0.0), layout.track_height - layout.thumb_height);
         let travel = layout.track_height - layout.thumb_height;
-        let ratio = if travel > px(0.0) {
-            f32::from(thumb_start) / f32::from(travel)
-        } else {
-            0.0
-        };
+        let ratio = if travel > px(0.0) { f32::from(thumb_start) / f32::from(travel) } else { 0.0 };
         (ratio * layout.max_top_row as f32).round() as u64
     }
 }

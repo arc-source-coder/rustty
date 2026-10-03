@@ -44,12 +44,7 @@ impl Profile {
     /// Create a profile with a SpawnConfig derived from the shell kind.
     pub fn new(name: String, shell_kind: ShellKind) -> Self {
         let spawn_config = spawn_config_for_kind(&shell_kind);
-        Self {
-            id: ProfileId::new(),
-            name,
-            shell_kind,
-            spawn_config,
-        }
+        Self { id: ProfileId::new(), name, shell_kind, spawn_config }
     }
 
     pub fn profile_icon_kind(&self) -> ProfileIconKind {
@@ -71,10 +66,9 @@ impl ShellKind {
 // NOTE(renderer-refactor): Make this a method on ShellKind and remove SpawnConfig.
 fn spawn_config_for_kind(kind: &ShellKind) -> SpawnConfig {
     match kind {
-        ShellKind::PowerShell => SpawnConfig {
-            shell_program: "powershell.exe".into(),
-            ..Default::default()
-        },
+        ShellKind::PowerShell => {
+            SpawnConfig { shell_program: "powershell.exe".into(), ..Default::default() }
+        }
         ShellKind::Pwsh => SpawnConfig {
             #[cfg(windows)]
             shell_program: "pwsh.exe".into(),
@@ -82,10 +76,9 @@ fn spawn_config_for_kind(kind: &ShellKind) -> SpawnConfig {
             shell_program: "pwsh".into(),
             ..Default::default()
         },
-        ShellKind::CommandPrompt => SpawnConfig {
-            shell_program: "cmd.exe".into(),
-            ..Default::default()
-        },
+        ShellKind::CommandPrompt => {
+            SpawnConfig { shell_program: "cmd.exe".into(), ..Default::default() }
+        }
         ShellKind::Wsl { distro } => SpawnConfig {
             shell_program: "wsl.exe".into(),
             shell_args: vec!["-d".into(), distro.clone()],
@@ -93,10 +86,7 @@ fn spawn_config_for_kind(kind: &ShellKind) -> SpawnConfig {
         },
         ShellKind::UnixShell => {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-            SpawnConfig {
-                shell_program: shell,
-                ..Default::default()
-            }
+            SpawnConfig { shell_program: shell, ..Default::default() }
         }
         ShellKind::Custom => SpawnConfig::default(),
     }
@@ -114,12 +104,8 @@ mod tests {
 
     #[test]
     fn wsl_profile_has_distro_arg() {
-        let profile = Profile::new(
-            "Ubuntu (WSL)".into(),
-            ShellKind::Wsl {
-                distro: "Ubuntu".into(),
-            },
-        );
+        let profile =
+            Profile::new("Ubuntu (WSL)".into(), ShellKind::Wsl { distro: "Ubuntu".into() });
         assert_eq!(profile.spawn_config.shell_program, "wsl.exe");
         assert_eq!(
             profile.spawn_config.shell_args,
@@ -139,12 +125,8 @@ mod tests {
         assert_eq!(ShellKind::PowerShell, ShellKind::PowerShell);
         assert_ne!(ShellKind::PowerShell, ShellKind::Pwsh);
         assert_eq!(
-            ShellKind::Wsl {
-                distro: "Ubuntu".into()
-            },
-            ShellKind::Wsl {
-                distro: "Ubuntu".into()
-            },
+            ShellKind::Wsl { distro: "Ubuntu".into() },
+            ShellKind::Wsl { distro: "Ubuntu".into() },
         );
     }
 }

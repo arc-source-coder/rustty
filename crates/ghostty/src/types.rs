@@ -161,10 +161,7 @@ pub struct ScreenSize {
 
 impl ScreenSize {
     pub fn new(width: u32, height: u32) -> Option<Self> {
-        Some(Self {
-            width: NonZeroU32::new(width)?,
-            height: NonZeroU32::new(height)?,
-        })
+        Some(Self { width: NonZeroU32::new(width)?, height: NonZeroU32::new(height)? })
     }
 }
 
@@ -177,10 +174,7 @@ pub struct CellSize {
 
 impl CellSize {
     pub fn new(width: u32, height: u32) -> Option<Self> {
-        Some(Self {
-            width: NonZeroU32::new(width)?,
-            height: NonZeroU32::new(height)?,
-        })
+        Some(Self { width: NonZeroU32::new(width)?, height: NonZeroU32::new(height)? })
     }
 }
 

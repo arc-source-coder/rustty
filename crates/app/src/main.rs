@@ -63,10 +63,7 @@ fn main() {
             |display| display.bounds(),
         );
 
-        let target_size = size(
-            display_bounds.size.width * 0.6,
-            display_bounds.size.height * 0.7,
-        );
+        let target_size = size(display_bounds.size.width * 0.6, display_bounds.size.height * 0.7);
         let window_bounds =
             WindowBounds::Windowed(Bounds::centered_at(display_bounds.center(), target_size));
 
@@ -86,9 +83,7 @@ fn main() {
             let workspace_handle = workspace.downgrade();
             window.on_window_should_close(cx, move |window, cx| {
                 workspace_handle
-                    .update(cx, |workspace, cx| {
-                        workspace.handle_window_should_close(window, cx)
-                    })
+                    .update(cx, |workspace, cx| workspace.handle_window_should_close(window, cx))
                     .unwrap_or(true)
             });
 

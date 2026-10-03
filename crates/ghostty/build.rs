@@ -4,10 +4,8 @@ use std::process::Command;
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // zig/ lives at the workspace root, two levels above crates/ghostty/
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("unexpected crate layout");
+    let workspace_root =
+        manifest_dir.parent().and_then(|p| p.parent()).expect("unexpected crate layout");
 
     let zig_dir = workspace_root.join("zig");
 

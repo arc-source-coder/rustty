@@ -75,9 +75,7 @@ unsafe extern "C" fn clipboard_write_trampoline(
                 ClipboardWrite::Text(text.to_owned())
             }
         };
-        sink.event_tx
-            .try_send(TerminalEvent::ClipboardWrite(write))
-            .is_ok()
+        sink.event_tx.try_send(TerminalEvent::ClipboardWrite(write)).is_ok()
     })
     .unwrap_or(false)
 }
@@ -127,10 +125,7 @@ impl Terminal {
     #[inline]
     pub fn with_lock<R>(&self, f: impl for<'lock> FnOnce(&mut LockedTerminal<'lock>) -> R) -> R {
         unsafe { ghostty_terminal_lock(self.handle) };
-        let mut terminal = LockedTerminal {
-            terminal: self,
-            _not_send_or_sync: PhantomData,
-        };
+        let mut terminal = LockedTerminal { terminal: self, _not_send_or_sync: PhantomData };
         f(&mut terminal)
     }
 
@@ -141,10 +136,7 @@ impl Terminal {
         event_tx: async_channel::Sender<TerminalEvent>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> CallbackHandle {
-        let mut sink = Box::new(CallbackSink {
-            event_tx,
-            wake: Box::new(wake),
-        });
+        let mut sink = Box::new(CallbackSink { event_tx, wake: Box::new(wake) });
         let userdata = (&raw mut *sink).cast::<c_void>();
 
         unsafe {
@@ -158,10 +150,7 @@ impl Terminal {
             );
         }
 
-        CallbackHandle {
-            terminal: self.handle,
-            _sink: sink,
-        }
+        CallbackHandle { terminal: self.handle, _sink: sink }
     }
 
     /// Feed bytes from the pseudoterminal into Ghostty's VT parser.

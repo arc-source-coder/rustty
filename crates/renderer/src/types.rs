@@ -72,10 +72,7 @@ impl DamageTracker {
         let top = (row as i32).saturating_mul(self.cell_height as i32);
         let bottom = top.saturating_add(self.cell_height as i32);
 
-        let active = ActiveRow {
-            row,
-            bounds: DirtyRect { top, bottom },
-        };
+        let active = ActiveRow { row, bounds: DirtyRect { top, bottom } };
         &mut self.active.insert(active).bounds
     }
 
@@ -124,10 +121,7 @@ impl From<&QuadInstance> for DirtyRect {
     #[inline]
     fn from(instance: &QuadInstance) -> Self {
         let top = i32::from(instance.position[1]);
-        Self {
-            top,
-            bottom: top.saturating_add(i32::from(instance.data.size()[1])),
-        }
+        Self { top, bottom: top.saturating_add(i32::from(instance.data.size()[1])) }
     }
 }
 

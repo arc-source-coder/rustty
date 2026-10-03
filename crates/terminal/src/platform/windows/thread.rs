@@ -31,9 +31,7 @@ impl PlatformThread {
             attributes: [PsAttribute {
                 attribute: PS_ATTRIBUTE_TEB_ADDRESS,
                 size: std::mem::size_of::<*mut Teb>(),
-                value: PsAttributeValue {
-                    value_ptr: &mut teb as *mut _ as *mut c_void,
-                },
+                value: PsAttributeValue { value_ptr: &mut teb as *mut _ as *mut c_void },
                 return_length: std::ptr::null_mut(),
             }],
         };
@@ -54,9 +52,7 @@ impl PlatformThread {
             )
         };
         if status != STATUS_SUCCESS || handle.is_null() {
-            return Err(io::Error::other(format!(
-                "NtCreateThreadEx failed: 0x{status:08X}"
-            )));
+            return Err(io::Error::other(format!("NtCreateThreadEx failed: 0x{status:08X}")));
         }
 
         let id = if teb.is_null() {
@@ -72,9 +68,7 @@ impl PlatformThread {
     pub fn resume(&self) -> io::Result<()> {
         let status = unsafe { NtResumeThread(self.handle, std::ptr::null_mut()) };
         if status != STATUS_SUCCESS {
-            return Err(io::Error::other(format!(
-                "NtResumeThread failed: 0x{status:08X}"
-            )));
+            return Err(io::Error::other(format!("NtResumeThread failed: 0x{status:08X}")));
         }
         Ok(())
     }

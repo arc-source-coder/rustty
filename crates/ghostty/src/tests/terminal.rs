@@ -20,10 +20,7 @@ fn terminal(columns: u16, rows: u16) -> Terminal {
 }
 
 fn render_frame<'a>(terminal: &Terminal, state: &'a mut RenderState) -> RenderFrame<'a> {
-    terminal
-        .with_lock(|t| t.begin_update(state))
-        .expect("failed to update render state")
-        .finish()
+    terminal.with_lock(|t| t.begin_update(state)).expect("failed to update render state").finish()
 }
 
 fn scrollbar_info(terminal: &Terminal) -> ScrollbarInfo {
@@ -140,15 +137,7 @@ fn feed_delivers_events_in_order_and_wakes_once() {
         .as_bytes(),
     );
     let events: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
-    assert_eq!(
-        events,
-        [
-            Bell,
-            TitleChanged("alpha".into()),
-            Bell,
-            TitleChanged("β".into())
-        ]
-    );
+    assert_eq!(events, [Bell, TitleChanged("alpha".into()), Bell, TitleChanged("β".into())]);
     assert_eq!(wake_count.load(Ordering::Relaxed), 1);
 
     drop(callbacks);
@@ -161,10 +150,7 @@ fn feed_delivers_events_in_order_and_wakes_once() {
 fn selection_autoscroll_moves_viewport_until_release_and_is_consumed() {
     let terminal = terminal(8, 4);
     terminal.resize(TerminalDimensions {
-        grid: GridSize {
-            columns: 8,
-            rows: 4,
-        },
+        grid: GridSize { columns: 8, rows: 4 },
         screen: ScreenSize::new(80, 80).unwrap(),
         cell: CellSize::new(10, 20).unwrap(),
     });

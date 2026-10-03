@@ -81,12 +81,7 @@ impl Key {
 
         Self {
             descriptors: descriptors.into_boxed_slice(),
-            style_offsets: [
-                regular_offset,
-                bold_offset,
-                italic_offset,
-                bold_italic_offset,
-            ],
+            style_offsets: [regular_offset, bold_offset, italic_offset, bold_italic_offset],
             styles: [
                 true,
                 config.font_style_bold.is_enabled(),
@@ -99,11 +94,7 @@ impl Key {
 
     fn descriptors_for_style(&self, style: FontStyle) -> &[FontDescriptor] {
         let idx = style as usize;
-        let start = if idx == 0 {
-            0
-        } else {
-            self.style_offsets[idx - 1]
-        };
+        let start = if idx == 0 { 0 } else { self.style_offsets[idx - 1] };
         let end = self.style_offsets[idx];
         &self.descriptors[start..end]
     }
@@ -119,10 +110,7 @@ pub struct SharedGridSet {
 
 impl SharedGridSet {
     pub fn new() -> Result<Self> {
-        Ok(Self {
-            grids: FxHashMap::default(),
-            discovery: Arc::new(Discovery::new()?),
-        })
+        Ok(Self { grids: FxHashMap::default(), discovery: Arc::new(Discovery::new()?) })
     }
 
     /// Return a live grid for this configuration and size, or discover its fonts

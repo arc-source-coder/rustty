@@ -46,10 +46,7 @@ impl SetAxis for Vec<DWRITE_FONT_AXIS_VALUE> {
     fn set_axis(&mut self, tag: DWRITE_FONT_AXIS_TAG, value: f32) {
         match self.iter_mut().find(|axis| axis.axisTag == tag) {
             Some(axis) => axis.value = value,
-            None => self.push(DWRITE_FONT_AXIS_VALUE {
-                axisTag: tag,
-                value,
-            }),
+            None => self.push(DWRITE_FONT_AXIS_VALUE { axisTag: tag, value }),
         }
     }
 }

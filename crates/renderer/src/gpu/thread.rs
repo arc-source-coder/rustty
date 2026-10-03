@@ -61,9 +61,8 @@ impl RendererThread {
 
         let (tx, rx) = crossbeam_channel::bounded(1);
 
-        let handle = std::thread::Builder::new()
-            .name("terminal-renderer".into())
-            .spawn(move || {
+        let handle =
+            std::thread::Builder::new().name("terminal-renderer".into()).spawn(move || {
                 let renderer = Renderer::new(config, terminal, grid, ui_tx, options.focused)
                     .expect("Failed to start terminal renderer");
                 let render_state =
@@ -81,11 +80,7 @@ impl RendererThread {
 
         *options.swap_chain = Some(rx.recv().unwrap());
 
-        Ok(RendererThreadHandle {
-            wake_tx,
-            control_tx,
-            join_handle: Some(handle),
-        })
+        Ok(RendererThreadHandle { wake_tx, control_tx, join_handle: Some(handle) })
     }
 
     /// Returns `false` when the renderer should stop.
@@ -235,9 +230,8 @@ impl RendererThread {
             }
 
             if pending_wake || needs_redraw {
-                let update_result = self
-                    .renderer
-                    .update_frame(&mut self.render_state, self.cursor_blink_visible);
+                let update_result =
+                    self.renderer.update_frame(&mut self.render_state, self.cursor_blink_visible);
                 if let Err(e) = update_result {
                     log::error!("renderer frame update failed: {e:#}");
                     continue;

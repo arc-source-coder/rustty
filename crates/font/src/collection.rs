@@ -49,10 +49,7 @@ pub struct Collection {
 
 impl Collection {
     pub fn new(size: FontSize) -> Self {
-        Self {
-            faces: std::array::from_fn(|_| Vec::new()),
-            size,
-        }
+        Self { faces: std::array::from_fn(|_| Vec::new()), size }
     }
 
     #[inline]
@@ -93,8 +90,7 @@ impl Collection {
 
     #[inline]
     pub fn has_codepoint(&self, idx: FontIndex, cp: u32, p_mode: PresentationMode) -> bool {
-        self.entry(idx)
-            .is_some_and(|entry| entry.has_codepoint(cp, p_mode))
+        self.entry(idx).is_some_and(|entry| entry.has_codepoint(cp, p_mode))
     }
 
     #[inline]
@@ -110,9 +106,7 @@ impl Collection {
 
     #[inline]
     pub fn get_face(&self, idx: FontIndex) -> Result<&Face, FontError> {
-        self.entry(idx)
-            .map(|entry| &entry.face)
-            .ok_or(FontError::InvalidIndex)
+        self.entry(idx).map(|entry| &entry.face).ok_or(FontError::InvalidIndex)
     }
 
     /// Load the primary regular face and calculate grid metrics from it.

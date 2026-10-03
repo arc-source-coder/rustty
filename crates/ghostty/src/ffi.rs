@@ -213,10 +213,7 @@ impl PartialEq for StyleColor {
 impl Eq for StyleColor {}
 
 impl StyleColor {
-    pub const NONE: Self = Self {
-        payload: [MaybeUninit::new(0); 4],
-        tag: 0,
-    };
+    pub const NONE: Self = Self { payload: [MaybeUninit::new(0); 4], tag: 0 };
 
     /// Get the RGB payload from the `StyleColor`
     ///

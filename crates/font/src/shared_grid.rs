@@ -51,10 +51,7 @@ impl SharedGrid {
         codepoints.reserve(128);
 
         Ok(Self {
-            inner: RwLock::new(SharedGridInner {
-                resolver,
-                codepoints,
-            }),
+            inner: RwLock::new(SharedGridInner { resolver, codepoints }),
             metrics: font_metrics,
         })
     }
@@ -96,13 +93,9 @@ impl SharedGrid {
     /// Does not load the face. The closure must not request a grid
     /// write lock (for example, by resolving an uncached codepoint).
     #[inline]
-    pub fn with_face<T>(
-        &self,
-        index: FontIndex,
-        f: impl FnOnce(&Face) -> T,
-    ) -> Result<T, FontError> {
+    pub fn with_face<T>(&self, idx: FontIndex, f: impl FnOnce(&Face) -> T) -> Result<T, FontError> {
         let inner = self.inner.read();
-        let face = inner.resolver.collection.get_face(index)?;
+        let face = inner.resolver.collection.get_face(idx)?;
         Ok(f(face))
     }
 

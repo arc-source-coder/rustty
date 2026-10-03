@@ -8,10 +8,8 @@ fn main() {
     }
 
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(Path::parent)
-        .expect("unexpected crates/harfbuzz layout");
+    let workspace_root =
+        manifest_dir.parent().and_then(Path::parent).expect("unexpected crates/harfbuzz layout");
     let harfbuzz_dir = workspace_root.join("vendor/harfbuzz");
     let src_dir = harfbuzz_dir.join("src");
     let amalgamation = src_dir.join("harfbuzz-world.cc");
@@ -44,10 +42,7 @@ fn main() {
         .define("NDEBUG", "1");
 
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    assert_eq!(
-        target_env, "msvc",
-        "HarfBuzz is only built for Windows MSVC targets"
-    );
+    assert_eq!(target_env, "msvc", "HarfBuzz is only built for Windows MSVC targets");
 
     let target_triple = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("x86_64") => "x86_64-pc-windows-msvc",

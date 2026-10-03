@@ -32,12 +32,7 @@ use crate::font::utils;
 use crate::backend::d3d11::GpuContext;
 use font::backend::dwrite::face::Face;
 
-const WHITE: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 1.0,
-};
+const WHITE: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
 
 pub struct Options {
     pub x_dpi: u16,
@@ -187,8 +182,7 @@ impl D2D {
             }
         };
 
-        self.atlas_grayscale
-            .upload(region, bitmap.pixels, bitmap.stride)?;
+        self.atlas_grayscale.upload(region, bitmap.pixels, bitmap.stride)?;
 
         let glyph = Glyph {
             height: region.height,
@@ -321,12 +315,8 @@ impl D2D {
 
     fn calculate_bounds(&self, glyph_run: &DWRITE_GLYPH_RUN) -> Result<(D2D_RECT_F, bool)> {
         const DEFAULT_BASELINE: Vector2 = Vector2 { X: 0.0, Y: 0.0 };
-        const EMPTY_GLYPH_BOUNDS: D2D_RECT_F = D2D_RECT_F {
-            left: f32::MAX,
-            top: f32::MAX,
-            right: f32::MIN,
-            bottom: f32::MIN,
-        };
+        const EMPTY_GLYPH_BOUNDS: D2D_RECT_F =
+            D2D_RECT_F { left: f32::MAX, top: f32::MAX, right: f32::MIN, bottom: f32::MIN };
 
         let mut bounds: D2D_RECT_F = EMPTY_GLYPH_BOUNDS;
         let Ok(enumerator) = self.create_color_enumerator(glyph_run, DEFAULT_BASELINE) else {
@@ -349,10 +339,8 @@ impl D2D {
             }
             let glyph_run = unsafe { &*color_glyph_run_ptr };
 
-            let baseline = Vector2 {
-                X: glyph_run.Base.baselineOriginX,
-                Y: glyph_run.Base.baselineOriginY,
-            };
+            let baseline =
+                Vector2 { X: glyph_run.Base.baselineOriginX, Y: glyph_run.Base.baselineOriginY };
             let color_glyph_bounds = unsafe {
                 self.ctx.GetGlyphRunWorldBounds(
                     baseline,

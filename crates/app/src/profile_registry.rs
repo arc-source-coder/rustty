@@ -12,18 +12,12 @@ pub struct ProfileRegistry {
 
 impl ProfileRegistry {
     pub fn new(profiles: Vec<Profile>, default_profile_id: ProfileId) -> Self {
-        assert!(
-            !profiles.is_empty(),
-            "ProfileRegistry must have at least one profile"
-        );
+        assert!(!profiles.is_empty(), "ProfileRegistry must have at least one profile");
         assert!(
             profiles.iter().any(|p| p.id == default_profile_id),
             "default_profile_id must reference an existing profile"
         );
-        Self {
-            profiles,
-            default_profile_id,
-        }
+        Self { profiles, default_profile_id }
     }
 
     /// All available profiles.
@@ -33,8 +27,7 @@ impl ProfileRegistry {
 
     /// The default profile (used for new tabs).
     pub fn default_profile(&self) -> &Profile {
-        self.profile_by_id(self.default_profile_id)
-            .expect("default profile missing from registry")
+        self.profile_by_id(self.default_profile_id).expect("default profile missing from registry")
     }
 
     /// Look up a profile by ID.
