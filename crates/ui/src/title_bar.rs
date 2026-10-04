@@ -4,7 +4,7 @@ use gpui::{
     white,
 };
 
-use crate::components::theme::ActiveTheme;
+use crate::components::theme::Theme;
 
 pub const TITLE_BAR_HEIGHT_WINDOWED: Pixels = px(40.);
 pub const TITLE_BAR_HEIGHT_MAXIMIZED: Pixels = px(36.);
@@ -104,7 +104,7 @@ impl WindowsCaptionButton {
 impl RenderOnce for WindowsCaptionButton {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let is_close = matches!(self, Self::Close);
-        let theme = cx.theme().colors;
+        let theme = Theme::get(cx).colors;
 
         let (hover_bg, hover_fg, active_bg) = if is_close {
             (rgba(0xe81120e6).into(), white(), rgba(0xe81120cc).into())

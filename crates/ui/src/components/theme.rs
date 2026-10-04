@@ -73,14 +73,3 @@ impl Theme {
         cx.try_global::<Theme>().copied().unwrap_or_else(Self::light)
     }
 }
-
-/// Extension trait to access the active theme from any context.
-pub trait ActiveTheme {
-    fn theme(&self) -> Theme;
-}
-
-impl ActiveTheme for App {
-    fn theme(&self) -> Theme {
-        Theme::get(self)
-    }
-}
