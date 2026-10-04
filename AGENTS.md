@@ -1,17 +1,21 @@
-Rustty is a fast, clean, GPU-accelerated terminal emulator for Windows using GPUI + ghostty. UI is inspired by Windows Terminal. Titlebar tabs + (later) Windows Fluent Design styled context/dropdown menus. Terminal rendering is done by a GPU-accelerated render (Rust) built on Ghostty's RenderState API. The text pipeline is built on DirectWrite (crates/font/). 
+Kairo is a fast, GPU-accelerated terminal emulator for Windows using GPUI + Ghostty.
+
+- The UI is inspired by Windows Terminal and Windows Fluent Design, as well as Ghostty.
+- The terminal is rendered by a D3D11 Rust renderer (crates/renderer/) built on Ghostty's RenderState API.
+- The font pipeline is built on Harfbuzz, DirectWrite, and Direct2D (crates/font/).
+- Kairo does not use Windows ConPTY. It uses `zconpty` (vendored at `vendor/zconpty/`).
 
 ### Notes
 
-- The opensrc/ directory is gitignored. Because of this, grep/glob will not find contents of repos/packages inside opensrc. When using searching repos/packages inside opensrc/, explicitly set the directory parameter of the Grep tool to opensrc/.
-- Whenever something from the docs looks unclear / seems off, look at (or spawn finder agents to look at) what Ghostty does (`zig/ghostty/`), so we can either directly do what they do or replicate the semantics. Please stop and mention these to the user whenever you encounter them.
+- `opensrc/` is gitignored - Grep/Glob will not find contents of repos/packages inside the directory by defa. When using searching inside opensrc/, explicitly set the directory parameter of the Grep tool to opensrc/.
 
 ### Reference
 
-1. `vendor/zed/crates/gpui` - Source code for GPUI.
-2. `zig/ghostty/` - The Ghostty source code (latest - version 1.3 using Zig 0.15.2). Inspiration for UI / feature design, architecture, and data models. Vendored as a submodule. The Rust wrapper around the zig shim is located at `crates/ghostty/`. The zig shim itself is located at `zig/` to wrap the vendored Ghostty source.
-3. `opensrc/repos/MitchForest/rust-terminal` - Implementation of a terminal emulator using GPUI - inspired by Ghostty's UI style. Code organization is excellent.
-4. `opensrc/repos/microsoft/terminal` - Windows Terminal source code. Refer when working with Windows-specific code such as the Windows PTY backend / DirectWrite-specific code.
-5. `vendor/zed/crates/terminal` - Core business logic for Zed's terminal - based off the Alacritty crate.
-6. `vendor/zed/crates/terminal_view` - UI layer / Rendering through GPUI for the Alacritty-based terminal.
-7. `vendor/zed/crates/ui` - General Zed UI components for reference.
-8. `opensrc/packages/microsoft/windows-rs` - `windows` / `windows-sys` crate source code.
+1. `vendor/zed/crates/gpui` - Source code for GPUI. Also see `vendor/zed/crates/gpui_*` when needed.
+2. `zig/ghostty/` - Ghostty source code. Inspiration for UI / feature design, architecture, and data models. Vendored as a submodule. The Rust wrapper around the Zig shim is located at `crates/ghostty/`. The shim itself is located at `zig/` to wrap the vendored Ghostty source.
+3. `opensrc/repos/microsoft/terminal` - Windows Terminal and OpenConsole source code. Refer when working with Windows-specific code such as Windows PTY semantics or D3D11/DirectWrite-specific code.
+4. `vendor/zed/crates/ui` - General Zed UI components for reference.
+5. `opensrc/packages/microsoft/windows-rs` - `windows` / `windows-sys` crate source code.
+6. `opensrc/repos/microsoft/microsoft-ui-xaml` - WinUI 3 source code.
+7. `vendor/harfbuzz/` - HarfBuzz source code vendored as a submodule.
+8. `vendor/zed/crates/ui` - General Zed UI components for reference.
