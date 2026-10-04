@@ -101,7 +101,7 @@ impl SharedGrid {
 
     #[inline]
     pub fn has_codepoint(&self, idx: FontIndex, cp: u32, p: Option<Presentation>) -> bool {
-        let p_mode = p.map_or(PresentationMode::Any, |m| PresentationMode::Explicit(m));
+        let p_mode = p.map_or(PresentationMode::Any, PresentationMode::Explicit);
 
         let inner = self.inner.read();
         inner.resolver.collection.has_codepoint(idx, cp, p_mode)

@@ -20,12 +20,12 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory7, IDWriteFontFace, IDWriteRenderingParams1, IDWriteRenderingParams3,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
-use windows::core::Interface;
+use windows::core::Interface as _;
 use windows_numerics::Vector2;
 
 use crate::atlas_allocator::AtlasFullError;
 
-use crate::font::atlas::{Atlas, AtlasFormat, AtlasOptions, AtlasResources, AtlasStatus};
+use crate::font::atlas::{Atlas, AtlasFormat, AtlasOptions, AtlasStatus, Atlases};
 use crate::font::types::{Glyph, RenderOptions, TextRenderingParams};
 use crate::font::utils;
 
@@ -33,6 +33,8 @@ use crate::backend::d3d11::GpuContext;
 use font::backend::dwrite::face::Face;
 
 const WHITE: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+
+type AtlasResult<T> = anyhow::Result<ControlFlow<AtlasFormat, T>>;
 
 pub struct Options {
     pub x_dpi: u16,
@@ -81,10 +83,10 @@ impl D2D {
             y_dpi: options.y_dpi,
             format: AtlasFormat::Grayscale,
         };
-        let atlas_grayscale = Atlas::new(&gpu, &ctx, options)?;
+        let atlas_grayscale = Atlas::new(gpu, &ctx, options)?;
 
         options.format = AtlasFormat::Bgra;
-        let atlas_color = Atlas::new(&gpu, &ctx, options)?;
+        let atlas_color = Atlas::new(gpu, &ctx, options)?;
 
         let mut text_rendering_params = TextRenderingParams::default();
 
@@ -111,8 +113,7 @@ impl D2D {
         };
         unsafe { ctx.SetTextRenderingParams(&params) };
 
-        let color = WHITE;
-        let brush = unsafe { ctx.CreateSolidColorBrush(&raw const color, None)? };
+        let brush = unsafe { ctx.CreateSolidColorBrush(&WHITE, None)? };
 
         Ok(Self {
             atlas_grayscale,
@@ -149,17 +150,14 @@ impl D2D {
     }
 
     #[inline]
-    pub fn atlases(&self) -> (&AtlasResources, &AtlasResources) {
-        (&self.atlas_grayscale.resources, &self.atlas_color.resources)
+    pub fn atlases(&self) -> Atlases<'_> {
+        Atlases { grayscale: &self.atlas_grayscale.resources, color: &self.atlas_color.resources }
     }
 
     /// Upload a sprite into the grayscale atlas.
     /// `Break` means the atlas was cleared: invalidate its cached glyphs and
     /// retained quads, then retry the frame. `Continue` returns the glyph metadata.
-    pub fn upload_sprite(
-        &mut self,
-        bitmap: &SpriteBitmap<'_>,
-    ) -> Result<ControlFlow<AtlasFormat, Glyph>> {
+    pub fn upload_sprite(&mut self, bitmap: &SpriteBitmap<'_>) -> AtlasResult<Glyph> {
         if bitmap.width == 0 || bitmap.height == 0 {
             return Ok(ControlFlow::Continue(Glyph::default()));
         }
@@ -177,8 +175,7 @@ impl D2D {
                 }
                 self.current_target = None;
 
-                let region = self.atlas_grayscale.reserve(width, height)?;
-                region
+                self.atlas_grayscale.reserve(width, height)?
             }
         };
 
@@ -205,7 +202,7 @@ impl D2D {
         gid: u32,
         face: &Face,
         options: RenderOptions,
-    ) -> Result<ControlFlow<AtlasFormat, Glyph>> {
+    ) -> AtlasResult<Glyph> {
         // For any valid font, Harfbuzz will produce a index <= u16::MAX
         let glyph_idx = u16::try_from(gid)?;
 
@@ -278,8 +275,8 @@ impl D2D {
         }
 
         let origin = Vector2 {
-            X: (region.x as i32 - bounds_left) as f32,
-            Y: (region.y as i32 - bounds_top) as f32,
+            X: (i32::from(region.x) - bounds_left) as f32,
+            Y: (i32::from(region.y) - bounds_top) as f32,
         };
 
         match is_color_glyph {
@@ -296,7 +293,7 @@ impl D2D {
             true => {
                 let result = self.draw_color_glyph_run(origin, &glyph_run);
                 unsafe { self.brush.SetColor(&WHITE) };
-                result?
+                result?;
             }
         }
 
@@ -395,13 +392,13 @@ impl D2D {
 
             // 0xFFFF is DWRITE_NO_PALETTE_INDEX. If a specific
             // color is not provided, the default brush is used.
-            if color_glyph_run.Base.paletteIndex != 0xFFFF {
+            if color_glyph_run.Base.paletteIndex == 0xFFFF {
+                unsafe { self.brush.SetColor(&WHITE) };
+            } else {
                 let color_ref = &color_glyph_run.Base.runColor;
                 // Safety: DWRITE_COLOR_F and D2D1_COLOR_F have the same layout
                 let color = color_ref as *const DWRITE_COLOR_F as *const D2D1_COLOR_F;
                 unsafe { self.brush.SetColor(color) };
-            } else {
-                unsafe { self.brush.SetColor(&WHITE) };
             }
 
             let baseline = Vector2 {
@@ -410,7 +407,7 @@ impl D2D {
             };
 
             match color_glyph_run.glyphImageFormat {
-                DWRITE_GLYPH_IMAGE_FORMATS_NONE => continue,
+                DWRITE_GLYPH_IMAGE_FORMATS_NONE => {}
                 DWRITE_GLYPH_IMAGE_FORMATS_PNG
                 | DWRITE_GLYPH_IMAGE_FORMATS_JPEG
                 | DWRITE_GLYPH_IMAGE_FORMATS_TIFF
@@ -418,7 +415,7 @@ impl D2D {
                     self.ctx.DrawColorBitmapGlyphRun(
                         color_glyph_run.glyphImageFormat,
                         baseline,
-                        &color_glyph_run.Base.glyphRun,
+                        &raw const color_glyph_run.Base.glyphRun,
                         color_glyph_run.measuringMode,
                         D2D1_COLOR_BITMAP_GLYPH_SNAP_OPTION_DEFAULT,
                     );
@@ -426,7 +423,7 @@ impl D2D {
                 DWRITE_GLYPH_IMAGE_FORMATS_SVG => unsafe {
                     self.ctx.DrawSvgGlyphRun(
                         baseline,
-                        &color_glyph_run.Base.glyphRun,
+                        &raw const color_glyph_run.Base.glyphRun,
                         &self.brush,
                         None,
                         0,
@@ -436,7 +433,7 @@ impl D2D {
                 _ => unsafe {
                     self.ctx.DrawGlyphRun(
                         baseline,
-                        &color_glyph_run.Base.glyphRun,
+                        &raw const color_glyph_run.Base.glyphRun,
                         Some(color_glyph_run.Base.glyphRunDescription),
                         &self.brush,
                         color_glyph_run.measuringMode,

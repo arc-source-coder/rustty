@@ -131,7 +131,7 @@ fn decode_utf16le(bytes: &[u8]) -> Option<String> {
     }
 
     let u16s: Vec<u16> =
-        bytes.chunks_exact(2).map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]])).collect();
+        bytes.as_chunks::<2>().0.iter().map(|&chunk| u16::from_le_bytes(chunk)).collect();
 
     Some(String::from_utf16_lossy(&u16s))
 }
@@ -151,7 +151,7 @@ fn parse_wsl_quiet_output(output: &str) -> Vec<String> {
         .lines()
         .map(|line| line.trim().trim_matches('\0').trim())
         .filter(|line| !line.is_empty())
-        .map(|line| line.to_string())
+        .map(str::to_string)
         .collect()
 }
 

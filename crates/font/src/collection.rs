@@ -112,10 +112,8 @@ impl Collection {
     /// Load the primary regular face and calculate grid metrics from it.
     pub fn update_metrics(&mut self) -> Result<FontMetrics, FontError> {
         self.ensure_loaded(FontIndex::DEFAULT)?;
-
         let face_metrics = self.get_face(FontIndex::DEFAULT)?.get_metrics()?;
-        let font_metrics = FontMetrics::calculate(&face_metrics);
 
-        Ok(font_metrics)
+        Ok(FontMetrics::calculate(&face_metrics))
     }
 }

@@ -25,7 +25,7 @@ use windows::Win32::Graphics::Dxgi::IDXGISwapChain2;
 #[cfg(target_os = "windows")]
 use crate::backend::d3d11::D3D11 as Backend;
 use crate::backend::d3d11::{BackendOptions, GpuContext};
-use crate::font::atlas::{AtlasFormat, AtlasResources};
+use crate::font::atlas::{AtlasFormat, Atlases};
 
 #[cfg(target_os = "windows")]
 use crate::font::d2d::D2D as FontBackend;
@@ -492,12 +492,11 @@ impl Renderer {
                 'glyphs: {
                     let shaped_cells = match shaper_cells {
                         Some(shaper_cells) => shaper_cells,
-                        None => match self.shaper_cache.get(run.hash) {
-                            Some(shaped) => {
+                        None => {
+                            if let Some(shaped) = self.shaper_cache.get(run.hash) {
                                 shaper_cells = Some(shaped);
                                 shaped
-                            }
-                            None => {
+                            } else {
                                 // Shape the new cells
                                 let new_cells = self.shaper.shape(run)?;
                                 // Cache the new shaped run
@@ -506,7 +505,7 @@ impl Renderer {
                                 shaper_cells = Some(new_cells);
                                 new_cells
                             }
-                        },
+                        }
                     };
                     let shaped_len = shaped_cells.len();
                     if shaped_len == 0 {
@@ -663,7 +662,7 @@ impl Renderer {
     }
 
     pub fn wait_for_frame(&self) {
-        self.backend.wait_for_frame()
+        self.backend.wait_for_frame();
     }
 
     pub fn draw_frame(&mut self) -> Result<FrameOutcome> {
@@ -708,7 +707,7 @@ impl Rasterizer {
         self.font_backend.finalize()
     }
 
-    fn atlases(&self) -> (&AtlasResources, &AtlasResources) {
+    fn atlases(&self) -> Atlases<'_> {
         self.font_backend.atlases()
     }
 
@@ -768,10 +767,10 @@ impl Rasterizer {
             return Ok(ControlFlow::Continue(()));
         }
 
-        let pos_x = (x * metrics.cell_width) as i32 + glyph.offset_x + shaper_offset[0] as i32;
+        let pos_x = (x * metrics.cell_width) as i32 + glyph.offset_x + i32::from(shaper_offset[0]);
         // Shaper offset is subtracted because it is from font/shaper space.
         // Glyph offsets are in screen space (Postive Y -> move down).
-        let pos_y = (y * metrics.cell_height) as i32 + glyph.offset_y - shaper_offset[1] as i32;
+        let pos_y = (y * metrics.cell_height) as i32 + glyph.offset_y - i32::from(shaper_offset[1]);
 
         let position = [pos_x as i16, pos_y as i16];
         let glyph_size = [glyph.width, glyph.height];

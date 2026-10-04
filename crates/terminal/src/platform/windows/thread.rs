@@ -31,16 +31,16 @@ impl PlatformThread {
             attributes: [PsAttribute {
                 attribute: PS_ATTRIBUTE_TEB_ADDRESS,
                 size: std::mem::size_of::<*mut Teb>(),
-                value: PsAttributeValue { value_ptr: &mut teb as *mut _ as *mut c_void },
+                value: PsAttributeValue { value_ptr: (&raw mut teb).cast() },
                 return_length: std::ptr::null_mut(),
             }],
         };
 
         let status = unsafe {
             NtCreateThreadEx(
-                &mut handle,
+                &raw mut handle,
                 MAXIMUM_ALLOWED,
-                &attrs,
+                &raw const attrs,
                 (-1isize) as usize as Handle,
                 entry,
                 context,
@@ -48,7 +48,7 @@ impl PlatformThread {
                 0,
                 0,
                 0,
-                &mut attr_list as *mut _ as *mut c_void,
+                (&raw mut attr_list).cast(),
             )
         };
         if status != STATUS_SUCCESS || handle.is_null() {
@@ -88,7 +88,8 @@ impl PlatformThread {
     pub fn join(mut self) {
         if !self.handle.is_null() {
             let infinite_timeout: i64 = i64::MIN;
-            let _ = unsafe { NtWaitForSingleObject(self.handle, FALSE, &infinite_timeout) };
+            let _ =
+                unsafe { NtWaitForSingleObject(self.handle, FALSE, &raw const infinite_timeout) };
             let _ = unsafe { NtClose(self.handle) };
             self.handle = std::ptr::null_mut();
         }
@@ -123,7 +124,7 @@ pub fn set_current_thread_name(name: &str) {
         let _ = NtSetInformationThread(
             current_thread,
             THREAD_INFORMATION_CLASS_NAME_INFORMATION,
-            &mut u as *mut _ as *const c_void,
+            (&raw mut u).cast(),
             std::mem::size_of::<UnicodeString>() as u32,
         );
     }

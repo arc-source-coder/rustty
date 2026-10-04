@@ -1,7 +1,7 @@
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ParentElement, Pixels, RenderOnce,
-    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowControlArea, div, px, rgba,
-    white,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    StatefulInteractiveElement as _, Styled as _, TitlebarOptions, Window, WindowControlArea, div,
+    px, rgba, white,
 };
 
 use crate::components::theme::Theme;
@@ -15,7 +15,7 @@ pub fn windows_symbol_font() -> String {
     use windows::Wdk::System::SystemServices::RtlGetVersion;
 
     let mut version = unsafe { std::mem::zeroed() };
-    let status = unsafe { RtlGetVersion(&mut version) };
+    let status = unsafe { RtlGetVersion(&raw mut version) };
 
     if status.is_ok() && version.dwBuildNumber >= 22000 {
         "Segoe Fluent Icons".to_string()

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use gpui::ExternalSurfaceState;
 use std::fmt;
 use windows::Win32::Foundation::{HANDLE, HMODULE, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT};
@@ -29,7 +29,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::Threading::WaitForSingleObjectEx;
 use windows::core::{Interface as _, s};
 
-use crate::font::atlas::AtlasResources;
+use crate::font::atlas::Atlases;
 use crate::font::types::TextRenderingParams;
 use crate::types::{DirtyRect, FrameOutcome, GridSize, QuadInstance};
 
@@ -75,7 +75,7 @@ impl PresentationCtx {
         if flwo.is_invalid() {
             return None;
         }
-        Some(Self { swap_chain, flwo })
+        Some(Self { flwo, swap_chain })
     }
 }
 
@@ -272,15 +272,14 @@ impl D3D11 {
     }
 
     pub fn sync_background(&mut self, colors: &[[u8; 4]], generation: u64) -> Result<()> {
-        let ctx = &self.gpu;
-        self.resources.background.sync(ctx, colors, generation)
+        self.resources.background.sync(&self.gpu, colors, generation)
     }
 
-    pub fn draw(&mut self, atlases: (&AtlasResources, &AtlasResources), instances: usize) {
+    pub fn draw(&mut self, atlases: Atlases<'_>, instances: usize) {
         let ctx = &self.gpu.context;
 
         // Atlases are owned by the rasterizer, so detect replacement here.
-        let atlas_slots = [&atlases.0.srv, &atlases.1.srv];
+        let atlas_slots = [&atlases.grayscale.srv, &atlases.color.srv];
         for (index, (bound, next)) in self.atlas_bind.iter_mut().zip(atlas_slots).enumerate() {
             let bound_ptr = bound.as_ref().map(|srv| srv.as_raw());
             let next_ptr = next.as_ref().map(|srv| srv.as_raw());
@@ -289,7 +288,7 @@ impl D3D11 {
                 continue;
             }
 
-            *bound = next.clone();
+            bound.clone_from(next);
             let idx = index as u32 + 1;
             unsafe { ctx.PSSetShaderResources(idx, Some(std::slice::from_ref(bound))) };
         }
@@ -366,7 +365,7 @@ impl D3D11 {
                 height,
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
-            )?
+            )?;
         };
 
         let texture: ID3D11Texture2D = unsafe { self.presentation.swap_chain.GetBuffer(0) }?;
@@ -558,15 +557,15 @@ struct VsGlobals {
 }
 
 struct ConstantBuffer<T> {
-    buffer: ID3D11Buffer,
-    bind: [Option<ID3D11Buffer>; 1],
     globals: T,
     dirty: bool,
+    buffer: ID3D11Buffer,
+    bind: [Option<ID3D11Buffer>; 1],
 }
 
 impl<T> ConstantBuffer<T> {
     fn new(device: &ID3D11Device5, globals: T) -> Result<Self> {
-        const { assert!(size_of::<T>() % 16 == 0) };
+        const { assert!(size_of::<T>().is_multiple_of(16)) };
 
         let desc = D3D11_BUFFER_DESC {
             ByteWidth: size_of::<T>() as u32,
@@ -581,7 +580,7 @@ impl<T> ConstantBuffer<T> {
         unsafe { device.CreateBuffer(&raw const desc, None, Some(&raw mut buffer))? };
         let buffer = buffer.context("CreateBuffer returned null")?;
 
-        Ok(Self { buffer: buffer.clone(), bind: [Some(buffer)], globals, dirty: true })
+        Ok(Self { globals, dirty: true, buffer: buffer.clone(), bind: [Some(buffer)] })
     }
 
     #[inline]
@@ -785,7 +784,7 @@ impl Background {
         desc.ByteWidth = byte_width.max(4);
 
         let mut buffer = None;
-        unsafe { device.CreateBuffer(&desc, None, Some(&mut buffer))? };
+        unsafe { device.CreateBuffer(&raw const desc, None, Some(&raw mut buffer))? };
         buffer.context("CreateBuffer background cells returned null")
     }
 

@@ -165,9 +165,9 @@ impl RendererThread {
                 }
             }
 
-            while let Ok(_) = wake_rx.try_recv() {
+            while wake_rx.try_recv().is_ok() {
                 self.reset_cursor_blink();
-                pending_wake = true
+                pending_wake = true;
             }
 
             while let Ok(message) = control_rx.try_recv() {

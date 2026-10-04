@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use config::Config;
-use gpui::prelude::FluentBuilder;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext, Context, DragMoveEvent, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, PromptLevel, Render, ScrollHandle,
-    StatefulInteractiveElement, Styled, Subscription, Window, WindowControlArea, div, px, rgba,
+    AnyElement, App, AppContext as _, Context, DragMoveEvent, Entity, FocusHandle, Focusable as _,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, PromptLevel, Render,
+    ScrollHandle, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    WindowControlArea, div, px, rgba,
 };
 use renderer::{TerminalView, TerminalViewEvent};
 use ui::title_bar::WindowsWindowControls;

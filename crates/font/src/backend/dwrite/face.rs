@@ -60,7 +60,7 @@ impl Face {
             self.face.GetGlyphIndices(ptr, len, gid.as_mut_ptr()).ok()?;
         }
 
-        NonZeroU32::new(gid[0] as u32)
+        NonZeroU32::new(u32::from(gid[0]))
     }
 
     /// Returns true if the given glyph ID is colorized.
@@ -120,7 +120,7 @@ impl Face {
                 codepoints.as_ptr(),
                 ASCII_COUNT as u32,
                 glyph_indices.as_mut_ptr(),
-            )?
+            )?;
         };
 
         let mut glyph_metrics = [DWRITE_GLYPH_METRICS::default(); ASCII_COUNT];

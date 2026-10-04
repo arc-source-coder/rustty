@@ -580,7 +580,7 @@ impl TerminalSession {
                 return SessionEffect::None;
             }
 
-            let page_rows = self.dimensions.grid.rows.saturating_sub(1).max(1) as i32;
+            let page_rows = i32::from(self.dimensions.grid.rows.saturating_sub(1).max(1));
             ScrollOp::Delta(direction * page_rows)
         };
         match self.io_notify.try_send(IoMsg::Scroll(scroll_operation)) {
@@ -600,7 +600,7 @@ impl Drop for TerminalSession {
                 .name("terminal-io-reaper".into())
                 .spawn(move || {
                     io_notify.send_lossless(IoMsg::Close);
-                    handle.join()
+                    handle.join();
                 })
                 .inspect_err(|e| log::warn!("failed to spawn terminal-io-reaper: {e}"));
         }

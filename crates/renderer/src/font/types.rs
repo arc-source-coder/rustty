@@ -1,7 +1,6 @@
+use crate::font::atlas::AtlasFormat;
 use font::metrics::FontMetrics;
 use font::types::FontIndex;
-
-use crate::font::atlas::AtlasFormat;
 
 /// Parameters used to match DirectWrite's grayscale text rendering in the shader
 #[repr(C)]

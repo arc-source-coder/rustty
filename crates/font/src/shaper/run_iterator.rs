@@ -8,6 +8,8 @@ use utils::asserts::assert;
 
 const KITTY_UNICODE_PLACEHOLDER: u32 = 0x10EEEE;
 
+type FontResult<T> = Result<T, FontError>;
+
 /// Hook that writes into the Shaper's owned buffers.
 /// Ghostty: `Shaper.RunIteratorHook`.
 pub trait RunIteratorHook {
@@ -41,10 +43,7 @@ impl<'a> RunIterator<'a> {
         Self { options, max, i: 0 }
     }
 
-    pub fn next(
-        &mut self,
-        hooks: &mut impl RunIteratorHook,
-    ) -> Result<Option<TextRun<'a>>, FontError> {
+    pub fn next(&mut self, hooks: &mut impl RunIteratorHook) -> FontResult<Option<TextRun<'a>>> {
         let cells = self.options.cells.raw_cells();
         let styles = self.options.cells.styles();
         let grapheme_views = self.options.cells.graphemes();
@@ -141,7 +140,7 @@ impl<'a> RunIterator<'a> {
                     };
                     if current_comparable_style != comparable_style(candidate_style) {
                         break;
-                    };
+                    }
                 }
             }
 
@@ -211,7 +210,7 @@ impl<'a> RunIterator<'a> {
 
             // If this is a fallback character, add it and
             // continue instead of adding the entire grapheme.
-            if let Some(codepoint) = fallback.map(|cp| u32::from(cp)) {
+            if let Some(codepoint) = fallback.map(u32::from) {
                 Self::add_codepoint(&mut hasher, codepoint, cluster);
                 hooks.add_codepoint(codepoint, cluster);
                 j += 1;

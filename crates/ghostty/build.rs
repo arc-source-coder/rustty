@@ -25,7 +25,7 @@ fn main() {
     ];
 
     for path in zig_paths {
-        println!("cargo:rerun-if-changed={}", &path.display());
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 
     let zig_version = Command::new("zig").arg("version").output().ok();

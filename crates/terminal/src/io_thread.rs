@@ -162,7 +162,7 @@ impl IoThread {
         let ticks = d
             .as_secs()
             .saturating_mul(10_000_000)
-            .saturating_add((d.subsec_nanos() / 100) as u64)
+            .saturating_add(u64::from(d.subsec_nanos() / 100))
             .min(i64::MAX as u64) as i64;
         if ticks == 0 { 0 } else { -ticks }
     }

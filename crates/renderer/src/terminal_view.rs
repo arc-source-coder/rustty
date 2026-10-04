@@ -194,7 +194,7 @@ impl TerminalView {
                 this.update(cx, |this, cx| {
                     match update {
                         RendererUiUpdate::Scrollbar(info) => {
-                            this.scrollbar.update(cx, |state, _cx| state.sync_snapshot(info))
+                            this.scrollbar.update(cx, |state, _cx| state.sync_snapshot(info));
                         }
                     }
                     cx.notify();
@@ -509,10 +509,10 @@ impl Render for TerminalView {
                 // This event should be sent to the PTY
                 this.session.send_key_down_event(event);
                 // Consuming the key prevents Windows from also generating WM_CHAR.
-                cx.stop_propagation()
+                cx.stop_propagation();
             }))
             .on_key_up(cx.listener(|this, event: &KeyUpEvent, _window, _cx| {
-                this.session.send_key_up_event(event)
+                this.session.send_key_up_event(event);
             }))
             .on_modifiers_changed(cx.listener(|this, event, _window, _cx| {
                 this.session.send_modifier_change(event);

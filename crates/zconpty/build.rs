@@ -36,10 +36,10 @@ fn main() {
     ];
 
     for path in conpty_paths {
-        println!("cargo:rerun-if-changed={}", &path.display());
+        println!("cargo:rerun-if-changed={}", path.display());
     }
     for path in zig_paths {
-        println!("cargo:rerun-if-changed={}", &path.display());
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());

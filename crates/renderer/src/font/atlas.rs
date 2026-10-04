@@ -27,18 +27,13 @@ const MAX_COLOR_ATLAS_SIZE: u16 = 4096;
 
 /// Pixel format of the atlas texture data.
 /// Ghostty reference: `Atlas.Format`.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
 pub enum AtlasFormat {
     /// 1 byte per pixel — grayscale text glyphs.
+    #[default]
     Grayscale,
     /// 4 bytes per pixel — color emoji / color glyphs.
     Bgra,
-}
-
-impl Default for AtlasFormat {
-    fn default() -> Self {
-        Self::Grayscale
-    }
 }
 
 pub struct Atlas {
@@ -143,7 +138,7 @@ impl Atlas {
                 0,
                 &old_texture,
                 0,
-                Some(&source_box),
+                Some(&raw const source_box),
             );
         }
 
@@ -161,6 +156,11 @@ pub struct AtlasOptions {
     pub format: AtlasFormat,
 }
 
+pub struct Atlases<'a> {
+    pub grayscale: &'a AtlasResources,
+    pub color: &'a AtlasResources,
+}
+
 pub struct AtlasResources {
     bitmap: ID2D1Bitmap1,
     texture: ID3D11Texture2D,
@@ -175,8 +175,8 @@ impl AtlasResources {
         };
 
         let desc = D3D11_TEXTURE2D_DESC {
-            Width: options.side as u32,
-            Height: options.side as u32,
+            Width: u32::from(options.side),
+            Height: u32::from(options.side),
             MipLevels: 1,
             ArraySize: 1,
             Format: dxgi_format,
@@ -187,14 +187,13 @@ impl AtlasResources {
             MiscFlags: 0,
         };
 
-        let device = &gpu.device;
         let mut texture = None;
-        unsafe { device.CreateTexture2D(&raw const desc, None, Some(&raw mut texture))? };
+        unsafe { gpu.device.CreateTexture2D(&raw const desc, None, Some(&raw mut texture))? };
         // TODO: Replace with a typed error
         let texture = texture.ok_or_else(|| anyhow!("CreateTexture2D returned null"))?;
 
         let mut view = None;
-        unsafe { device.CreateShaderResourceView(&texture, None, Some(&raw mut view))? };
+        unsafe { gpu.device.CreateShaderResourceView(&texture, None, Some(&raw mut view))? };
 
         let surface: IDXGISurface = texture.cast()?;
 
@@ -203,8 +202,8 @@ impl AtlasResources {
                 format: dxgi_format,
                 alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
             },
-            dpiX: options.x_dpi as f32,
-            dpiY: options.y_dpi as f32,
+            dpiX: f32::from(options.x_dpi),
+            dpiY: f32::from(options.y_dpi),
             bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
             colorContext: ManuallyDrop::new(None),
         };

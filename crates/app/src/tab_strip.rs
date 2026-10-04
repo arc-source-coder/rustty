@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use gpui::prelude::FluentBuilder;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Background, Bounds, Corners, Div, FillOptions, FontWeight, Hsla, IntoElement,
-    ParentElement, PathBuilder, PathStyle, Pixels, ScrollHandle, Styled, Window, canvas, div, fill,
-    point, px, rgba, size,
+    ParentElement as _, PathBuilder, PathStyle, Pixels, ScrollHandle, Styled as _, Window, canvas,
+    div, fill, point, px, rgba, size,
 };
 
 use crate::profile::ProfileIconKind;
