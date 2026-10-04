@@ -4,7 +4,6 @@ use gpui::{
     white,
 };
 
-use crate::components::styled::h_flex;
 use crate::components::theme::ActiveTheme;
 
 pub const TITLE_BAR_HEIGHT_WINDOWED: Pixels = px(40.);
@@ -113,7 +112,11 @@ impl RenderOnce for WindowsCaptionButton {
             (theme.secondary_hover, theme.foreground, theme.muted)
         };
 
-        h_flex()
+        // div().flex().flex_row().items_center() is horizontal flex
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
             .id(self.id())
             .justify_center()
             .content_center()
